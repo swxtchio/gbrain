@@ -261,12 +261,22 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
 export function collectMarkdownFiles(dir: string): string[] {
   const files: string[] = [];
 
+  // Local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain to a fixed set
+  // of top-level directory names. Used when the brain root sits above
+  // many sibling repos and we only want a subset (e.g. swx-srtx,swx-spp).
+  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
+  const topDirsAllow = topDirsEnv
+    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
+    : null;
+
   function walk(d: string) {
     for (const entry of readdirSync(d)) {
       // Skip hidden dirs and .raw dirs
       if (entry.startsWith('.')) continue;
       // Skip node_modules
       if (entry === 'node_modules') continue;
+      // Local patch: at the brain root, restrict to GBRAIN_TOP_DIRS allowlist.
+      if (topDirsAllow && d === dir && !topDirsAllow.has(entry)) continue;
 
       const full = join(d, entry);
       let stat;

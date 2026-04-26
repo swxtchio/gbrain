@@ -92,6 +92,13 @@ function walkSyncableFiles(
   cb: (path: string, content: string) => void,
   strategy: 'markdown' | 'code' | 'auto',
 ): void {
+  // Local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain to a fixed set
+  // of top-level directory names. Used when the brain root sits above
+  // many sibling repos and we only want a subset (e.g. swx-srtx,swx-spp).
+  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
+  const topDirsAllow = topDirsEnv
+    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
+    : null;
   const stack: string[] = [repoRoot];
   while (stack.length > 0) {
     const dir = stack.pop()!;
@@ -105,6 +112,8 @@ function walkSyncableFiles(
       const name = typeof entry.name === 'string' ? entry.name : String(entry.name);
       // Skip hidden dirs, .git, node_modules (same rules isSyncable applies).
       if (name.startsWith('.') || name === 'node_modules' || name === 'ops') continue;
+      // Local patch: at the brain root, restrict to GBRAIN_TOP_DIRS allowlist.
+      if (topDirsAllow && dir === repoRoot && entry.isDirectory() && !topDirsAllow.has(name)) continue;
       const fullPath = `${dir}/${name}`;
       if (entry.isDirectory()) {
         stack.push(fullPath);
