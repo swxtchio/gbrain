@@ -623,8 +623,13 @@ export function makeResolver(
 
       const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);
 
-      // Step 1: already a slug? (dir/name shape, lowercase, hyphenated)
-      if (/^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(trimmed)) {
+      // Step 1: already a slug?
+      // Local patch: the original regex /^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/
+      // capped slugs at depth-2 (people/alice shape), so multi-domain brains
+      // with domain/docs/page slugs always fell through to fuzzy matching,
+      // which can't match a slug against a page title. Trust engine.getPage()
+      // to be the authority — it returns null for invalid slugs anyway.
+      if (trimmed.includes('/')) {
         const page = await engine.getPage(trimmed);
         if (page) {
           cache.set(cacheKey, trimmed);
