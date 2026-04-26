@@ -220,7 +220,10 @@ export async function extractLinksFromFile(
       async resolve(name: string, dirHint?: string | string[]): Promise<string | null> {
         if (!name) return null;
         const trimmed = name.trim();
-        if (/^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(trimmed) && allSlugs.has(trimmed)) {
+        // Local patch: regex previously capped slugs at depth-2 (people/alice
+        // shape), which broke multi-domain brains where slugs are
+        // domain/docs/page. Trust allSlugs.has() to filter garbage.
+        if (allSlugs.has(trimmed)) {
           return trimmed;
         }
         const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);

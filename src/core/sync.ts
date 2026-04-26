@@ -192,7 +192,9 @@ export function isSyncable(path: string, opts: SyncableOptions = {}): boolean {
   if (path.includes('.raw/')) return false;
 
   // Skip meta files that aren't pages
-  const skipFiles = ['schema.md', 'index.md', 'log.md', 'README.md'];
+  // Local patch: index.md removed from skip list — multi-domain brains use
+  // index.md as the canonical entry page for a folder, not as noise.
+  const skipFiles = ['schema.md', 'log.md', 'README.md'];
   const basename = path.split('/').pop() || '';
   if (skipFiles.includes(basename)) return false;
 
