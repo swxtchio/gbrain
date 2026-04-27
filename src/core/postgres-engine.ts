@@ -685,11 +685,15 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Chunks
-  async upsertChunks(slug: string, chunks: ChunkInput[]): Promise<void> {
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string }): Promise<void> {
     const sql = this.sql;
 
-    // Get page_id
-    const pages = await sql`SELECT id FROM pages WHERE slug = ${slug}`;
+    // SWX: scope the page_id lookup to opts.sourceId when provided.
+    // Without this, multi-source brains pick an arbitrary same-slug page
+    // and write chunks to the wrong row (cross-model review consensus P1).
+    const pages = opts?.sourceId
+      ? await sql`SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId}`
+      : await sql`SELECT id FROM pages WHERE slug = ${slug}`;
     if (pages.length === 0) throw new Error(`Page not found: ${slug}`);
     const pageId = pages[0].id;
 
@@ -819,12 +823,22 @@ export class PostgresEngine implements BrainEngine {
     return rows as unknown as StaleChunkRow[];
   }
 
-  async deleteChunks(slug: string): Promise<void> {
+  async deleteChunks(slug: string, opts?: { sourceId?: string }): Promise<void> {
     const sql = this.sql;
-    await sql`
-      DELETE FROM content_chunks
-      WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug})
-    `;
+    // SWX: scope to active source. The bare subquery returns multiple
+    // rows in a multi-source brain and either errors or silently deletes
+    // chunks across every source sharing this slug.
+    if (opts?.sourceId) {
+      await sql`
+        DELETE FROM content_chunks
+        WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId})
+      `;
+    } else {
+      await sql`
+        DELETE FROM content_chunks
+        WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug})
+      `;
+    }
   }
 
   // Links
@@ -1180,11 +1194,13 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Tags
-  async addTag(slug: string, tag: string): Promise<void> {
+  async addTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
     const sql = this.sql;
-    // Verify page exists before attempting insert (ON CONFLICT DO NOTHING
-    // swallows the "already tagged" case, but we still need to detect missing pages)
-    const page = await sql`SELECT id FROM pages WHERE slug = ${slug}`;
+    // SWX: scope to active source. Without this, multi-source brains
+    // either tag an arbitrary same-slug page or error on multi-row return.
+    const page = opts?.sourceId
+      ? await sql`SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId}`
+      : await sql`SELECT id FROM pages WHERE slug = ${slug}`;
     if (page.length === 0) throw new Error(`addTag failed: page "${slug}" not found`);
     await sql`
       INSERT INTO tags (page_id, tag)
@@ -1193,22 +1209,38 @@ export class PostgresEngine implements BrainEngine {
     `;
   }
 
-  async removeTag(slug: string, tag: string): Promise<void> {
+  async removeTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
     const sql = this.sql;
-    await sql`
-      DELETE FROM tags
-      WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug})
-        AND tag = ${tag}
-    `;
+    // SWX: scope to active source. See addTag note above.
+    if (opts?.sourceId) {
+      await sql`
+        DELETE FROM tags
+        WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId})
+          AND tag = ${tag}
+      `;
+    } else {
+      await sql`
+        DELETE FROM tags
+        WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug})
+          AND tag = ${tag}
+      `;
+    }
   }
 
-  async getTags(slug: string): Promise<string[]> {
+  async getTags(slug: string, opts?: { sourceId?: string }): Promise<string[]> {
     const sql = this.sql;
-    const rows = await sql`
-      SELECT tag FROM tags
-      WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug})
-      ORDER BY tag
-    `;
+    // SWX: scope to active source.
+    const rows = opts?.sourceId
+      ? await sql`
+          SELECT tag FROM tags
+          WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId})
+          ORDER BY tag
+        `
+      : await sql`
+          SELECT tag FROM tags
+          WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug})
+          ORDER BY tag
+        `;
     return rows.map((r) => r.tag as string);
   }
 
@@ -1323,14 +1355,24 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Versions
-  async createVersion(slug: string): Promise<PageVersion> {
+  async createVersion(slug: string, opts?: { sourceId?: string }): Promise<PageVersion> {
     const sql = this.sql;
-    const rows = await sql`
-      INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
-      SELECT id, compiled_truth, frontmatter
-      FROM pages WHERE slug = ${slug}
-      RETURNING *
-    `;
+    // SWX: scope to active source. The SELECT inside the INSERT would
+    // otherwise capture the wrong page's snapshot in a multi-source brain
+    // — every same-slug page on every source would record an extra version.
+    const rows = opts?.sourceId
+      ? await sql`
+          INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
+          SELECT id, compiled_truth, frontmatter
+          FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId}
+          RETURNING *
+        `
+      : await sql`
+          INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
+          SELECT id, compiled_truth, frontmatter
+          FROM pages WHERE slug = ${slug}
+          RETURNING *
+        `;
     if (rows.length === 0) throw new Error(`createVersion failed: page "${slug}" not found`);
     return rows[0] as unknown as PageVersion;
   }

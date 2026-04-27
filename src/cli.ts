@@ -434,14 +434,24 @@ async function handleCliOnly(command: string, args: string[]) {
         const { runImport } = await import('./commands/import.ts');
         // SWX: resolve --source flag or .gbrain-source dotfile so a
         // bare `gbrain import <dir>` honors the active source the same
-        // way `gbrain sync` does.
-        const explicitSource = args.find((a, i) => args[i - 1] === '--source') || null;
-        let sourceId: string | undefined;
-        if (explicitSource || process.env.GBRAIN_SOURCE) {
-          const { resolveSourceId } = await import('./core/source-resolver.ts');
-          sourceId = await resolveSourceId(engine, explicitSource);
-        }
-        await runImport(engine, args, { sourceId });
+        // way `gbrain sync` does. Cross-model review (codex+gemini)
+        // flagged two bugs in the prior shape:
+        //   1. The `--source <id>` pair stayed in args, so runImport's
+        //      first-non-flag-arg lookup grabbed the source name as the
+        //      import directory.
+        //   2. The dotfile-only path (.gbrain-source present, no --source
+        //      flag, no env var) skipped resolveSourceId entirely.
+        // Fix: always invoke the resolver (it walks the dotfile chain
+        // and returns null when nothing claims the cwd), and strip the
+        // --source <id> pair from args before forwarding to runImport.
+        const sourceFlagIdx = args.indexOf('--source');
+        const explicitSource = sourceFlagIdx !== -1 ? (args[sourceFlagIdx + 1] || null) : null;
+        const { resolveSourceId } = await import('./core/source-resolver.ts');
+        const sourceId = await resolveSourceId(engine, explicitSource);
+        const cleanedArgs = sourceFlagIdx !== -1
+          ? [...args.slice(0, sourceFlagIdx), ...args.slice(sourceFlagIdx + 2)]
+          : args;
+        await runImport(engine, cleanedArgs, { sourceId: sourceId ?? undefined });
         break;
       }
       case 'export': {

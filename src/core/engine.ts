@@ -131,7 +131,7 @@ export interface BrainEngine {
   getEmbeddingsByChunkIds(ids: number[]): Promise<Map<number, Float32Array>>;
 
   // Chunks
-  upsertChunks(slug: string, chunks: ChunkInput[]): Promise<void>;
+  upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string }): Promise<void>;
   getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]>;
   /**
    * Count chunks across the entire brain where embedded_at IS NULL.
@@ -148,7 +148,7 @@ export interface BrainEngine {
    * Bounded by an internal LIMIT of 100000 to mirror listPages.
    */
   listStaleChunks(): Promise<StaleChunkRow[]>;
-  deleteChunks(slug: string): Promise<void>;
+  deleteChunks(slug: string, opts?: { sourceId?: string }): Promise<void>;
 
   // Links
   /**
@@ -229,9 +229,9 @@ export interface BrainEngine {
   findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>>;
 
   // Tags
-  addTag(slug: string, tag: string): Promise<void>;
-  removeTag(slug: string, tag: string): Promise<void>;
-  getTags(slug: string): Promise<string[]>;
+  addTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void>;
+  removeTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void>;
+  getTags(slug: string, opts?: { sourceId?: string }): Promise<string[]>;
 
   // Timeline
   /**
@@ -259,7 +259,7 @@ export interface BrainEngine {
   getRawData(slug: string, source?: string): Promise<RawData[]>;
 
   // Versions
-  createVersion(slug: string): Promise<PageVersion>;
+  createVersion(slug: string, opts?: { sourceId?: string }): Promise<PageVersion>;
   getVersions(slug: string): Promise<PageVersion[]>;
   revertToVersion(slug: string, versionId: number): Promise<void>;
 

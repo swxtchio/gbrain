@@ -268,8 +268,12 @@ export async function importFromContent(
   }
 
   // Transaction wraps all DB writes
+  // SWX: every slug-keyed mutation in this block needs the same sourceId
+  // scope so multi-source brains don't tag/chunk/version the wrong page.
+  // Cross-model review (codex+gemini) consensus P1.
+  const srcOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
   await engine.transaction(async (tx) => {
-    if (existing) await tx.createVersion(slug);
+    if (existing) await tx.createVersion(slug, srcOpts);
 
     await tx.putPage(slug, {
       type: parsed.type,
@@ -284,20 +288,20 @@ export async function importFromContent(
     });
 
     // Tag reconciliation: remove stale, add current
-    const existingTags = await tx.getTags(slug);
+    const existingTags = await tx.getTags(slug, srcOpts);
     const newTags = new Set(parsed.tags);
     for (const old of existingTags) {
-      if (!newTags.has(old)) await tx.removeTag(slug, old);
+      if (!newTags.has(old)) await tx.removeTag(slug, old, srcOpts);
     }
     for (const tag of parsed.tags) {
-      await tx.addTag(slug, tag);
+      await tx.addTag(slug, tag, srcOpts);
     }
 
     if (chunks.length > 0) {
-      await tx.upsertChunks(slug, chunks);
+      await tx.upsertChunks(slug, chunks, srcOpts);
     } else {
       // Content is empty — delete stale chunks so they don't ghost in search results
-      await tx.deleteChunks(slug);
+      await tx.deleteChunks(slug, srcOpts);
     }
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
@@ -487,8 +491,11 @@ export async function importCodeFile(
   }
 
   // Store
+  // SWX: scope every slug-keyed mutation to the active source. See the
+  // markdown path above for the same pattern.
+  const srcOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
   await engine.transaction(async (tx) => {
-    if (existing) await tx.createVersion(slug);
+    if (existing) await tx.createVersion(slug, srcOpts);
 
     await tx.putPage(slug, {
       type: 'code' as PageType,
@@ -504,13 +511,13 @@ export async function importCodeFile(
       source_id: opts.sourceId,
     });
 
-    await tx.addTag(slug, 'code');
-    await tx.addTag(slug, lang);
+    await tx.addTag(slug, 'code', srcOpts);
+    await tx.addTag(slug, lang, srcOpts);
 
     if (chunks.length > 0) {
-      await tx.upsertChunks(slug, chunks);
+      await tx.upsertChunks(slug, chunks, srcOpts);
     } else {
-      await tx.deleteChunks(slug);
+      await tx.deleteChunks(slug, srcOpts);
     }
   });
 

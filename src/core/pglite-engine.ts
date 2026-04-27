@@ -553,9 +553,11 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Chunks
-  async upsertChunks(slug: string, chunks: ChunkInput[]): Promise<void> {
-    // Get page_id
-    const pageResult = await this.db.query('SELECT id FROM pages WHERE slug = $1', [slug]);
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string }): Promise<void> {
+    // SWX: scope page_id lookup to opts.sourceId. See postgres-engine.ts for rationale.
+    const pageResult = opts?.sourceId
+      ? await this.db.query('SELECT id FROM pages WHERE slug = $1 AND source_id = $2', [slug, opts.sourceId])
+      : await this.db.query('SELECT id FROM pages WHERE slug = $1', [slug]);
     if (pageResult.rows.length === 0) throw new Error(`Page not found: ${slug}`);
     const pageId = (pageResult.rows[0] as { id: number }).id;
 
@@ -683,12 +685,21 @@ export class PGLiteEngine implements BrainEngine {
     return rows as unknown as StaleChunkRow[];
   }
 
-  async deleteChunks(slug: string): Promise<void> {
-    await this.db.query(
-      `DELETE FROM content_chunks
-       WHERE page_id = (SELECT id FROM pages WHERE slug = $1)`,
-      [slug]
-    );
+  async deleteChunks(slug: string, opts?: { sourceId?: string }): Promise<void> {
+    // SWX: scope to active source. See postgres-engine.ts for rationale.
+    if (opts?.sourceId) {
+      await this.db.query(
+        `DELETE FROM content_chunks
+         WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = $2)`,
+        [slug, opts.sourceId]
+      );
+    } else {
+      await this.db.query(
+        `DELETE FROM content_chunks
+         WHERE page_id = (SELECT id FROM pages WHERE slug = $1)`,
+        [slug]
+      );
+    }
   }
 
   // Links
@@ -1028,31 +1039,57 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Tags
-  async addTag(slug: string, tag: string): Promise<void> {
-    await this.db.query(
-      `INSERT INTO tags (page_id, tag)
-       SELECT id, $2 FROM pages WHERE slug = $1
-       ON CONFLICT (page_id, tag) DO NOTHING`,
-      [slug, tag]
-    );
+  async addTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
+    // SWX: scope to active source. See postgres-engine.ts for rationale.
+    if (opts?.sourceId) {
+      await this.db.query(
+        `INSERT INTO tags (page_id, tag)
+         SELECT id, $2 FROM pages WHERE slug = $1 AND source_id = $3
+         ON CONFLICT (page_id, tag) DO NOTHING`,
+        [slug, tag, opts.sourceId]
+      );
+    } else {
+      await this.db.query(
+        `INSERT INTO tags (page_id, tag)
+         SELECT id, $2 FROM pages WHERE slug = $1
+         ON CONFLICT (page_id, tag) DO NOTHING`,
+        [slug, tag]
+      );
+    }
   }
 
-  async removeTag(slug: string, tag: string): Promise<void> {
-    await this.db.query(
-      `DELETE FROM tags
-       WHERE page_id = (SELECT id FROM pages WHERE slug = $1)
-         AND tag = $2`,
-      [slug, tag]
-    );
+  async removeTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
+    if (opts?.sourceId) {
+      await this.db.query(
+        `DELETE FROM tags
+         WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = $3)
+           AND tag = $2`,
+        [slug, tag, opts.sourceId]
+      );
+    } else {
+      await this.db.query(
+        `DELETE FROM tags
+         WHERE page_id = (SELECT id FROM pages WHERE slug = $1)
+           AND tag = $2`,
+        [slug, tag]
+      );
+    }
   }
 
-  async getTags(slug: string): Promise<string[]> {
-    const { rows } = await this.db.query(
-      `SELECT tag FROM tags
-       WHERE page_id = (SELECT id FROM pages WHERE slug = $1)
-       ORDER BY tag`,
-      [slug]
-    );
+  async getTags(slug: string, opts?: { sourceId?: string }): Promise<string[]> {
+    const { rows } = opts?.sourceId
+      ? await this.db.query(
+          `SELECT tag FROM tags
+           WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = $2)
+           ORDER BY tag`,
+          [slug, opts.sourceId]
+        )
+      : await this.db.query(
+          `SELECT tag FROM tags
+           WHERE page_id = (SELECT id FROM pages WHERE slug = $1)
+           ORDER BY tag`,
+          [slug]
+        );
     return (rows as { tag: string }[]).map(r => r.tag);
   }
 
@@ -1167,14 +1204,23 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Versions
-  async createVersion(slug: string): Promise<PageVersion> {
-    const { rows } = await this.db.query(
-      `INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
-       SELECT id, compiled_truth, frontmatter
-       FROM pages WHERE slug = $1
-       RETURNING *`,
-      [slug]
-    );
+  async createVersion(slug: string, opts?: { sourceId?: string }): Promise<PageVersion> {
+    // SWX: scope to active source. See postgres-engine.ts for rationale.
+    const { rows } = opts?.sourceId
+      ? await this.db.query(
+          `INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
+           SELECT id, compiled_truth, frontmatter
+           FROM pages WHERE slug = $1 AND source_id = $2
+           RETURNING *`,
+          [slug, opts.sourceId]
+        )
+      : await this.db.query(
+          `INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
+           SELECT id, compiled_truth, frontmatter
+           FROM pages WHERE slug = $1
+           RETURNING *`,
+          [slug]
+        );
     return rows[0] as unknown as PageVersion;
   }
 
