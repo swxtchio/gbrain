@@ -32,7 +32,13 @@ export async function findCodeDef(
   opts: { limit?: number; language?: string } = {},
 ): Promise<CodeDefResult[]> {
   const limit = opts.limit ?? 20;
-  const DEF_TYPES = ['function', 'class', 'interface', 'type', 'enum', 'struct', 'trait', 'module', 'contract'];
+  // Local patch: tree-sitter's C grammar tags function definitions as
+  // 'declaration' (no separate function_definition node), so without this
+  // every C function is invisible to code-def even though the chunker
+  // extracts them correctly. Trade-off: prototypes/forward-decls in headers
+  // surface alongside definitions — acceptable for navigation, the file:line
+  // makes the difference obvious.
+  const DEF_TYPES = ['function', 'class', 'interface', 'type', 'enum', 'struct', 'trait', 'module', 'contract', 'declaration'];
   const params: unknown[] = [symbol, limit];
   let whereLang = '';
   if (opts.language) {
