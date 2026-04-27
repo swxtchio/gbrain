@@ -32,13 +32,23 @@ export async function findCodeDef(
   opts: { limit?: number; language?: string } = {},
 ): Promise<CodeDefResult[]> {
   const limit = opts.limit ?? 20;
-  // Local patch: tree-sitter's C grammar tags function definitions as
-  // 'declaration' (no separate function_definition node), so without this
-  // every C function is invisible to code-def even though the chunker
-  // extracts them correctly. Trade-off: prototypes/forward-decls in headers
-  // surface alongside definitions — acceptable for navigation, the file:line
-  // makes the difference obvious.
-  const DEF_TYPES = ['function', 'class', 'interface', 'type', 'enum', 'struct', 'trait', 'module', 'contract', 'declaration'];
+  // Local patch: tree-sitter emits a wider set of symbol_type tags than
+  // code-def's original allowlist accepted. The chunker patches in this
+  // fork (see SWX: fix C/C++ tree-sitter chunker) now extract names for
+  // typedefs, struct/union/enum specifiers, preproc #defines, and C
+  // function declarators — all of which had been getting filtered out
+  // here. Adding them so code-def surfaces every symbol the chunker
+  // bothered to tag. Symbol_type values use a space (e.g. "type definition")
+  // because normalizeSymbolType replaces underscores with spaces.
+  const DEF_TYPES = [
+    'function', 'class', 'interface', 'type', 'enum', 'struct', 'trait', 'module', 'contract',
+    'declaration',         // C function definitions/prototypes (tree-sitter-c tags as 'declaration')
+    'type definition',     // C/C++ typedefs (tree-sitter-c 'type_definition' node)
+    'struct specifier',    // C/C++ named struct definitions
+    'union specifier',     // C/C++ named union definitions
+    'enum specifier',      // C/C++ named enum definitions
+    'preproc def',         // C/C++ #define macros
+  ];
   const params: unknown[] = [symbol, limit];
   let whereLang = '';
   if (opts.language) {
