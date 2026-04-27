@@ -306,8 +306,17 @@ const TOP_LEVEL_TYPES: Partial<Record<SupportedCodeLanguage, Set<string>>> = {
   cpp: new Set([
     'function_definition', 'class_specifier', 'struct_specifier',
     'namespace_definition', 'declaration', 'template_declaration',
+    // Local patch: typedefs are 'type_definition' in tree-sitter-c/cpp,
+    // not 'declaration' — without this every typedef'd struct/union
+    // (i.e. ~all idiomatic C type aliases) is invisible to the chunker.
+    'type_definition', 'enum_specifier', 'union_specifier',
   ]),
-  c: new Set(['function_definition', 'struct_specifier', 'declaration', 'preproc_def', 'preproc_include']),
+  c: new Set([
+    'function_definition', 'struct_specifier', 'declaration',
+    'preproc_def', 'preproc_include',
+    // Local patch — see cpp note above. Plus enum/union for symmetry.
+    'type_definition', 'enum_specifier', 'union_specifier',
+  ]),
   php: new Set([
     'function_definition', 'class_declaration', 'interface_declaration',
     'method_declaration', 'trait_declaration',
@@ -323,6 +332,29 @@ const TOP_LEVEL_TYPES: Partial<Record<SupportedCodeLanguage, Set<string>>> = {
   bash: new Set(['function_definition', 'variable_assignment']),
   solidity: new Set(['contract_declaration', 'function_definition', 'modifier_definition', 'event_definition']),
 };
+
+// Local patch: nodes whose contents should be unwrapped when scanning
+// for top-level semantic nodes. Real-world C/C++ wraps everything in
+// header guards or extern "C" linkage blocks, so the chunker has to
+// recurse through these to find the actual function_definitions inside.
+const PASSTHROUGH_TYPES = new Set([
+  'preproc_ifdef',          // C/C++ header guards (#ifndef X #define X ... #endif)
+  'preproc_if',             // #if FOO ... #endif
+  'preproc_else',           // #else branch
+  'linkage_specification',  // extern "C" { ... }
+  'declaration_list',       // body of linkage_specification or namespace
+  'translation_unit',       // root in some grammars
+]);
+
+function collectSemanticNodes(node: any, topLevelTypes: Set<string>, out: any[]): void {
+  for (const child of node.namedChildren) {
+    if (topLevelTypes.has(child.type)) {
+      out.push(child);
+    } else if (PASSTHROUGH_TYPES.has(child.type)) {
+      collectSemanticNodes(child, topLevelTypes, out);
+    }
+  }
+}
 
 const BODY_NODE_TYPES = new Set([
   'statement_block',
@@ -505,9 +537,16 @@ export async function chunkCodeTextFull(
 
     const root = tree.rootNode;
     const topLevelTypes = TOP_LEVEL_TYPES[language];
-    const semanticNodes = topLevelTypes
-      ? root.namedChildren.filter((n: any) => topLevelTypes.has(n.type))
-      : [];
+    // Local patch: C/C++ headers and units almost always wrap their
+    // contents in pass-through nodes — header guards (preproc_ifdef),
+    // conditional compilation (preproc_if), or extern "C" {} blocks
+    // (linkage_specification). Without recursing through them, every
+    // real-world header has zero top-level semantic nodes and falls
+    // through to the recursive text chunker, losing all symbol metadata.
+    const semanticNodes: any[] = [];
+    if (topLevelTypes) {
+      collectSemanticNodes(root, topLevelTypes, semanticNodes);
+    }
 
     if (semanticNodes.length === 0) {
       tree.delete();
@@ -648,12 +687,19 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
     const current = chunks[i]!;
     const currentTokens = estimateTokens(current.text);
     const currentIsScoped = (current.metadata.parentSymbolPath ?? []).length > 0;
+    // Local patch: also preserve any chunk that carries a symbol name.
+    // C function prototypes and small typedefs are often well under the
+    // 15%-of-chunkTarget threshold, but rolling them into a single
+    // "merged" chunk erases the symbol metadata code-def relies on.
+    // Better to ship a few extra chunks than to make every prototype
+    // unfindable by symbol.
+    const currentHasSymbol = !!current.metadata.symbolName;
     // If ANY chunk in this file participates in parent-scope emission, the
     // scope chunks + their siblings all pass through verbatim. A Python
     // class body's 3 × 10-token methods are each their own chunk on
     // purpose — merging would erase the (in ClassName) scope header
     // Layer 6 just added.
-    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped) {
+    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped || currentHasSymbol) {
       merged.push({ ...current, index: merged.length });
       i++;
       continue;
@@ -940,10 +986,39 @@ function extractSymbolName(node: any): string | null {
     if (nested) return nested;
   }
 
+  // Local patch: C/C++ declarator chain.
+  //   function_definition has field declarator → function_declarator (or
+  //   pointer_declarator wrapping it) → declarator field → identifier.
+  //   declaration has field declarator → init_declarator/function_declarator
+  //   → declarator field → identifier.
+  // Without this recursion, every C function definition and prototype
+  // ends up with symbolName=null, which makes code-def / code-refs blind
+  // to C symbols even though the chunker correctly tags symbol_type='function'.
+  const declarator = node.childForFieldName('declarator');
+  if (declarator) {
+    if (
+      declarator.type === 'identifier' ||
+      declarator.type === 'field_identifier' ||
+      declarator.type === 'type_identifier'
+    ) {
+      const v = sanitize(declarator.text);
+      if (v) return v;
+    }
+    const nested = extractSymbolName(declarator);
+    if (nested) return nested;
+  }
+
   for (const child of node.namedChildren) {
     if (child.type.endsWith('identifier') || child.type === 'constant') {
       const v = sanitize(child.text);
       if (v) return v;
+    }
+    // Local patch: recurse through nested declarator wrappers like
+    // parenthesized_declarator → pointer_declarator → ... so function-pointer
+    // typedefs (typedef int (*cb_t)(int)) surface their name.
+    if (child.type.endsWith('_declarator')) {
+      const nested = extractSymbolName(child);
+      if (nested) return nested;
     }
   }
   return null;
