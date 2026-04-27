@@ -185,7 +185,7 @@ export async function importFromContent(
   engine: BrainEngine,
   slug: string,
   content: string,
-  opts: { noEmbed?: boolean } = {},
+  opts: { noEmbed?: boolean; sourceId?: string } = {},
 ): Promise<ImportResult> {
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
@@ -223,7 +223,9 @@ export async function importFromContent(
     tags: parsed.tags,
   };
 
-  const existing = await engine.getPage(slug);
+  // SWX: scope the existence check to the active source so two repos with
+  // the same slug don't accidentally short-circuit each other's import.
+  const existing = await engine.getPage(slug, { sourceId: opts.sourceId });
   if (existing?.content_hash === hash) {
     return { slug, status: 'skipped', chunks: 0, parsedPage };
   }
@@ -276,6 +278,9 @@ export async function importFromContent(
       timeline: parsed.timeline || '',
       frontmatter: parsed.frontmatter,
       content_hash: hash,
+      // SWX: thread the source from the caller (sync/import command) so
+      // per-repo `gbrain sources` rows actually receive their own pages.
+      source_id: opts.sourceId,
     });
 
     // Tag reconciliation: remove stale, add current
@@ -339,7 +344,7 @@ export async function importFromFile(
   engine: BrainEngine,
   filePath: string,
   relativePath: string,
-  opts: { noEmbed?: boolean } = {},
+  opts: { noEmbed?: boolean; sourceId?: string } = {},
 ): Promise<ImportResult> {
   // Defense-in-depth: reject symlinks before reading content.
   const lstat = lstatSync(filePath);
@@ -390,7 +395,7 @@ export async function importCodeFile(
   engine: BrainEngine,
   relativePath: string,
   content: string,
-  opts: { noEmbed?: boolean; force?: boolean } = {},
+  opts: { noEmbed?: boolean; force?: boolean; sourceId?: string } = {},
 ): Promise<ImportResult> {
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
@@ -407,7 +412,8 @@ export async function importCodeFile(
     .update(JSON.stringify({ title, type: 'code', content, lang, chunker_version: CHUNKER_VERSION }))
     .digest('hex');
 
-  const existing = await engine.getPage(slug);
+  // SWX: scope to active source. See importFromContent above for rationale.
+  const existing = await engine.getPage(slug, { sourceId: opts.sourceId });
   if (!opts.force && existing?.content_hash === hash) {
     return { slug, status: 'skipped', chunks: 0 };
   }
@@ -445,7 +451,9 @@ export async function importCodeFile(
   // OpenAI API. Order matters: our chunk_index is semantic (tree-sitter
   // order), so a matching (chunk_index, text_hash) means a verbatim
   // preserved symbol.
-  const existingChunks = existing ? await engine.getChunks(slug) : [];
+  // SWX: scope to active source so embedding-reuse compares against the
+  // right page's chunks, not a same-slug page in a sibling source.
+  const existingChunks = existing ? await engine.getChunks(slug, { sourceId: opts.sourceId }) : [];
   const existingByKey = new Map<string, typeof existingChunks[number]>();
   for (const ec of existingChunks) {
     existingByKey.set(`${ec.chunk_index}:${ec.chunk_text}`, ec);
@@ -490,6 +498,10 @@ export async function importCodeFile(
       timeline: '',
       frontmatter: { language: lang, file: relativePath },
       content_hash: hash,
+      // SWX: route the page to the active gbrain source so per-repo
+      // sources isolate cleanly — without this, swx-srtx and swx-spp
+      // would collide on flat code slugs like `src-main-c`.
+      source_id: opts.sourceId,
     });
 
     await tx.addTag(slug, 'code');
@@ -509,7 +521,8 @@ export async function importCodeFile(
   // chunk IDs are stable.
   if (extractedEdges.length > 0 && chunks.length > 0) {
     try {
-      const persistedChunks = await engine.getChunks(slug);
+      // SWX: scope to active source — same multi-source isolation as above.
+      const persistedChunks = await engine.getChunks(slug, { sourceId: opts.sourceId });
       const byIndex = new Map<number, { id?: number; symbol_name_qualified?: string | null; start_line?: number | null; end_line?: number | null }>();
       for (const pc of persistedChunks) {
         byIndex.set(pc.chunk_index, pc);

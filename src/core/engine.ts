@@ -113,7 +113,7 @@ export interface BrainEngine {
   withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T>;
 
   // Pages CRUD
-  getPage(slug: string): Promise<Page | null>;
+  getPage(slug: string, opts?: { sourceId?: string }): Promise<Page | null>;
   putPage(slug: string, page: PageInput): Promise<Page>;
   deletePage(slug: string): Promise<void>;
   listPages(filters?: PageFilters): Promise<Page[]>;
@@ -132,7 +132,7 @@ export interface BrainEngine {
 
   // Chunks
   upsertChunks(slug: string, chunks: ChunkInput[]): Promise<void>;
-  getChunks(slug: string): Promise<Chunk[]>;
+  getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]>;
   /**
    * Count chunks across the entire brain where embedded_at IS NULL.
    * Pre-flight short-circuit for `embed --stale` so a 100%-embedded brain

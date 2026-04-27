@@ -276,12 +276,23 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Pages CRUD
-  async getPage(slug: string): Promise<Page | null> {
+  async getPage(slug: string, opts?: { sourceId?: string }): Promise<Page | null> {
     const sql = this.sql;
-    const rows = await sql`
-      SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
-      FROM pages WHERE slug = ${slug}
-    `;
+    // SWX: optional sourceId filter so the import path's content-hash
+    // short-circuit can scope the existence check to the active source.
+    // Without this, swx-spp importing src-main-c would silently skip
+    // because swx-srtx had already imported a same-slug page — the
+    // (source_id, slug) UNIQUE in the schema isolates writes but only
+    // helps if reads also scope, which they didn't.
+    const rows = opts?.sourceId
+      ? await sql`
+          SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+          FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId}
+        `
+      : await sql`
+          SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+          FROM pages WHERE slug = ${slug}
+        `;
     if (rows.length === 0) return null;
     return rowToPage(rows[0]);
   }
@@ -292,14 +303,18 @@ export class PostgresEngine implements BrainEngine {
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
 
-    // v0.18.0 Step 2: source_id relies on schema DEFAULT 'default'. ON
-    // CONFLICT target becomes (source_id, slug) since global UNIQUE(slug)
-    // was dropped in migration v17. See pglite-engine.ts for matching
-    // notes; multi-source sync (Step 5) will surface an explicit sourceId.
+    // SWX (v0.18.0 Step 5 stand-in): honor an explicit page.source_id when
+    // provided so per-repo `gbrain sources` rows actually isolate writes.
+    // Without this, every sync — regardless of --source — wrote everything
+    // to source_id='default' and any two repos with overlapping slugs
+    // (e.g. flat code slugs like `src-main-c`) silently overwrote each
+    // other's rows last-writer-wins. Falls back to schema DEFAULT 'default'
+    // when omitted so every legacy caller behaves identically.
     const pageKind = page.page_kind || 'markdown';
+    const sourceId = page.source_id || 'default';
     const rows = await sql`
-      INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-      VALUES (${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
+      INSERT INTO pages (slug, source_id, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
+      VALUES (${slug}, ${sourceId}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
       ON CONFLICT (source_id, slug) DO UPDATE SET
         type = EXCLUDED.type,
         page_kind = EXCLUDED.page_kind,
@@ -759,14 +774,24 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
     const sql = this.sql;
-    const rows = await sql`
-      SELECT cc.* FROM content_chunks cc
-      JOIN pages p ON p.id = cc.page_id
-      WHERE p.slug = ${slug}
-      ORDER BY cc.chunk_index
-    `;
+    // SWX: optional sourceId — same multi-source isolation story as getPage.
+    // Import-path callers pass the active source so the chunk-reuse path
+    // doesn't pick up chunks from a same-slug page in a sibling source.
+    const rows = opts?.sourceId
+      ? await sql`
+          SELECT cc.* FROM content_chunks cc
+          JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = ${slug} AND p.source_id = ${opts.sourceId}
+          ORDER BY cc.chunk_index
+        `
+      : await sql`
+          SELECT cc.* FROM content_chunks cc
+          JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = ${slug}
+          ORDER BY cc.chunk_index
+        `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>));
   }
 

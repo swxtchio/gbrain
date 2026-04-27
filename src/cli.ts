@@ -432,7 +432,16 @@ async function handleCliOnly(command: string, args: string[]) {
     switch (command) {
       case 'import': {
         const { runImport } = await import('./commands/import.ts');
-        await runImport(engine, args);
+        // SWX: resolve --source flag or .gbrain-source dotfile so a
+        // bare `gbrain import <dir>` honors the active source the same
+        // way `gbrain sync` does.
+        const explicitSource = args.find((a, i) => args[i - 1] === '--source') || null;
+        let sourceId: string | undefined;
+        if (explicitSource || process.env.GBRAIN_SOURCE) {
+          const { resolveSourceId } = await import('./core/source-resolver.ts');
+          sourceId = await resolveSourceId(engine, explicitSource);
+        }
+        await runImport(engine, args, { sourceId });
         break;
       }
       case 'export': {

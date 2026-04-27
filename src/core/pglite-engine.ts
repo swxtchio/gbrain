@@ -231,12 +231,20 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Pages CRUD
-  async getPage(slug: string): Promise<Page | null> {
-    const { rows } = await this.db.query(
-      `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
-       FROM pages WHERE slug = $1`,
-      [slug]
-    );
+  async getPage(slug: string, opts?: { sourceId?: string }): Promise<Page | null> {
+    // SWX: see postgres-engine.ts:getPage for rationale on the optional
+    // sourceId filter — needed by the import path's content-hash skip.
+    const { rows } = opts?.sourceId
+      ? await this.db.query(
+          `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+           FROM pages WHERE slug = $1 AND source_id = $2`,
+          [slug, opts.sourceId]
+        )
+      : await this.db.query(
+          `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+           FROM pages WHERE slug = $1`,
+          [slug]
+        );
     if (rows.length === 0) return null;
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -246,15 +254,14 @@ export class PGLiteEngine implements BrainEngine {
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
 
-    // v0.18.0 Step 2: source_id relies on the schema DEFAULT 'default' so
-    // existing callers still target the default source without threading
-    // a parameter. ON CONFLICT target becomes (source_id, slug) since the
-    // global UNIQUE(slug) was dropped in migration v17. Step 5+ will
-    // surface an explicit sourceId param on putPage for multi-source sync.
+    // SWX (v0.18.0 Step 5 stand-in): honor explicit page.source_id when
+    // provided. See postgres-engine.ts:putPage for the full rationale —
+    // mirrored here so PGLite users get the same isolation semantics.
     const pageKind = page.page_kind || 'markdown';
+    const sourceId = page.source_id || 'default';
     const { rows } = await this.db.query(
-      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
+      `INSERT INTO pages (slug, source_id, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now())
        ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
          page_kind = EXCLUDED.page_kind,
@@ -265,7 +272,7 @@ export class PGLiteEngine implements BrainEngine {
          content_hash = EXCLUDED.content_hash,
          updated_at = now()
        RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
-      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
+      [slug, sourceId, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -633,14 +640,23 @@ export class PGLiteEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string): Promise<Chunk[]> {
-    const { rows } = await this.db.query(
-      `SELECT cc.* FROM content_chunks cc
-       JOIN pages p ON p.id = cc.page_id
-       WHERE p.slug = $1
-       ORDER BY cc.chunk_index`,
-      [slug]
-    );
+  async getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
+    // SWX: see postgres-engine.ts:getChunks for rationale on the optional sourceId filter.
+    const { rows } = opts?.sourceId
+      ? await this.db.query(
+          `SELECT cc.* FROM content_chunks cc
+           JOIN pages p ON p.id = cc.page_id
+           WHERE p.slug = $1 AND p.source_id = $2
+           ORDER BY cc.chunk_index`,
+          [slug, opts.sourceId]
+        )
+      : await this.db.query(
+          `SELECT cc.* FROM content_chunks cc
+           JOIN pages p ON p.id = cc.page_id
+           WHERE p.slug = $1
+           ORDER BY cc.chunk_index`,
+          [slug]
+        );
     return (rows as Record<string, unknown>[]).map(r => rowToChunk(r));
   }
 

@@ -28,7 +28,7 @@ export interface RunImportResult {
   failures: Array<{ path: string; error: string }>;
 }
 
-export async function runImport(engine: BrainEngine, args: string[], opts: { commit?: string } = {}): Promise<RunImportResult> {
+export async function runImport(engine: BrainEngine, args: string[], opts: { commit?: string; sourceId?: string } = {}): Promise<RunImportResult> {
   const noEmbed = args.includes('--no-embed');
   const fresh = args.includes('--fresh');
   const jsonOutput = args.includes('--json');
@@ -95,7 +95,10 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   async function processFile(eng: BrainEngine, filePath: string) {
     const relativePath = relative(dir, filePath);
     try {
-      const result = await importFile(eng, filePath, relativePath, { noEmbed });
+      // SWX: opts.sourceId flows from sync's --source flag (or attached
+      // source dotfile) through performFullSync → runImport → here, so
+      // every page imported in this run lands in the active source.
+      const result = await importFile(eng, filePath, relativePath, { noEmbed, sourceId: opts.sourceId });
       if (result.status === 'imported') {
         imported++;
         chunksCreated += result.chunks;

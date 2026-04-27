@@ -470,7 +470,9 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
       // Reimport at new path (picks up content changes)
       const filePath = join(repoPath, to);
       if (existsSync(filePath)) {
-        const result = await importFile(engine, filePath, to, { noEmbed });
+        // SWX: pass through opts.sourceId so the rename-target page
+        // lands in the active source rather than 'default'.
+        const result = await importFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId });
         if (result.status === 'imported') chunksCreated += result.chunks;
       }
       pagesAffected.push(newSlug);
@@ -504,7 +506,9 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
         continue;
       }
       try {
-        const result = await importFile(engine, filePath, path, { noEmbed });
+        // SWX: pass through opts.sourceId so per-repo sources actually
+        // receive their own pages rather than colliding on 'default'.
+        const result = await importFile(engine, filePath, path, { noEmbed, sourceId: opts.sourceId });
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
           pagesAffected.push(result.slug);
@@ -657,7 +661,10 @@ async function performFullSync(
   const { runImport } = await import('./import.ts');
   const importArgs = [repoPath];
   if (opts.noEmbed) importArgs.push('--no-embed');
-  const result = await runImport(engine, importArgs, { commit: headCommit });
+  // SWX: thread the active source through the full-sync path. Without
+  // this, `gbrain sync --source <id>` initial syncs would route every
+  // page to 'default', defeating per-repo isolation.
+  const result = await runImport(engine, importArgs, { commit: headCommit, sourceId: opts.sourceId });
 
   // Bug 9 — gate the full-sync bookmark on success. runImport already
   // writes its own sync.last_commit conditionally (import.ts), but

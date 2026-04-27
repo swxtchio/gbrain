@@ -36,6 +36,17 @@ export interface PageInput {
    * `query --lang` filtering.
    */
   page_kind?: PageKind;
+  /**
+   * SWX (v0.18.0 Step 5 stand-in): explicit source_id for the write.
+   * When omitted, falls through to the schema DEFAULT 'default' so every
+   * existing caller behaves unchanged. The sync/import paths set this
+   * from the active source so per-repo `gbrain sources` rows actually
+   * isolate page writes — without it, every repo's pages collide on
+   * (source_id='default', slug) regardless of which source initiated the
+   * sync. See pglite-engine.ts putPage comment for the original Step 5
+   * note this resolves.
+   */
+  source_id?: string;
 }
 
 export interface PageFilters {
