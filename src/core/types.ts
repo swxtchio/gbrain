@@ -18,6 +18,10 @@ export interface Page {
   content_hash?: string;
   created_at: Date;
   updated_at: Date;
+  // SWX local patch: expose source_id so callers (embed.ts, etc.) can scope
+  // getChunks/upsertChunks to the page's own source. Optional for backward
+  // compat with rows hydrated by rowToPage paths that pre-date this patch.
+  source_id?: string;
 }
 
 export type PageKind = 'markdown' | 'code';
@@ -89,6 +93,9 @@ export interface Chunk {
  */
 export interface StaleChunkRow {
   slug: string;
+  // SWX local patch: carry source_id so embedAllStale can group by
+  // (source_id, slug) and scope getChunks/upsertChunks to the right page.
+  source_id?: string;
   chunk_index: number;
   chunk_text: string;
   chunk_source: 'compiled_truth' | 'timeline';

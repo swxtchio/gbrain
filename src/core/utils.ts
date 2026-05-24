@@ -40,6 +40,7 @@ export function rowToPage(row: Record<string, unknown>): Page {
     content_hash: row.content_hash as string | undefined,
     created_at: new Date(row.created_at as string),
     updated_at: new Date(row.updated_at as string),
+    source_id: row.source_id as string | undefined,
   };
 }
 

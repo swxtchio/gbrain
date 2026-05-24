@@ -164,6 +164,8 @@ export interface BrainEngine {
     linkSource?: string,
     originSlug?: string,
     originField?: string,
+    // SWX local patch: optional source_id scoping (see engine impls).
+    opts?: { fromSourceId?: string; toSourceId?: string; originSourceId?: string },
   ): Promise<void>;
   /**
    * Bulk insert links via a single multi-row INSERT...SELECT FROM (VALUES) JOIN pages

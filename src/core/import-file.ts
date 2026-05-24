@@ -314,11 +314,16 @@ export async function importFromContent(
     for (const ref of codeRefs) {
       const codeSlug = slugifyCodePath(ref.path);
       // Forward: markdown guide → code page (this guide documents that code)
+      // SWX local patch: pass source_id scoping. Both from/to/origin live in
+      // the same source for doc↔code intra-repo links.
       try {
         await tx.addLink(
           slug, codeSlug,
           ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
           'documents', 'markdown', slug, 'compiled_truth',
+          opts.sourceId
+            ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId, originSourceId: opts.sourceId }
+            : undefined,
         );
       } catch { /* code page not yet imported — reconcile-links will catch it */ }
       // Reverse: code page → markdown guide (this code is documented by the guide)
@@ -326,6 +331,9 @@ export async function importFromContent(
         await tx.addLink(
           codeSlug, slug,
           ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
+          opts.sourceId
+            ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId, originSourceId: opts.sourceId }
+            : undefined,
         );
       } catch { /* same reason — silent skip */ }
     }

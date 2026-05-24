@@ -236,12 +236,12 @@ export class PGLiteEngine implements BrainEngine {
     // sourceId filter — needed by the import path's content-hash skip.
     const { rows } = opts?.sourceId
       ? await this.db.query(
-          `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+          `SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
            FROM pages WHERE slug = $1 AND source_id = $2`,
           [slug, opts.sourceId]
         )
       : await this.db.query(
-          `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+          `SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
            FROM pages WHERE slug = $1`,
           [slug]
         );
@@ -271,7 +271,7 @@ export class PGLiteEngine implements BrainEngine {
          frontmatter = EXCLUDED.frontmatter,
          content_hash = EXCLUDED.content_hash,
          updated_at = now()
-       RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
+       RETURNING id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
       [slug, sourceId, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
@@ -674,7 +674,7 @@ export class PGLiteEngine implements BrainEngine {
 
   async listStaleChunks(): Promise<StaleChunkRow[]> {
     const { rows } = await this.db.query(
-      `SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+      `SELECT p.slug, p.source_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
               cc.model, cc.token_count
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
@@ -711,20 +711,41 @@ export class PGLiteEngine implements BrainEngine {
     linkSource?: string,
     originSlug?: string,
     originField?: string,
+    // SWX local patch: optional source_id scoping mirrored from postgres-engine.
+    opts?: { fromSourceId?: string; toSourceId?: string; originSourceId?: string },
   ): Promise<void> {
     const src = linkSource ?? 'markdown';
-    await this.db.query(
-      `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
-       SELECT f.id, t.id, $3, $4, $5,
-              (SELECT id FROM pages WHERE slug = $6),
-              $7
-       FROM pages f, pages t
-       WHERE f.slug = $1 AND t.slug = $2
-       ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
-         context = EXCLUDED.context,
-         origin_field = EXCLUDED.origin_field`,
-      [from, to, linkType || '', context || '', src, originSlug ?? null, originField ?? null]
-    );
+    const originSrc = opts?.originSourceId ?? opts?.fromSourceId ?? null;
+    if (opts?.fromSourceId && opts?.toSourceId) {
+      await this.db.query(
+        `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+         SELECT f.id, t.id, $3, $4, $5,
+                (SELECT id FROM pages WHERE slug = $6 AND source_id = $10),
+                $7
+         FROM pages f, pages t
+         WHERE f.slug = $1 AND f.source_id = $8
+           AND t.slug = $2 AND t.source_id = $9
+         ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
+           context = EXCLUDED.context,
+           origin_field = EXCLUDED.origin_field`,
+        [from, to, linkType || '', context || '', src, originSlug ?? null, originField ?? null,
+         opts.fromSourceId, opts.toSourceId, originSrc]
+      );
+    } else {
+      // Legacy fallback: MIN(id) so multi-source slugs pick one deterministically.
+      await this.db.query(
+        `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+         SELECT (SELECT MIN(id) FROM pages WHERE slug = $1),
+                (SELECT MIN(id) FROM pages WHERE slug = $2),
+                $3, $4, $5,
+                (SELECT MIN(id) FROM pages WHERE slug = $6),
+                $7
+         ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
+           context = EXCLUDED.context,
+           origin_field = EXCLUDED.origin_field`,
+        [from, to, linkType || '', context || '', src, originSlug ?? null, originField ?? null]
+      );
+    }
   }
 
   async addLinksBatch(links: LinkBatchInput[]): Promise<number> {

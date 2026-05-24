@@ -286,11 +286,11 @@ export class PostgresEngine implements BrainEngine {
     // helps if reads also scope, which they didn't.
     const rows = opts?.sourceId
       ? await sql`
-          SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+          SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
           FROM pages WHERE slug = ${slug} AND source_id = ${opts.sourceId}
         `
       : await sql`
-          SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+          SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
           FROM pages WHERE slug = ${slug}
         `;
     if (rows.length === 0) return null;
@@ -324,7 +324,7 @@ export class PostgresEngine implements BrainEngine {
         frontmatter = EXCLUDED.frontmatter,
         content_hash = EXCLUDED.content_hash,
         updated_at = now()
-      RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
+      RETURNING id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
     `;
     return rowToPage(rows[0]);
   }
@@ -812,7 +812,7 @@ export class PostgresEngine implements BrainEngine {
   async listStaleChunks(): Promise<StaleChunkRow[]> {
     const sql = this.sql;
     const rows = await sql`
-      SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+      SELECT p.slug, p.source_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
              cc.model, cc.token_count
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
@@ -850,32 +850,61 @@ export class PostgresEngine implements BrainEngine {
     linkSource?: string,
     originSlug?: string,
     originField?: string,
+    // SWX local patch: optional source_id scoping. Back-compat: when omitted,
+    // falls back to the un-scoped behavior (still buggy if slugs collide
+    // across sources, but identical to upstream).
+    opts?: { fromSourceId?: string; toSourceId?: string; originSourceId?: string },
   ): Promise<void> {
     const sql = this.sql;
     // Pre-check existence so we can throw a clear error (ON CONFLICT DO UPDATE
     // returns 0 rows when source SELECT is empty, indistinguishable from missing page).
-    const exists = await sql`
-      SELECT 1 FROM pages WHERE slug = ${from}
-      INTERSECT
-      SELECT 1 FROM pages WHERE slug = ${to}
-    `;
-    if (exists.length === 0) {
+    const fromCheck = opts?.fromSourceId
+      ? await sql`SELECT 1 FROM pages WHERE slug = ${from} AND source_id = ${opts.fromSourceId}`
+      : await sql`SELECT 1 FROM pages WHERE slug = ${from}`;
+    const toCheck = opts?.toSourceId
+      ? await sql`SELECT 1 FROM pages WHERE slug = ${to} AND source_id = ${opts.toSourceId}`
+      : await sql`SELECT 1 FROM pages WHERE slug = ${to}`;
+    if (fromCheck.length === 0 || toCheck.length === 0) {
       throw new Error(`addLink failed: page "${from}" or "${to}" not found`);
     }
     // Default link_source to 'markdown' for back-compat with pre-v0.13 callers.
     // origin_page_id resolves from originSlug via the pages join (NULL if no slug).
     const src = linkSource ?? 'markdown';
-    await sql`
-      INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
-      SELECT f.id, t.id, ${linkType || ''}, ${context || ''}, ${src},
-             (SELECT id FROM pages WHERE slug = ${originSlug ?? null}),
-             ${originField ?? null}
-      FROM pages f, pages t
-      WHERE f.slug = ${from} AND t.slug = ${to}
-      ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
-        context = EXCLUDED.context,
-        origin_field = EXCLUDED.origin_field
-    `;
+    // SWX local patch: scope each pages SELECT to its source_id when provided,
+    // so (a) the FROM pages f, pages t join doesn't fan out to N×M rows when
+    // slugs collide across sources and (b) the origin scalar subquery returns
+    // exactly one row instead of failing with "more than one row returned by
+    // a subquery used as an expression".
+    const originSrc = opts?.originSourceId ?? opts?.fromSourceId ?? null;
+    if (opts?.fromSourceId && opts?.toSourceId) {
+      await sql`
+        INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+        SELECT f.id, t.id, ${linkType || ''}, ${context || ''}, ${src},
+               (SELECT id FROM pages WHERE slug = ${originSlug ?? null} AND source_id = ${originSrc}),
+               ${originField ?? null}
+        FROM pages f, pages t
+        WHERE f.slug = ${from} AND f.source_id = ${opts.fromSourceId}
+          AND t.slug = ${to}   AND t.source_id = ${opts.toSourceId}
+        ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
+          context = EXCLUDED.context,
+          origin_field = EXCLUDED.origin_field
+      `;
+    } else {
+      // Defensive fallback for legacy callers (no source context): use MIN(id)
+      // so multi-source slugs don't fail with "more than one row" — picks one
+      // deterministically rather than erroring.
+      await sql`
+        INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+        SELECT (SELECT MIN(id) FROM pages WHERE slug = ${from}),
+               (SELECT MIN(id) FROM pages WHERE slug = ${to}),
+               ${linkType || ''}, ${context || ''}, ${src},
+               (SELECT MIN(id) FROM pages WHERE slug = ${originSlug ?? null}),
+               ${originField ?? null}
+        ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
+          context = EXCLUDED.context,
+          origin_field = EXCLUDED.origin_field
+      `;
+    }
   }
 
   async addLinksBatch(links: LinkBatchInput[]): Promise<number> {

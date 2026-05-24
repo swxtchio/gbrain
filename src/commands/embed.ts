@@ -146,10 +146,16 @@ async function embedPage(
     throw new Error(`Page not found: ${slug}`);
   }
 
+  // SWX local patch: scope every chunk read/write to the page's own source_id
+  // so cross-source duplicate slugs (e.g. `claude` in 3 sibling-repo sources)
+  // don't trip the unscoped subquery / multi-row ON CONFLICT bugs in
+  // postgres-engine.ts. See ~/.gbrain/local-patches/PATCH.md.
+  const srcOpts = page.source_id ? { sourceId: page.source_id } : undefined;
+
   // Get existing chunks or create new ones.
   // In dryRun, we still chunk the text locally to count what WOULD be
   // embedded — but we never write chunks or call the embedding model.
-  let chunks = await engine.getChunks(slug);
+  let chunks = await engine.getChunks(slug, srcOpts);
   if (chunks.length === 0) {
     const inputs: ChunkInput[] = [];
     if (page.compiled_truth.trim()) {
@@ -172,8 +178,8 @@ async function embedPage(
     }
 
     if (inputs.length > 0) {
-      await engine.upsertChunks(slug, inputs);
-      chunks = await engine.getChunks(slug);
+      await engine.upsertChunks(slug, inputs, srcOpts);
+      chunks = await engine.getChunks(slug, srcOpts);
     }
   }
 
@@ -207,7 +213,7 @@ async function embedPage(
     token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
   }));
 
-  await engine.upsertChunks(slug, updated);
+  await engine.upsertChunks(slug, updated, srcOpts);
   result.embedded += toEmbed.length;
   result.pages_processed++;
   console.log(`${slug}: embedded ${toEmbed.length} chunks`);
@@ -251,7 +257,10 @@ async function embedAll(
   const CONCURRENCY = parseInt(process.env.GBRAIN_EMBED_CONCURRENCY || '20', 10);
 
   async function embedOnePage(page: typeof pages[number]) {
-    const chunks = await engine.getChunks(page.slug);
+    // SWX local patch: scope to page's own source_id to avoid cross-source
+    // duplicate-slug collisions in getChunks/upsertChunks.
+    const srcOpts = page.source_id ? { sourceId: page.source_id } : undefined;
+    const chunks = await engine.getChunks(page.slug, srcOpts);
     const toEmbed = chunks; // staleOnly path handled above via embedAllStale
 
     result.total_chunks += chunks.length;
@@ -287,7 +296,7 @@ async function embedAll(
         embedding: embeddingMap.get(c.chunk_index) ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
-      await engine.upsertChunks(page.slug, updated);
+      await engine.upsertChunks(page.slug, updated, srcOpts);
       result.embedded += toEmbed.length;
     } catch (e: unknown) {
       console.error(`\n  Error embedding ${page.slug}: ${e instanceof Error ? e.message : e}`);
@@ -360,12 +369,15 @@ async function embedAllStale(
 
   // Pull only the stale chunks (no embedding column).
   const staleRows = await engine.listStaleChunks();
-  // Group by slug so each slug → array of stale chunks for batched embedding.
+  // SWX local patch: group by (source_id, slug) so cross-source duplicate
+  // slugs (e.g. `claude` in 3 sibling-repo sources) each get their own
+  // bucket and don't collide in upsertChunks. Key shape: "<sid>\x00<slug>".
   const bySlug = new Map<string, typeof staleRows>();
   for (const row of staleRows) {
-    const list = bySlug.get(row.slug);
+    const key = (row.source_id ?? '') + '\x00' + row.slug;
+    const list = bySlug.get(key);
     if (list) list.push(row);
-    else bySlug.set(row.slug, [row]);
+    else bySlug.set(key, [row]);
   }
 
   const slugs = Array.from(bySlug.keys());
@@ -391,8 +403,15 @@ async function embedAllStale(
   const CONCURRENCY = parseInt(process.env.GBRAIN_EMBED_CONCURRENCY || '20', 10);
   let processed = 0;
 
-  async function embedOneSlug(slug: string) {
-    const stale = bySlug.get(slug)!;
+  async function embedOneSlug(key: string) {
+    const stale = bySlug.get(key)!;
+    // SWX local patch: decode (source_id, slug) tuple from the composite key
+    // and pass sourceId to getChunks/upsertChunks so each duplicate-slug
+    // page gets handled independently.
+    const sepIdx = key.indexOf('\x00');
+    const sid = sepIdx >= 0 ? key.slice(0, sepIdx) : '';
+    const slug = sepIdx >= 0 ? key.slice(sepIdx + 1) : key;
+    const srcOpts = sid ? { sourceId: sid } : undefined;
     try {
       const embeddings = await embedBatch(stale.map(c => c.chunk_text));
       // CRITICAL: passing ONLY the stale indices to upsertChunks would
@@ -401,7 +420,7 @@ async function embedAllStale(
       // re-fetch existing chunks for this page and merge. Bounded by the
       // stale slug count, not by total slugs — autopilot common case
       // is 0 stale (pre-flight short-circuit, never reaches this path).
-      const existing = await engine.getChunks(slug);
+      const existing = await engine.getChunks(slug, srcOpts);
       const staleIdxToEmbedding = new Map<number, Float32Array>();
       for (let j = 0; j < stale.length; j++) {
         staleIdxToEmbedding.set(stale[j].chunk_index, embeddings[j]);
@@ -415,7 +434,7 @@ async function embedAllStale(
         embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
-      await engine.upsertChunks(slug, merged);
+      await engine.upsertChunks(slug, merged, srcOpts);
       result.embedded += stale.length;
     } catch (e: unknown) {
       console.error(`\n  Error embedding ${slug}: ${e instanceof Error ? e.message : e}`);
