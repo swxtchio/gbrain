@@ -24,7 +24,7 @@ describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', 
     { path: 'docs/guide.mdx', expected: null, note: 'mdx accepted by markdown strategy' },
     { path: 'learning-and-strategy/log.md', expected: 'metafile', note: 'log.md anywhere is metafile' },
     { path: 'wiki/schema.md', expected: 'metafile', note: 'schema.md anywhere is metafile' },
-    { path: 'index.md', expected: 'metafile', note: 'top-level index.md' },
+    { path: 'index.md', expected: null, note: 'SWX patch: index.md is a canonical folder entry page, syncable (not a metafile)' },
     { path: 'README.md', expected: 'metafile', note: 'top-level README' },
     { path: 'docs/README.md', expected: 'metafile', note: 'nested README' },
     { path: 'RESOLVER.md', expected: 'metafile', note: 'top-level master routing config (closes #345)' },
@@ -62,8 +62,8 @@ describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', 
     expect(isSyncable('drafts/wip.md', { exclude: ['drafts/**'] })).toBe(false);
   });
 
-  test('SYNC_SKIP_FILES export contains the canonical structural metafiles', () => {
-    expect([...SYNC_SKIP_FILES]).toEqual(['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md']);
+  test('SYNC_SKIP_FILES export contains the canonical basenames (SWX: index.md is syncable)', () => {
+    expect([...SYNC_SKIP_FILES]).toEqual(['schema.md', 'log.md', 'README.md', 'RESOLVER.md']);
   });
 
   test('isSyncable(p) === (unsyncableReason(p) === null) — duality holds for all canonical cases', () => {

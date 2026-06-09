@@ -537,7 +537,11 @@ export function sanitizePathForDisplay(path: string): string {
  * It was the lone structural sibling missing from this list, so it leaked
  * into the index as a content page (slug `resolver`).
  */
-export const SYNC_SKIP_FILES = ['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
+// SWX local patch: `index.md` removed from the skip list — our multi-domain
+// brain uses index.md as the canonical entry page for a folder (e.g.
+// blox-spec/index.md is the spec's table of contents), not boilerplate noise.
+// Upstream's other entries (incl. RESOLVER.md) are kept as-is.
+export const SYNC_SKIP_FILES = ['schema.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
 
 /**
  * Internal classifier. Returns null when the path IS syncable, or a tagged
