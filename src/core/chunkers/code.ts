@@ -417,10 +417,25 @@ const TOP_LEVEL_TYPES: Partial<Record<SupportedCodeLanguage, Set<string>>> = {
     'file_scoped_namespace_declaration', 'using_directive', 'property_declaration',
   ]),
   cpp: new Set([
-    'function_definition', 'class_specifier', 'struct_specifier',
-    'namespace_definition', 'declaration', 'template_declaration',
+    'function_definition', 'class_specifier', 'struct_specifier', 'declaration',
+    // SWX patch: typedefs parse as 'type_definition' (not 'declaration') in
+    // tree-sitter-c/cpp — without these, every typedef'd struct/union/enum
+    // (i.e. ~all idiomatic C type aliases) is invisible to the chunker.
+    'type_definition', 'enum_specifier', 'union_specifier',
+    // SWX patch: macros (object-like + function-like) for code-def findability
+    // (C++ emitted none before). NOTE: namespace_definition / template_declaration
+    // are deliberately NOT here — they live in PASSTHROUGH_TYPES so the walker
+    // recurses to the inner function/class rather than indexing the wrapper as
+    // one opaque chunk (a namespace would otherwise index only its name; a
+    // templated fn would index with a null symbol name).
+    'preproc_def', 'preproc_function_def',
   ]),
-  c: new Set(['function_definition', 'struct_specifier', 'declaration', 'preproc_def', 'preproc_include']),
+  c: new Set([
+    'function_definition', 'struct_specifier', 'declaration',
+    'preproc_def', 'preproc_function_def', 'preproc_include',
+    // SWX patch — see cpp note above; enum/union added for symmetry.
+    'type_definition', 'enum_specifier', 'union_specifier',
+  ]),
   php: new Set([
     'function_definition', 'class_declaration', 'interface_declaration',
     'method_declaration', 'trait_declaration',
@@ -442,6 +457,35 @@ const TOP_LEVEL_TYPES: Partial<Record<SupportedCodeLanguage, Set<string>>> = {
   // all 9 fixtures produced `program > statement > <kind>` shape).
   sql: new Set(['statement']),
 };
+
+// SWX patch: node types whose contents must be unwrapped when scanning for
+// top-level semantic nodes. Real-world C/C++ wraps everything in header guards
+// or extern "C" linkage blocks, so the walker must recurse through these to
+// reach the actual function_definitions / typedefs inside.
+const PASSTHROUGH_TYPES = new Set([
+  'preproc_ifdef',          // #ifndef X #define X ... #endif header guards
+  'preproc_if',             // #if FOO ... #endif
+  'preproc_else',           // #else branch
+  'linkage_specification',  // extern "C" { ... }
+  'declaration_list',       // body of linkage_specification / namespace
+  'translation_unit',       // root in some grammars
+  // SWX patch: recurse INTO C++ namespaces and templates to surface the inner
+  // functions/classes, instead of indexing the wrapper as one opaque chunk
+  // (`namespace n { int f(); }` would otherwise index only `n`; a templated
+  // function would index with a null symbol name).
+  'namespace_definition',   // namespace n { ... }
+  'template_declaration',   // template <...> <fn|class>
+]);
+
+function collectSemanticNodes(node: any, topLevelTypes: Set<string>, out: any[]): void {
+  for (const child of node.namedChildren) {
+    if (topLevelTypes.has(child.type)) {
+      out.push(child);
+    } else if (PASSTHROUGH_TYPES.has(child.type)) {
+      collectSemanticNodes(child, topLevelTypes, out);
+    }
+  }
+}
 
 const BODY_NODE_TYPES = new Set([
   'statement_block',
@@ -784,9 +828,14 @@ async function chunkParsedLanguage(
 
     const root = (tree as any).rootNode;
     const topLevelTypes = TOP_LEVEL_TYPES[language];
-    const semanticNodes = topLevelTypes
-      ? root.namedChildren.filter((n: any) => topLevelTypes.has(n.type))
-      : [];
+    // SWX patch: recurse through pass-through wrappers (header guards, #if,
+    // extern "C") via collectSemanticNodes. Without it, real-world C/C++
+    // headers have zero top-level semantic nodes and fall through to the text
+    // chunker, losing all symbol metadata.
+    const semanticNodes: any[] = [];
+    if (topLevelTypes) {
+      collectSemanticNodes(root, topLevelTypes, semanticNodes);
+    }
 
     if (semanticNodes.length === 0) {
       return { chunks: fallbackChunks(source, filePath, language, opts), edges: [] };
@@ -938,6 +987,14 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
   // header (empty parent path, but holds the class declaration) and to
   // nested leaves (non-empty parent path).
   const hasScopedChunks = chunks.some(c => (c.metadata.parentSymbolPath ?? []).length > 0);
+  // SWX patch: upstream deliberately leaves the C/C++ "run" forms
+  // ('declaration', 'preproc def') MERGEABLE — a run of prototypes or #defines
+  // reads as one blob. In a C/C++ codebase those runs ARE the code-def targets
+  // (a header is mostly prototypes and macros), so protect them here too.
+  // C/C++ only; every other language keeps upstream's run merging.
+  const lang = chunks[0]?.metadata.language;
+  const preserveRunForms = lang === 'c' || lang === 'cpp';
+  const C_RUN_FORMS = new Set(['declaration', 'preproc def']);
   // #4511: merging nulls out symbolName, and code-def resolves names against
   // chunk rows, so a merged definition is unreachable — a flat file of short
   // top-level defs indexed to ZERO symbols (protection previously happened
@@ -947,7 +1004,9 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
   // accumulated into one. The set is a derived view of code-def's DEF_TYPES
   // (def-types.ts), so the lookup allowlist and this guard cannot drift.
   const isDefChunk = (c: CodeChunk): boolean =>
-    c.metadata.symbolName != null && MERGE_PROTECTED_SYMBOL_TYPES.has(c.metadata.symbolType);
+    c.metadata.symbolName != null
+    && (MERGE_PROTECTED_SYMBOL_TYPES.has(c.metadata.symbolType)
+        || (preserveRunForms && C_RUN_FORMS.has(c.metadata.symbolType)));
   const merged: CodeChunk[] = [];
   let i = 0;
   while (i < chunks.length) {
@@ -1432,10 +1491,35 @@ function extractSymbolName(node: any): string | null {
     if (nested) return nested;
   }
 
+  // SWX patch: C/C++ declarator chain. function_definition / declaration carry
+  // the name via field 'declarator' → (pointer_/function_)declarator →
+  // 'declarator' field → identifier. Without this, every C function definition
+  // and prototype gets symbolName=null and code-def goes blind to C symbols.
+  const declarator = node.childForFieldName('declarator');
+  if (declarator) {
+    if (
+      declarator.type === 'identifier' ||
+      declarator.type === 'field_identifier' ||
+      declarator.type === 'type_identifier'
+    ) {
+      const v = sanitize(declarator.text);
+      if (v) return v;
+    }
+    const nested = extractSymbolName(declarator);
+    if (nested) return nested;
+  }
+
   for (const child of node.namedChildren) {
     if (child.type.endsWith('identifier') || child.type === 'constant') {
       const v = sanitize(child.text);
       if (v) return v;
+    }
+    // SWX patch: recurse through nested declarator wrappers
+    // (parenthesized_declarator → pointer_declarator → …) so function-pointer
+    // typedefs `typedef void (*cb)(int);` surface their name.
+    if (child.type.endsWith('_declarator')) {
+      const nested = extractSymbolName(child);
+      if (nested) return nested;
     }
   }
 
