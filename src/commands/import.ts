@@ -595,6 +595,17 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   const visitedInodes = new Map<string, true>();
   const files: string[] = [];
 
+  // SWX local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain to a fixed set
+  // of top-level directory names. Used when the brain root sits above many
+  // sibling repos and we only want a subset (e.g. swx-srtx,swx-spp). Applied
+  // at the brain root only (d === dir); subdirectories descend normally. This
+  // is now the single walker both the full-import and incremental-sync paths
+  // route through, so one check covers both.
+  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
+  const topDirsAllow = topDirsEnv
+    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
+    : null;
+
   function walk(d: string, depth: number): void {
     if (depth >= maxDepth) {
       console.warn(`[gbrain] walker depth limit reached at ${d}; skipping`);
@@ -628,6 +639,8 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
       }
 
       if (stat.isDirectory()) {
+        // SWX local patch: at the brain root, restrict descent to GBRAIN_TOP_DIRS.
+        if (topDirsAllow && d === dir && !topDirsAllow.has(entry)) continue;
         const inodeKey = `${stat.dev}:${stat.ino}`;
         if (visitedInodes.has(inodeKey)) {
           console.warn(`[gbrain] walker cycle detected at ${full}; skipping`);

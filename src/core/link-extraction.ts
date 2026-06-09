@@ -942,8 +942,11 @@ export function makeResolver(
 
       const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);
 
-      // Step 1: already a slug? (dir/name shape, lowercase, hyphenated)
-      if (/^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(trimmed)) {
+      // Step 1: already a slug? (any `dir/.../name` shape). SWX local patch:
+      // accept N-segment slugs (our slugs are domain/docs/page = 3 segments),
+      // not just the upstream 2-segment shape — engine.getPage() authoritatively
+      // decides existence below, so this only widens correctly-resolved refs.
+      if (trimmed.includes('/')) {
         const page = await engine.getPage(trimmed);
         if (page) {
           cache.set(cacheKey, trimmed);

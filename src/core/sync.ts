@@ -327,7 +327,10 @@ export type SyncableReason =
  * READMEs — not typed brain pages — by convention. A user who genuinely
  * wants to index one of these basenames as a page should rename it.
  */
-export const SYNC_SKIP_FILES = ['schema.md', 'index.md', 'log.md', 'README.md'] as const;
+// SWX local patch: `index.md` removed from the skip list — our multi-domain
+// brain uses index.md as the canonical entry page for a folder (e.g.
+// blox-spec/index.md is the spec's table of contents), not boilerplate noise.
+export const SYNC_SKIP_FILES = ['schema.md', 'log.md', 'README.md'] as const;
 
 /**
  * Internal classifier. Returns null when the path IS syncable, or a tagged

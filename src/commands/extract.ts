@@ -433,7 +433,9 @@ export async function extractLinksFromFile(
       async resolve(name: string, dirHint?: string | string[]): Promise<string | null> {
         if (!name) return null;
         const trimmed = name.trim();
-        if (/^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(trimmed) && allSlugs.has(trimmed)) {
+        // SWX local patch: accept N-segment slugs (domain/docs/page), not just
+        // upstream's 2-segment shape; allSlugs.has() authoritatively filters.
+        if (trimmed.includes('/') && allSlugs.has(trimmed)) {
           return trimmed;
         }
         const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);

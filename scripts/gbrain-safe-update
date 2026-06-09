@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+#
+# gbrain-safe-update — upgrade gbrain without destroying your fork customizations.
+#
+# Why this exists:
+#   This gbrain checkout is a swxtch FORK: `origin` mirrors upstream (garrytan/gbrain,
+#   default branch `master`) and your work lives as `SWX:` commits on the `swxtch`
+#   branch (pushed to swxtchio/gbrain). The documented upgrade (`git pull origin master`)
+#   assumes a vanilla `master` checkout — run from `swxtch` it would merge upstream INTO
+#   your fork (or, worse, a hard reset elsewhere would discard your commits). This script
+#   instead:
+#     1. keeps `master` as a pure mirror of upstream (the branch that gets fast-forwarded),
+#     2. fast-forwards `master` to origin/master,
+#     3. rebases your `swxtch` commits on top of the new `master`,
+#     4. THEN (on swxtch) runs `bun install` + `gbrain post-upgrade`.
+#
+#   Build steps run on the CUSTOM branch AFTER the rebase — never on the mirror. (The
+#   sibling gstack-safe-update runs ./setup on the mirror first, which dirties tracked
+#   files and aborts the subsequent checkout; gbrain avoids that class of bug entirely.)
+#
+#   Your work on `$CUSTOM_BRANCH` is replayed via rebase, never reset away. The rebased
+#   branch is left LOCAL: this script never force-pushes the shared fork. Review, then
+#   push yourself:  git push --force-with-lease swxtch swxtch
+#
+# Usage:
+#   gbrain-safe-update [--dry-run] [--check] [--no-backup] [custom_branch]
+#
+# Env overrides:
+#   GBRAIN_DIR        install dir            (default: ~/tools/gbrain)
+#   GBRAIN_TRACK      upstream mirror branch (default: master)
+#   GBRAIN_CUSTOM     customization branch   (default: swxtch, or $1)
+#   GBRAIN_REMOTE     upstream remote        (default: origin)
+#   GBRAIN_LINK       PATH symlink to maintain (default: ~/.local/bin/gbrain-safe-update;
+#                     set empty to disable the self-link)
+#
+# Self-survival:
+#   This script is TRACKED on the customization branch only. When it checks out
+#   `master` (where the file does not exist) git removes it from the working tree —
+#   which would corrupt a still-running bash process reading from that path. So the
+#   first thing we do is re-exec from a private temp copy; from then on the running
+#   image is independent of any branch switch the script performs. The temp copy
+#   deletes itself on exit.
+if [ -z "${_GBSU_REEXEC:-}" ]; then
+  _gbsu_self="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  _gbsu_tmp="$(mktemp "${TMPDIR:-/tmp}/gbrain-safe-update.XXXXXX")"
+  cat "$_gbsu_self" > "$_gbsu_tmp"
+  chmod +x "$_gbsu_tmp"
+  export _GBSU_REEXEC=1
+  exec bash "$_gbsu_tmp" "$@"
+fi
+trap 'rm -f -- "$0"' EXIT   # $0 is the temp copy under re-exec — clean it up
+
+set -euo pipefail
+
+# ---- config -----------------------------------------------------------------
+INSTALL_DIR="${GBRAIN_DIR:-$HOME/tools/gbrain}"
+TRACK_BRANCH="${GBRAIN_TRACK:-master}"
+REMOTE="${GBRAIN_REMOTE:-origin}"
+LINK_PATH="${GBRAIN_LINK:-$HOME/.local/bin/gbrain-safe-update}"
+BRAIN_DIR="${GBRAIN_HOME:-$HOME/.gbrain}"
+
+DRY_RUN=0
+CHECK_ONLY=0
+NO_BACKUP=0
+CUSTOM_ARG=""
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run)   DRY_RUN=1 ;;
+    --check)     CHECK_ONLY=1 ;;
+    --no-backup) NO_BACKUP=1 ;;
+    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    -*) echo "unknown flag: $arg" >&2; exit 2 ;;
+    *)  CUSTOM_ARG="$arg" ;;
+  esac
+done
+CUSTOM_BRANCH="${GBRAIN_CUSTOM:-${CUSTOM_ARG:-swxtch}}"
+
+# ---- helpers ----------------------------------------------------------------
+say()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
+ok()   { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m! %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+run()  { if [ "$DRY_RUN" = 1 ]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
+
+# version lives in package.json (gbrain runs from source; `gbrain --version` may be
+# a stale globally-resolved build, so read the tree we are actually updating)
+read_version() {
+  grep -m1 '"version"' "$INSTALL_DIR/package.json" 2>/dev/null \
+    | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo unknown
+}
+
+# Idempotently point $LINK_PATH at the in-repo canonical script. A symlink (not a
+# copy) means the PATH entry always tracks the committed branch version.
+ensure_symlink() {
+  [ -n "$LINK_PATH" ] || return 0                      # disabled via empty GBRAIN_LINK
+  local canonical="$INSTALL_DIR/scripts/gbrain-safe-update"
+  if [ -L "$LINK_PATH" ] && [ "$(readlink "$LINK_PATH")" = "$canonical" ]; then
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "  [dry-run] ln -sfn '$canonical' '$LINK_PATH'"
+    return 0
+  fi
+  if [ -e "$LINK_PATH" ] && [ ! -L "$LINK_PATH" ]; then
+    if ! grep -q 'gbrain-safe-update — upgrade gbrain' "$LINK_PATH" 2>/dev/null; then
+      warn "$LINK_PATH exists and isn't ours — leaving it alone (set GBRAIN_LINK to relocate)"
+      return 0
+    fi
+  fi
+  mkdir -p "$(dirname "$LINK_PATH")" 2>/dev/null \
+    || { warn "cannot create $(dirname "$LINK_PATH") — skipping self-link"; return 0; }
+  if ln -sfn "$canonical" "$LINK_PATH" 2>/dev/null; then
+    say "Linked $LINK_PATH → scripts/gbrain-safe-update"
+  else
+    warn "could not create symlink at $LINK_PATH"
+  fi
+}
+
+# ---- preflight --------------------------------------------------------------
+[ -d "$INSTALL_DIR/.git" ] || die "no git install at $INSTALL_DIR (set GBRAIN_DIR)"
+cd "$INSTALL_DIR"
+INSTALL_DIR="$PWD"   # normalize to absolute so the symlink target is stable
+
+if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/MERGE_HEAD ]; then
+  die "a rebase/merge is already in progress in $INSTALL_DIR — resolve it first"
+fi
+
+git show-ref --verify --quiet "refs/heads/$TRACK_BRANCH" \
+  || die "tracking branch '$TRACK_BRANCH' does not exist"
+
+ORIG_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+OLD_VERSION="$(read_version)"
+
+say "Install:   $INSTALL_DIR"
+say "Version:   $OLD_VERSION"
+say "Branches:  track=$TRACK_BRANCH  custom=$CUSTOM_BRANCH  (currently on $ORIG_BRANCH)"
+
+ensure_symlink
+
+# ---- fetch + report what's upstream ----------------------------------------
+say "Fetching $REMOTE…"
+git fetch --quiet "$REMOTE"
+
+UPSTREAM="$REMOTE/$TRACK_BRANCH"
+git show-ref --verify --quiet "refs/remotes/$UPSTREAM" \
+  || die "$UPSTREAM not found after fetch"
+
+BEHIND="$(git rev-list --count "$TRACK_BRANCH..$UPSTREAM")"   # commits upstream has, mirror lacks
+AHEAD="$(git rev-list --count "$UPSTREAM..$TRACK_BRANCH")"    # local-only commits on the mirror
+
+if [ "$AHEAD" != 0 ]; then
+  die "$TRACK_BRANCH has $AHEAD local commit(s) not in $UPSTREAM.
+   '$TRACK_BRANCH' is meant to mirror upstream and gets fast-forwarded only.
+   Move those commits to '$CUSTOM_BRANCH' first, then re-run."
+fi
+
+if [ "$BEHIND" = 0 ]; then
+  ok "$TRACK_BRANCH already up to date with $UPSTREAM (v$OLD_VERSION)."
+else
+  say "$BEHIND new upstream commit(s) on $UPSTREAM (showing newest 15):"
+  git --no-pager log --oneline -15 "$TRACK_BRANCH..$UPSTREAM" | sed 's/^/    /'
+fi
+
+if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
+  CUSTOM_AHEAD="$(git rev-list --count "$UPSTREAM..$CUSTOM_BRANCH")"
+  say "$CUSTOM_BRANCH carries $CUSTOM_AHEAD commit(s) to replay onto the new $TRACK_BRANCH."
+fi
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  exit 0
+fi
+
+# ---- stash dirty working tree ----------------------------------------------
+STASHED=0
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  warn "Working tree is dirty — stashing before update."
+  run "git stash push -u -m 'gbrain-safe-update auto-stash'"
+  # only mark stashed when we actually stashed — in --dry-run the push above is
+  # a no-op, so restore_stash must NOT run a real `git stash pop` (would mutate).
+  if [ "$DRY_RUN" != 1 ]; then STASHED=1; fi
+fi
+
+restore_stash() {
+  if [ "$STASHED" = 1 ]; then
+    say "Restoring stashed changes…"
+    git stash pop || warn "stash pop hit conflicts — resolve manually (see: git stash list)"
+  fi
+}
+
+# ---- update the mirror branch (fast-forward only; never dirtied) ------------
+if [ "$BEHIND" != 0 ]; then
+  say "Updating $TRACK_BRANCH → $UPSTREAM…"
+  run "git checkout --quiet $TRACK_BRANCH"
+  run "git merge --ff-only $UPSTREAM"   # safe: we proved AHEAD=0, so FF always works
+  ok "$TRACK_BRANCH now at $(git rev-parse --short "$UPSTREAM")"
+fi
+
+# ---- rebase the customization branch onto the fresh mirror -----------------
+REBASED=0
+if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
+  CUSTOM_AHEAD="$(git rev-list --count "$TRACK_BRANCH..$CUSTOM_BRANCH")"
+  if [ "$CUSTOM_AHEAD" = 0 ]; then
+    say "$CUSTOM_BRANCH has no commits beyond $TRACK_BRANCH — fast-forwarding."
+    run "git checkout --quiet $CUSTOM_BRANCH"
+    run "git merge --ff-only $TRACK_BRANCH" || warn "could not fast-forward $CUSTOM_BRANCH"
+  else
+    say "Rebasing $CUSTOM_BRANCH ($CUSTOM_AHEAD commit(s)) onto $TRACK_BRANCH…"
+    git --no-pager log --oneline "$TRACK_BRANCH..$CUSTOM_BRANCH" | sed 's/^/    /'
+    run "git checkout --quiet $CUSTOM_BRANCH"
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "  [dry-run] git rebase $TRACK_BRANCH"
+    elif git rebase "$TRACK_BRANCH"; then
+      ok "Rebase clean."
+      REBASED=1
+    else
+      git rebase --abort
+      restore_stash
+      die "Rebase hit conflicts and was ABORTED — $CUSTOM_BRANCH is untouched.
+   Resolve manually:  cd $INSTALL_DIR && git checkout $CUSTOM_BRANCH && git rebase $TRACK_BRANCH"
+    fi
+  fi
+else
+  warn "customization branch '$CUSTOM_BRANCH' does not exist — skipping rebase"
+fi
+
+# ---- build steps: ON the custom branch, AFTER the rebase --------------------
+# (bun install only touches gitignored node_modules; gbrain post-upgrade runs DB
+#  migrations against the brain in $BRAIN_DIR. Both run here so they match the
+#  rebased source — and so the mirror branch is never left dirty.)
+if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
+  if command -v bun >/dev/null 2>&1; then
+    say "Installing dependencies (bun install)…"
+    run "bun install"
+  else
+    warn "bun not on PATH — skipping dependency install"
+  fi
+
+  # back up the brain before running migrations (skippable with --no-backup).
+  # gbrain post-upgrade runs apply-migrations against the LIVE brain. Engine-aware:
+  #   postgres -> best-effort pg_dump snapshot. Supabase PITR/WAL-G is the primary
+  #               recovery net; this is a convenient logical restore point. Non-fatal.
+  #   pglite   -> copy the local brain dir (the only net for an embedded brain).
+  if [ "$NO_BACKUP" != 1 ]; then
+    ENGINE="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.gbrain/config.json'))).get('engine','pglite'))" 2>/dev/null || echo pglite)"
+    mkdir -p "$BRAIN_DIR/backups"
+    TS="$(date +%Y%m%d-%H%M%S)"
+    if [ "$ENGINE" = "postgres" ]; then
+      BK="$BRAIN_DIR/backups/brain-pgdump-$TS.sql.gz"
+      say "Snapshotting Postgres brain → $BK (best-effort; Supabase PITR/WAL-G is the primary net)…"
+      if [ "$DRY_RUN" = 1 ]; then
+        echo "  [dry-run] pg_dump <database_url> | gzip > $BK"
+      elif ! command -v pg_dump >/dev/null 2>&1; then
+        warn "pg_dump not on PATH — skipping snapshot (relying on Supabase PITR)."
+      else
+        DBURL="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.gbrain/config.json')))['database_url'])")"
+        if PGSSLMODE=require pg_dump --no-owner --no-privileges "$DBURL" | gzip > "$BK"; then
+          ok "Brain snapshot saved ($(du -h "$BK" | cut -f1))."
+        else
+          rm -f "$BK"
+          warn "pg_dump snapshot failed — relying on Supabase PITR/WAL-G. (--no-backup to skip)"
+        fi
+      fi
+    elif [ -e "$BRAIN_DIR/brain.pglite" ]; then
+      BK="$BRAIN_DIR/backups/brain.pglite.bak-$TS"
+      say "Backing up PGLite brain → $BK"
+      run "cp -a '$BRAIN_DIR/brain.pglite' '$BK'"
+    fi
+  fi
+
+  if command -v gbrain >/dev/null 2>&1; then
+    say "Running gbrain post-upgrade (migration notes + data fixes)…"
+    run "gbrain post-upgrade" || warn "gbrain post-upgrade reported errors (review above)"
+  else
+    warn "gbrain not on PATH — run 'gbrain post-upgrade' manually after this"
+  fi
+
+  if [ "$DRY_RUN" != 1 ]; then
+    mkdir -p "$BRAIN_DIR"
+    echo "$OLD_VERSION" > "$BRAIN_DIR/just-upgraded-from" 2>/dev/null || true
+  fi
+fi
+
+# ---- return to where we started + restore stash ----------------------------
+TARGET_BRANCH="$CUSTOM_BRANCH"
+git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" || TARGET_BRANCH="$ORIG_BRANCH"
+run "git checkout --quiet $TARGET_BRANCH"
+restore_stash
+
+NEW_VERSION="$(read_version)"
+echo
+if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+  ok "Done — still on v$NEW_VERSION (no upstream change). Now on '$(git rev-parse --abbrev-ref HEAD)'."
+else
+  ok "Done — upgraded v$OLD_VERSION → v$NEW_VERSION. Now on '$(git rev-parse --abbrev-ref HEAD)'."
+fi
+[ "$STASHED" = 1 ] && warn "Auto-stash was popped — double-check your working tree."
+if [ "$REBASED" = 1 ]; then
+  warn "$CUSTOM_BRANCH was rebased and now DIVERGES from its pushed fork remote."
+  echo "  Review, then publish:  git -C $INSTALL_DIR push --force-with-lease swxtch $CUSTOM_BRANCH"
+fi

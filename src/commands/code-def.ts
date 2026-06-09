@@ -40,6 +40,11 @@ export async function findCodeDef(
   const DEF_TYPES = [
     'function', 'class', 'interface', 'type', 'enum', 'struct', 'trait', 'module', 'contract',
     'table', 'view', 'index', 'procedure', 'schema', 'database', 'trigger',
+    // SWX patch: C/C++ symbol_types the (patched) chunker emits — without these,
+    // code-def is blind to C function prototypes, typedefs, macros, and bare
+    // struct/union aggregates. ('function' and 'enum' are already covered above.)
+    'declaration', 'type definition', 'struct specifier', 'union specifier',
+    'preproc def', 'preproc function def',
   ];
   const params: unknown[] = [symbol, limit];
   let whereLang = '';
