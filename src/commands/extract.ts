@@ -624,7 +624,7 @@ export async function extractLinksFromFile(
         // Same broadened slug-shape as makeResolver step 1: accepts
         // digit-leading folders (`90-people/nicolai`) and nested paths.
         // Exact Set membership guards it — no false positives.
-        if (/\//.test(trimmed) && /^[a-z0-9][a-z0-9/_-]*$/.test(trimmed) && allSlugs.has(trimmed)) {
+        if (/\//.test(trimmed) && /^[a-z0-9][a-z0-9./_-]*$/.test(trimmed) && allSlugs.has(trimmed)) {
           return canonical(trimmed);
         }
         const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);

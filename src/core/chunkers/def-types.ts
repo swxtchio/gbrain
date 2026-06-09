@@ -41,6 +41,10 @@ export const DEF_TYPES = [
   'trait definition', 'object definition',                 // Scala
   'contract declaration', 'modifier definition', 'event definition', // Solidity
   'namespace definition', 'template declaration', 'declaration', 'preproc def', // C/C++
+  // SWX patch: the remaining C/C++ forms our patched chunker emits that
+  // upstream's list doesn't carry — typedefs, bare unions, and function-like
+  // macros. Without these, code-def is blind to them in a C/C++ codebase.
+  'type definition', 'union specifier', 'preproc function def', // C/C++ (SWX)
   'type declaration', 'const declaration', 'var declaration', // Go
   'struct item', 'trait item', 'impl item', 'mod item',    // Rust
   'type item', 'const item', 'static item',                // Rust
