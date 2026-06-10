@@ -188,4 +188,19 @@ describe('writePageThrough', () => {
     expect(files.some((f) => f.endsWith('.md'))).toBe(false);
     expect(files.some((f) => f.includes('.tmp.'))).toBe(false);
   });
+
+  test('[swxtch fork] remote (postgres) engine → skipped remote_engine, nothing written', async () => {
+    // Even with a valid sync.repo_path + a real repo dir, a server engine must
+    // NOT write a file: the DB is authoritative (we run remote-DB-only). The
+    // gate returns before touching the engine, so a kind-only stub suffices.
+    await engine.setConfig('sync.repo_path', brainDir);
+    const remoteEngine = { kind: 'postgres' } as unknown as PGLiteEngine;
+
+    const res = await writePageThrough(remoteEngine, 'wiki/ideas/remote-skip-1', {
+      sourceId: 'default',
+    });
+
+    expect(res).toEqual({ written: false, skipped: 'remote_engine' });
+    expect(walkFiles(brainDir).some((f) => f.endsWith('.md'))).toBe(false);
+  });
 });

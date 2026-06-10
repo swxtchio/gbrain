@@ -420,6 +420,13 @@ export function formatSaveOutcome(
       exitCode: 0,
     };
   }
+  if (dbSaved && writeThrough.skipped === 'remote_engine') {
+    return {
+      stdout: `\n_Saved to DB page \`${ctx.slug}\` (remote DB engine — file write-through disabled)._`,
+      stderr,
+      exitCode: 0,
+    };
+  }
   if (dbSaved) {
     // File write attempted but errored (already on stderr). Row is durable.
     return {

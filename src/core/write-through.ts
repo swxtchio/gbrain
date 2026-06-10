@@ -38,6 +38,10 @@ export interface WriteThroughResult {
   path?: string;
   /**
    * Non-error reasons the file was not written:
+   *   - remote_engine: the engine is a server DB (postgres), not the embedded
+   *     local (pglite) brain. The DB is authoritative there, so the on-disk
+   *     mirror is redundant and only litters the CLI/MCP working directory.
+   *     (swxtch fork: we run remote-DB-only — write-through is disabled.)
    *   - no_repo_configured: the resolved target (source `local_path` or, for a
    *     sole-source brain, `sync.repo_path`) is unset (DB-only by design).
    *   - repo_not_found: target set but missing / not a directory.
@@ -49,7 +53,7 @@ export interface WriteThroughResult {
    *   - path_escapes_source_root: the computed file path resolves outside the
    *     source's working tree (hostile slug row / symlinked subtree) — refused.
    */
-  skipped?: 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write' | 'path_escapes_source_root';
+  skipped?: 'remote_engine' | 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write' | 'path_escapes_source_root';
   /** Set when the render/write/rename itself threw (EACCES, ENOTDIR, disk full). */
   error?: string;
 }
@@ -72,6 +76,14 @@ export async function writePageThrough(
   slug: string,
   opts: WritePageThroughOpts = {},
 ): Promise<WriteThroughResult> {
+  // Disk write-through is only meaningful for the embedded local (pglite) brain,
+  // where the repo IS the source of truth and round-trips through `gbrain sync`.
+  // On a server engine (postgres) the DB is authoritative, so the rendered `.md`
+  // is redundant and just litters whatever directory the CLI / MCP server runs
+  // from. The swxtch fork runs remote-DB-only, so skip it outright.
+  if (engine.kind !== 'pglite') {
+    return { written: false, skipped: 'remote_engine' };
+  }
   const sourceId = opts.sourceId ?? 'default';
   try {
     // #2018: pick the disk target so a page is NEVER written into a different
