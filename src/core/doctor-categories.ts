@@ -101,6 +101,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #4795 — reindex-search-vector marker still set: keyword index split
   // across two tokenizers until the resumed run finishes.
   'fts_reindex_incomplete',
+  'onboard_checks',
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',

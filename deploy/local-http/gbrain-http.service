@@ -20,6 +20,15 @@ Type=simple
 # default-flip bug.
 Environment=PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=GBRAIN_POOL_SIZE=6
+# Dual-pool routing: the main pool uses the :6543 transaction pooler
+# (config.json database_url) for high client concurrency; DDL + session-scoped
+# advisory locks (schema-init guard, doctor checks, autopilot/cycle) need a
+# session-mode connection, so they route to a small direct pool whose URL lives
+# in ~/.gbrain/http.env (GBRAIN_DIRECT_DATABASE_URL = the :5432 SESSION pooler).
+# Without this, gbrain auto-derives db.<ref>.supabase.co (IPv6-only → unreachable
+# here) and any direct-pool op hangs (e.g. `gbrain doctor`). Secret stays in the
+# 0600 env file, not in this committed unit. The leading '-' = optional file.
+EnvironmentFile=-%h/.gbrain/http.env
 ExecStart=%h/.bun/bin/bun %h/.bun/bin/gbrain serve --http --port 8787 --bind 127.0.0.1
 Restart=on-failure
 RestartSec=3

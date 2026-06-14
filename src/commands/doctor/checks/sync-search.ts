@@ -44,6 +44,7 @@ import {
 } from './routing-federation.ts';
 import { checkSearchMode, checkEvalDrift } from './search-eval.ts';
 import type { Check } from '../../doctor.ts';
+import { doctorOnboardChecks } from './onboard-bounded.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
 async function runSyncFreshness(ctx: DoctorContext): Promise<Check[]> {
@@ -209,9 +210,7 @@ async function runSearchMode(ctx: DoctorContext): Promise<Check[]> {
     // checks themselves are cheap counts (backed by content_chunks_stale_idx
     // for embed_staleness, TABLESAMPLE on PG >50K for the coverage pair).
     progress.heartbeat('onboard_checks');
-    const { runAllOnboardChecks } = await import('../../../core/onboard/checks.ts');
-    const onboardResults = await runAllOnboardChecks(engine);
-    for (const r of onboardResults) checks.push(r.check);
+    checks.push(...await doctorOnboardChecks(engine));
   }
   return checks;
 }
@@ -240,6 +239,7 @@ export const searchModeEntry: DoctorEntry = {
     'autopilot_lock_scope',
     'stale_locks',
     'cycle_phase_scope',
+    'onboard_checks',
     'embed_staleness',
     'entity_link_coverage',
     'timeline_coverage',
