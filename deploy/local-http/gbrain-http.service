@@ -1,0 +1,30 @@
+[Unit]
+Description=gbrain HTTP MCP server (single shared local instance for all Claude Code sessions)
+Documentation=file://%h/tools/gbrain/deploy/local-http/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Single loopback HTTP MCP server. Every Claude Code session on this VM connects
+# to http://127.0.0.1:8787/mcp instead of each spawning its own stdio
+# `gbrain serve` child. N stdio children each opened their own pool against the
+# remote Supabase session pooler and blew past its 15-client cap (EMAXCONNSESSION),
+# and every reconnect re-ran the ~15s schema-init (the -32000 reconnect flapping).
+# One shared server = one pool, no reconnect storms, survives terminal close.
+#
+# Brain config — DATABASE_URL, OPENAI_API_KEY, and the embedding model pinned to
+# openai:text-embedding-3-large @ 1536 — is read from ~/.gbrain/config.json (the
+# canonical "file plane" post-v0.37). Do NOT duplicate embedding settings here, or
+# an env override would mask the file pin and could resurrect the v0.36 zembed/1280
+# default-flip bug.
+Environment=PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=GBRAIN_POOL_SIZE=6
+ExecStart=%h/.bun/bin/bun %h/.bun/bin/gbrain serve --http --port 8787 --bind 127.0.0.1
+Restart=on-failure
+RestartSec=3
+# Cold start runs schema-init against the remote pooler; give it room.
+TimeoutStartSec=90
+
+[Install]
+WantedBy=default.target
