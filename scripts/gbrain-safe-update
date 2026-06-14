@@ -274,6 +274,31 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
     warn "gbrain not on PATH — run 'gbrain post-upgrade' manually after this"
   fi
 
+  # Restart the shared HTTP MCP server so it loads the freshly-rebased code.
+  # The `gbrain` CLI is bun-linked to this checkout, so a long-running
+  # `gbrain serve --http` (deploy/local-http/) keeps the OLD code in memory until
+  # restarted. Non-fatal + loopback-only: machines without the service just skip.
+  HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
+  HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:8787/health}"
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
+    say "Restarting $HTTP_SERVICE to load the updated code…"
+    run "systemctl --user restart $HTTP_SERVICE"
+    if [ "$DRY_RUN" != 1 ]; then
+      _gb_healthy=0
+      for _ in $(seq 1 30); do
+        if curl -fsS --max-time 3 "$HTTP_HEALTH" >/dev/null 2>&1; then _gb_healthy=1; break; fi
+        sleep 1
+      done
+      if [ "$_gb_healthy" = 1 ]; then
+        ok "$HTTP_SERVICE healthy after restart."
+      else
+        warn "$HTTP_SERVICE did not pass $HTTP_HEALTH within 30s — check: journalctl --user -u $HTTP_SERVICE -n 40"
+      fi
+    fi
+  else
+    warn "$HTTP_SERVICE not installed (systemd user) — skipping HTTP MCP server restart."
+  fi
+
   if [ "$DRY_RUN" != 1 ]; then
     mkdir -p "$BRAIN_DIR"
     echo "$OLD_VERSION" > "$BRAIN_DIR/just-upgraded-from" 2>/dev/null || true
