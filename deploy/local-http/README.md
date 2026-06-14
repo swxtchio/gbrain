@@ -65,6 +65,27 @@ After a fork update, `scripts/gbrain-safe-update` restarts this service for you
 (it loads the rebased code), so a manual restart is only needed for out-of-band
 changes like editing `~/.gbrain/config.json`.
 
+## Connection pooler topology (transaction pooler + dual-pool)
+
+`database_url` (config.json) points at the Supabase **transaction pooler (`:6543`)**
+so high client concurrency (many MCP callers, multi-worker `gbrain sync`) doesn't
+hit the session pooler's 15-client cap. gbrain auto-disables prepared statements on
+`:6543`.
+
+Session-scoped operations (DDL, the schema-init advisory lock, autopilot/cycle
+locks) are **not** transaction-mode safe, so they route to a small **direct pool**
+on the `:5432` **session** pooler via `GBRAIN_DIRECT_DATABASE_URL` in
+`~/.gbrain/http.env` (0600, gitignored — loaded by the unit's `EnvironmentFile=`
+and, for CLI use, by sourcing it in your shell). Without it gbrain auto-derives
+`db.<ref>.supabase.co` which is **IPv6-only → unreachable here**, hanging any
+direct-pool op. For CLI (`gbrain doctor`/`sync`), source it: `set -a; . ~/.gbrain/http.env; set +a`.
+
+Known transaction-pooler limitation: gbrain's **onboard checks hang on `:6543`**
+(they work on `:5432`). `gbrain doctor` bounds that phase with a timeout
+(`GBRAIN_DOCTOR_ONBOARD_TIMEOUT_MS`, default 15000) so it always completes —
+onboard shows a `[WARN]`. For full onboard/pack info run it against the session
+pooler: `GBRAIN_DATABASE_URL=$GBRAIN_DIRECT_DATABASE_URL gbrain onboard --check`.
+
 ## Notes
 
 - Loopback only (`--bind 127.0.0.1`): reachable on this VM, not the network. For

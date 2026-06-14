@@ -7310,8 +7310,48 @@ export async function buildChecks(
     // for embed_staleness, TABLESAMPLE on PG >50K for the coverage pair).
     progress.heartbeat('onboard_checks');
     const { runAllOnboardChecks } = await import('../core/onboard/checks.ts');
-    const onboardResults = await runAllOnboardChecks(engine);
-    for (const r of onboardResults) checks.push(r.check);
+    // SWX: the onboard checks hang on the Supabase TRANSACTION pooler (:6543) —
+    // they complete instantly on the :5432 session pooler but wedge forever on
+    // 6543 (confirmed via an A/B of `gbrain onboard --check`). Because every
+    // check's result is flushed only after this final phase, a hung onboard
+    // phase takes the entire `doctor` run down with it. Bound it so the other
+    // 60+ checks always render; a timeout degrades onboard to a WARN instead of
+    // hanging. Tune/disable via GBRAIN_DOCTOR_ONBOARD_TIMEOUT_MS (0/off = wait).
+    const onboardTimeoutRaw = process.env.GBRAIN_DOCTOR_ONBOARD_TIMEOUT_MS;
+    const onboardTimeoutMs =
+      onboardTimeoutRaw === '0' || onboardTimeoutRaw === 'off'
+        ? 0
+        : Number.isFinite(Number(onboardTimeoutRaw)) && Number(onboardTimeoutRaw) > 0
+          ? Number(onboardTimeoutRaw)
+          : 15000;
+    const onboardPromise = runAllOnboardChecks(engine);
+    onboardPromise.catch(() => {}); // swallow a late rejection if the timeout already won the race
+    try {
+      const onboardResults =
+        onboardTimeoutMs > 0
+          ? await Promise.race([
+              onboardPromise,
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `timed out after ${onboardTimeoutMs}ms — onboard checks are incompatible with the Supabase transaction pooler (:6543). Run \`gbrain onboard --check\` against the :5432 session pooler for full results.`,
+                      ),
+                    ),
+                  onboardTimeoutMs,
+                ),
+              ),
+            ])
+          : await onboardPromise;
+      for (const r of onboardResults) checks.push(r.check);
+    } catch (e) {
+      checks.push({
+        name: 'onboard_checks',
+        status: 'warn',
+        message: `Onboard checks skipped: ${(e as Error).message}`,
+      });
+    }
   }
 
   progress.finish();
