@@ -56,16 +56,21 @@ to pick up the HTTP transport.
 
 ```bash
 systemctl --user status  gbrain-http.service
-systemctl --user restart gbrain-http.service     # e.g. after `git pull` on the fork
+systemctl --user restart gbrain-http.service     # manual reload (e.g. config change)
 journalctl --user -u gbrain-http.service -f
 curl -fsS http://127.0.0.1:8787/health
 ```
+
+After a fork update, `scripts/gbrain-safe-update` restarts this service for you
+(it loads the rebased code), so a manual restart is only needed for out-of-band
+changes like editing `~/.gbrain/config.json`.
 
 ## Notes
 
 - Loopback only (`--bind 127.0.0.1`): reachable on this VM, not the network. For
   cross-machine/global access, see `docs/tutorials/connect-coding-agent.md` and
   `docs/mcp/DEPLOY.md` (HTTPS + `--bind 0.0.0.0` + `--public-url` + OAuth scoping).
-- The `gbrain` CLI is `bun link`ed to this fork checkout, so `systemctl --user
-  restart` after updating the `swxtch` branch picks up new code. Update the fork
-  via `scripts/gbrain-safe-update` (sync upstream → rebase `swxtch` → safe-update).
+- The `gbrain` CLI is `bun link`ed to this fork checkout, so the service must be
+  restarted to pick up new code. Update the fork via `scripts/gbrain-safe-update`
+  (sync upstream → rebase `swxtch` → `bun install` → `gbrain post-upgrade` →
+  **restart `gbrain-http.service`**); it handles the restart automatically.
