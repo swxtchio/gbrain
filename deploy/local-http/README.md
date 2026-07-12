@@ -86,6 +86,49 @@ Known transaction-pooler limitation: gbrain's **onboard checks hang on `:6543`**
 onboard shows a `[WARN]`. For full onboard/pack info run it against the session
 pooler: `GBRAIN_DATABASE_URL=$GBRAIN_DIRECT_DATABASE_URL gbrain onboard --check`.
 
+## Upgrade gotcha: forward-reference bootstrap gap (long-lived brains)
+
+Upgrading a **long-lived** brain (one created many versions ago) can abort schema
+init with a `column "<name>" does not exist` error, leaving the DB **stuck at the
+old schema version** even though the code updated. This bit us upgrading to
+v0.42.58.0: `column "event_page_id" does not exist`, DB frozen at v119.
+
+**Why it happens.** `initSchema()` replays the static schema blob
+(`src/schema.sql` / `src/core/pglite-schema.ts`) **before** `runMigrations()`.
+The blob's `CREATE INDEX` statements run *unconditionally*, but
+`CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists — so a new
+column added to that table by a recent migration never lands during the replay,
+and the blob's index-on-that-column throws before the migration that would add it
+can run. `applyForwardReferenceBootstrap` (in both engine files) exists to
+pre-add exactly these columns, but it only covers them if someone remembered to
+add the new column to it. When a release adds a forward-referenced column and
+*doesn't* extend the bootstrap, every pre-that-version brain wedges on upgrade.
+(Fixed for the v121/v122 Life Chronicle columns in this fork; the class can recur
+on any future release.)
+
+**Recovery / workaround if it recurs:**
+
+1. **Identify the missing column** from the error (`column "X" does not exist`)
+   and which migration adds it (`grep -n "ADD COLUMN.*X" src/core/migrate.ts`).
+2. **Extend the bootstrap** — the correct fix. In *both*
+   `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts`
+   `applyForwardReferenceBootstrap`: add an `information_schema` probe for the
+   column, a `needs…` flag, include it in the early-return guard, and an
+   `ADD COLUMN IF NOT EXISTS` apply block. Keep the two engines in parity
+   (guarded by `test/schema-bootstrap-coverage.test.ts`). Then re-run the
+   migration; the CLI runs from source so the fix is live immediately.
+3. **Then run** `gbrain init --migrate-only` (NOT bare `apply-migrations` — the
+   wedge is in the blob replay, which `init --migrate-only` drives). Verify:
+   `psql "$GBRAIN_DIRECT_DATABASE_URL" -tc "SELECT value FROM config WHERE key='version'"`
+   equals `LATEST_VERSION`.
+
+**Watch for `EMAXCONNSESSION` during recovery.** Migration DDL routes to the
+`:5432` **session** pool (15-client cap). A long-running `gbrain-http.service` (or
+stray CLI workers) can hold all 15 slots → `max clients reached in session mode`.
+Free them first: `systemctl --user restart gbrain-http.service` (also loads the
+new code), confirm `curl -fsS http://127.0.0.1:8787/health`, then re-run the
+migration. Don't sleep-and-hope — poll the health endpoint.
+
 ## Notes
 
 - Loopback only (`--bind 127.0.0.1`): reachable on this VM, not the network. For

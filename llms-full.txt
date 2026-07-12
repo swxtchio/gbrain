@@ -219,7 +219,13 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
-  `test/schema-bootstrap-coverage.test.ts`).
+  `test/schema-bootstrap-coverage.test.ts`). MUST-DO when a migration adds a
+  column that the static schema blob (`schema.sql`/`pglite-schema.ts`) indexes:
+  also add an `ADD COLUMN IF NOT EXISTS` probe to `applyForwardReferenceBootstrap`
+  in BOTH engines. The blob replays (unconditional `CREATE INDEX`) BEFORE
+  migrations run, and `CREATE TABLE IF NOT EXISTS` won't add the column to an
+  existing table — so omitting the bootstrap wedges every long-lived brain on
+  upgrade with `column "<name>" does not exist`, freezing it at the old version.
 - **Contract-first.** `src/core/operations.ts` is the single source; CLI + MCP are generated
   from it. Every op carries `scope: 'read'|'write'|'admin'` + optional `localOnly`. HTTP
   dispatch enforces scope/localOnly before the handler runs.
