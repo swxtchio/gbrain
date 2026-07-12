@@ -166,6 +166,10 @@ const probeRows = await conn<{
     EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_schema = current_schema() AND table_name = 'timeline_entries' AND column_name = 'event_page_id') AS timeline_event_page_id_exists,
     EXISTS (SELECT 1 FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = 'facts') AS facts_exists,
+    EXISTS (SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'facts' AND column_name = 'dimension') AS facts_dimension_exists,
+    EXISTS (SELECT 1 FROM information_schema.tables
             WHERE table_schema = current_schema() AND table_name = 'minion_jobs') AS minion_jobs_exists,
     EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_schema = current_schema() AND table_name = 'minion_jobs' AND column_name = 'timeout_at') AS minion_jobs_timeout_at_exists,
@@ -275,6 +279,8 @@ const probeCr = probe as {
   pages_links_extracted_at_exists?: boolean;
   timeline_entries_exists?: boolean;
   timeline_event_page_id_exists?: boolean;
+  facts_exists?: boolean;
+  facts_dimension_exists?: boolean;
   minion_jobs_exists?: boolean;
   minion_jobs_timeout_at_exists?: boolean;
   minion_jobs_idempotency_key_exists?: boolean;
@@ -305,6 +311,13 @@ const needsPagesLinksExtractedAt = probe.pages_exists && !probeCr.pages_links_ex
 // v121: schema-blob indexes reference event_page_id before migrations run.
 const needsTimelineEventPageId = probeCr.timeline_entries_exists === true
   && !probeCr.timeline_event_page_id_exists;
+// SWX patch — v122 (facts_ontology_dimension): typed per-entity ontology
+// columns on facts. No SCHEMA_SQL index references them today (facts is
+// migration-created, absent from the static blob), so this is defense-in-depth
+// for the column-only forward-reference class that wedged this fork's brain on
+// upgrade. Mirrors PGLiteEngine#applyForwardReferenceBootstrap (engine parity).
+// v122 runs later via runMigrations and is idempotent.
+const needsFactsOntology = probeCr.facts_exists === true && !probeCr.facts_dimension_exists;
 // v7-era (#2626 class sweep): minion_jobs.timeout_at + idempotency_key are
 // migration-added AND referenced by blob indexes (idx_minion_jobs_timeout,
 // uniq_minion_jobs_idempotency) — a pre-v7 minion_jobs wedges blob replay
@@ -341,7 +354,7 @@ if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
     && !needsContextualRetrievalColumns && !needsPagesGeneration
     && !needsPagesEmbeddingSignature
     && !needsPagesLinksExtractedAt
-    && !needsTimelineEventPageId
+    && !needsTimelineEventPageId && !needsFactsOntology
     && !needsMinionJobsTimeoutAt && !needsMinionJobsIdempotencyKey
     && !needsMinionJobsPrivateQueue && !needsMinionJobsAuthority
     && !needsDreamVerdictsExpiresAt) return;
@@ -613,6 +626,17 @@ if (needsTimelineEventPageId) {
   // source of truth for the FK and indexes and runs idempotently afterward.
   await conn.unsafe(`
     ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER;
+  `);
+}
+
+if (needsFactsOntology) {
+  // SWX patch — v122: add only the forward-referenced columns. Migration v122
+  // remains the source of truth and runs idempotently afterward.
+  await conn.unsafe(`
+    ALTER TABLE facts ADD COLUMN IF NOT EXISTS dimension  TEXT;
+    ALTER TABLE facts ADD COLUMN IF NOT EXISTS value      TEXT;
+    ALTER TABLE facts ADD COLUMN IF NOT EXISTS value_hash TEXT;
+    ALTER TABLE facts ADD COLUMN IF NOT EXISTS dim_status TEXT;
   `);
 }
 
