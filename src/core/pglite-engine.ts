@@ -518,7 +518,15 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='embedding_signature') AS pages_embedding_signature_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='pages' AND column_name='links_extracted_at') AS pages_links_extracted_at_exists
+                WHERE table_schema='public' AND table_name='pages' AND column_name='links_extracted_at') AS pages_links_extracted_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='timeline_entries') AS timeline_entries_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='timeline_entries' AND column_name='event_page_id') AS timeline_event_page_id_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='facts') AS facts_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='facts' AND column_name='dimension') AS facts_dimension_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -561,6 +569,10 @@ export class PGLiteEngine implements BrainEngine {
       pages_generation_exists: boolean;
       pages_embedding_signature_exists: boolean;
       pages_links_extracted_at_exists: boolean;
+      timeline_entries_exists: boolean;
+      timeline_event_page_id_exists: boolean;
+      facts_exists: boolean;
+      facts_dimension_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -637,6 +649,19 @@ export class PGLiteEngine implements BrainEngine {
     // it; pre-v112 brains crash without the column, so bootstrap adds it before
     // the CREATE INDEX runs. v112 runs later via runMigrations and is idempotent.
     const needsPagesLinksExtractedAt = probe.pages_exists && !probe.pages_links_extracted_at_exists;
+    // v0.42.x (v121): timeline_entries.event_page_id — Life Chronicle (#2390).
+    // PGLITE_SCHEMA_SQL's partial indexes idx_timeline_event_page /
+    // idx_timeline_event_dedup reference event_page_id and run before v121, but
+    // `CREATE TABLE IF NOT EXISTS timeline_entries` is a no-op on an existing
+    // pre-v121 table so the column never lands — the schema replay aborts with
+    // "column event_page_id does not exist". Bootstrap adds the nullable FK
+    // column first; v121 runs later via runMigrations and is idempotent.
+    const needsTimelineEventPageId = probe.timeline_entries_exists && !probe.timeline_event_page_id_exists;
+    // v0.42.x (v122): facts ontology columns — Life Chronicle (#2390). No
+    // PGLITE_SCHEMA_SQL index references them today; bootstrap is defense-in-depth
+    // for the column-only forward-reference class. v122 runs later via
+    // runMigrations and is idempotent.
+    const needsFactsOntology = probe.facts_exists && !probe.facts_dimension_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -648,7 +673,8 @@ export class PGLiteEngine implements BrainEngine {
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
-        && !needsPagesLinksExtractedAt) return;
+        && !needsPagesLinksExtractedAt
+        && !needsTimelineEventPageId && !needsFactsOntology) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -893,6 +919,31 @@ export class PGLiteEngine implements BrainEngine {
       // v112 runs later via runMigrations and is idempotent.
       await this.db.exec(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsTimelineEventPageId) {
+      // v121 (timeline_entries_event_page_id): the event→timeline projection
+      // pointer. PGLITE_SCHEMA_SQL's partial indexes idx_timeline_event_page /
+      // idx_timeline_event_dedup reference event_page_id and run before v121, so
+      // bootstrap adds the nullable FK column first. v121 runs later via
+      // runMigrations and is idempotent.
+      await this.db.exec(`
+        ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER
+          REFERENCES pages(id) ON DELETE CASCADE;
+      `);
+    }
+
+    if (needsFactsOntology) {
+      // v122 (facts_ontology_dimension): typed per-entity ontology columns on
+      // facts. No PGLITE_SCHEMA_SQL index references them today; bootstrap is
+      // defense-in-depth for the column-only forward-reference class. v122 runs
+      // later via runMigrations and is idempotent.
+      await this.db.exec(`
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS dimension  TEXT;
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS value      TEXT;
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS value_hash TEXT;
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS dim_status TEXT;
       `);
     }
   }

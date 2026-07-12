@@ -507,7 +507,15 @@ export class PostgresEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'embedding_signature') AS pages_embedding_signature_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'links_extracted_at') AS pages_links_extracted_at_exists
+                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'links_extracted_at') AS pages_links_extracted_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = 'timeline_entries') AS timeline_entries_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'timeline_entries' AND column_name = 'event_page_id') AS timeline_event_page_id_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = 'facts') AS facts_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'facts' AND column_name = 'dimension') AS facts_dimension_exists
     `;
     const probe = probeRows[0]!;
 
@@ -603,6 +611,27 @@ export class PostgresEngine implements BrainEngine {
     // SCHEMA_SQL replay creates the index. v112 runs later via runMigrations
     // and is idempotent.
     const needsPagesLinksExtractedAt = probe.pages_exists && !probeCr.pages_links_extracted_at_exists;
+    // v0.42.x (v121): timeline_entries.event_page_id — Life Chronicle (#2390).
+    // SCHEMA_SQL's `CREATE INDEX idx_timeline_event_page/idx_timeline_event_dedup
+    // ON timeline_entries(event_page_id) WHERE event_page_id IS NOT NULL`
+    // (schema.sql lines 557-558) runs UNCONDITIONALLY, but `CREATE TABLE IF NOT
+    // EXISTS timeline_entries` is a no-op on an existing pre-v121 table so the
+    // column never lands — the blob replay aborts with "column event_page_id
+    // does not exist" BEFORE runMigrations can apply v121. Bootstrap adds the
+    // column (+ FK) first; v121 runs later via runMigrations and is idempotent.
+    const probeChron = probe as {
+      timeline_entries_exists?: boolean;
+      timeline_event_page_id_exists?: boolean;
+      facts_exists?: boolean;
+      facts_dimension_exists?: boolean;
+    };
+    const needsTimelineEventPageId = !!probeChron.timeline_entries_exists
+      && !probeChron.timeline_event_page_id_exists;
+    // v0.42.x (v122): facts ontology columns — Life Chronicle (#2390). No
+    // SCHEMA_SQL index references them today (facts is migration-created, absent
+    // from the static blob), so this is defense-in-depth for the column-only
+    // forward-reference class. v122 runs later via runMigrations and is idempotent.
+    const needsFactsOntology = !!probeChron.facts_exists && !probeChron.facts_dimension_exists;
 
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
@@ -613,7 +642,8 @@ export class PostgresEngine implements BrainEngine {
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
-        && !needsPagesLinksExtractedAt) return;
+        && !needsPagesLinksExtractedAt
+        && !needsTimelineEventPageId && !needsFactsOntology) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -858,6 +888,33 @@ export class PostgresEngine implements BrainEngine {
       // idempotent.
       await conn.unsafe(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsTimelineEventPageId) {
+      // v121 (timeline_entries_event_page_id): the event→timeline projection
+      // pointer. SCHEMA_SQL's partial indexes (idx_timeline_event_page,
+      // idx_timeline_event_dedup) reference event_page_id and run before v121;
+      // bootstrap adds the nullable FK column so the blob's CREATE INDEX doesn't
+      // crash. v121 runs later via runMigrations and is idempotent (adds the FK
+      // constraint via a guarded DO block + the same indexes).
+      await conn.unsafe(`
+        ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER
+          REFERENCES pages(id) ON DELETE CASCADE;
+      `);
+    }
+
+    if (needsFactsOntology) {
+      // v122 (facts_ontology_dimension): typed per-entity ontology columns on
+      // facts. No SCHEMA_SQL index references them today; bootstrap is
+      // defense-in-depth for the column-only forward-reference class. v122 runs
+      // later via runMigrations and is idempotent (ADD COLUMN IF NOT EXISTS +
+      // the partial indexes).
+      await conn.unsafe(`
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS dimension  TEXT;
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS value      TEXT;
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS value_hash TEXT;
+        ALTER TABLE facts ADD COLUMN IF NOT EXISTS dim_status TEXT;
       `);
     }
   }
