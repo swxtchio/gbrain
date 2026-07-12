@@ -163,6 +163,10 @@ const FORWARD_REFERENCE_PROBES: readonly Probe[] = [
   ['minion_jobs_submission_authority_exists', 'minion_jobs', 'submission_authority'],
   ['minion_jobs_claim_generation_exists', 'minion_jobs', 'claim_generation'],
   ['facts_exists', 'facts'],
+  ['facts_dimension_exists', 'facts', 'dimension'],
+  ['facts_value_exists', 'facts', 'value'],
+  ['facts_value_hash_exists', 'facts', 'value_hash'],
+  ['facts_dim_status_exists', 'facts', 'dim_status'],
   ['facts_embedding_model_exists', 'facts', 'embedding_model'],
   ['facts_embedded_text_hash_exists', 'facts', 'embedded_text_hash'],
 ];
@@ -305,6 +309,9 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
   // (its blob carries no dream_verdicts).
   const needsDreamVerdictsExpiresAt = dialect.dreamVerdictsForwardReference
     && probe.dream_verdicts_exists && !probe.dream_verdicts_expires_at_exists;
+  const needsFactsOntology = probe.facts_exists
+    && (!probe.facts_dimension_exists || !probe.facts_value_exists
+      || !probe.facts_value_hash_exists || !probe.facts_dim_status_exists);
   const needsFactEmbeddingIdentity = probe.facts_exists
     && (!probe.facts_embedding_model_exists || !probe.facts_embedded_text_hash_exists);
   return {
@@ -315,7 +322,7 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
     needsContextualRetrievalColumns, needsPagesGeneration, needsPagesEmbeddingSignature,
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity,
+    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsFactsOntology,
   };
 }
 
@@ -332,7 +339,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
     needsContextualRetrievalColumns, needsPagesGeneration, needsPagesEmbeddingSignature,
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity,
+    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsFactsOntology,
   } = gaps;
 
   if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -349,7 +356,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
       && !needsTimelineEventPageId
       && !needsMinionJobsTimeoutAt && !needsMinionJobsIdempotencyKey
       && !needsMinionJobsPrivateQueue && !needsMinionJobsAuthority
-      && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity) return;
+      && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity && !needsFactsOntology) return;
 
   process.stderr.write('  Schema forward-reference gap detected, applying bootstrap\n');
 
@@ -372,11 +379,20 @@ async function applyCoreTableGaps(target: ForwardReferenceBootstrapTarget, gaps:
   const exec = (sql: string) => target.exec(sql);
   const { dialect } = target;
   const {
-    needsFactEmbeddingIdentity, needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap,
+    needsFactsOntology, needsFactEmbeddingIdentity, needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap,
     needsPagesDeletedAt, needsChunksEmbeddingImage, needsMcpLogBootstrap, needsSubagentProviderId,
     needsPagesRecency, needsIngestLogSourceId, needsFilesBootstrap, needsOauthClientsBootstrap,
     needsOauthClientGrants, needsOauthClientsSurface, needsSourcesArchive,
   } = gaps;
+
+  if (needsFactsOntology) {
+    await exec(`
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS dimension TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS value TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS value_hash TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS dim_status TEXT;
+    `);
+  }
 
   if (needsFactEmbeddingIdentity) {
     await exec(`
