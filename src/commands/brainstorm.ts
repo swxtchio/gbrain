@@ -420,6 +420,18 @@ export function formatSaveOutcome(
       exitCode: 0,
     };
   }
+  if (dbSaved && writeThrough.skipped === 'disabled_by_config') {
+    // SWX: without this branch the fallthrough below prints "file NOT
+    // written — see error above" when there is no error and no write was
+    // ever attempted: the operator set sync.write_through=false for a
+    // DB-only brain, so the skip is intentional and sync will not
+    // reconcile a file.
+    return {
+      stdout: `\n_Saved to DB page \`${ctx.slug}\` (\`sync.write_through\` is off — DB-only brain, no file written)._`,
+      stderr,
+      exitCode: 0,
+    };
+  }
   if (dbSaved) {
     // File write attempted but errored (already on stderr). Row is durable.
     return {

@@ -142,6 +142,15 @@ describe('formatSaveOutcome (pure)', () => {
     expect(m.stdout).toContain('not a directory');
   });
 
+  test('db only, disabled_by_config → exit 0, no misleading error framing', () => {
+    const o: SaveOutcome = { dbSaved: true, writeThrough: { written: false, skipped: 'disabled_by_config' } };
+    const m = formatSaveOutcome(o, ctx);
+    expect(m.exitCode).toBe(0);
+    expect(m.stdout).toContain('sync.write_through');
+    expect(m.stdout).not.toContain('file NOT written');
+    expect(m.stderr).toEqual([]);
+  });
+
   test('db saved but file errored → exit 0, warns on stderr', () => {
     const o: SaveOutcome = { dbSaved: true, writeThrough: { written: false, error: 'EACCES' } };
     const m = formatSaveOutcome(o, ctx);
