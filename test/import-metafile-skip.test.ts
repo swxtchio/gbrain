@@ -1,12 +1,17 @@
 /**
  * Closes #345: the bulk-import walker must skip SYNC_SKIP_FILES metafiles
- * (README.md / index.md / log.md / schema.md / RESOLVER.md), the same way
- * incremental `sync` (isSyncable) does.
+ * (README.md / log.md / schema.md / RESOLVER.md), the same way incremental
+ * `sync` (isSyncable) does.
  *
  * Root cause this locks: a directory-import pass imported every directory
  * README.md as a page (titled "People", "Companies", …), because
  * collectSyncableFiles only filtered by extension. Those index-titled pages
  * then trigram-corrupted fuzzy entity resolution and inflated orphan count.
+ *
+ * SWX fork delta: index.md is NOT skipped here — the swxtch brain uses it as
+ * a folder's canonical entry page (see SYNC_SKIP_FILES in src/core/sync.ts),
+ * so both the walk and the git fast path must COLLECT it while still
+ * excluding the remaining metafiles.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
@@ -43,23 +48,24 @@ describe('collectSyncableFiles metafile exclusion (closes #345)', () => {
     write('RESOLVER.md', '# Brain Resolver\n');
   }
 
-  test('FS-walk path excludes README/index/log/schema/RESOLVER, keeps real pages', () => {
+  test('FS-walk path excludes README/log/schema/RESOLVER, keeps real pages and index.md', () => {
     seed();
     const got = collectSyncableFiles(tmp).map(f => basename(f));
     expect(got).toContain('example-person.md');
-    for (const meta of ['README.md', 'index.md', 'log.md', 'schema.md', 'RESOLVER.md']) {
+    expect(got).toContain('index.md'); // SWX: folder entry page, syncable
+    for (const meta of ['README.md', 'log.md', 'schema.md', 'RESOLVER.md']) {
       expect(got).not.toContain(meta);
     }
   });
 
-  test('git-fast-path also excludes metafiles', () => {
+  test('git-fast-path also excludes metafiles (and keeps index.md)', () => {
     seed();
     execFileSync('git', ['-C', tmp, 'init', '-q'], { stdio: 'ignore' });
     execFileSync('git', ['-C', tmp, 'add', '-A'], { stdio: 'ignore' });
     const got = collectSyncableFiles(tmp).map(f => basename(f));
     expect(got).toContain('example-person.md');
+    expect(got).toContain('index.md'); // SWX: folder entry page, syncable
     expect(got.filter(n => n === 'README.md')).toHaveLength(0);
-    expect(got).not.toContain('index.md');
     expect(got).not.toContain('log.md');
     expect(got).not.toContain('schema.md');
     expect(got).not.toContain('RESOLVER.md');
