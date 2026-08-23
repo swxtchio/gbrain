@@ -44,6 +44,12 @@ export const DEF_TYPES = [
   'table', 'view', 'index', 'procedure', 'schema', 'database', 'trigger',
   'method declaration', 'method definition', 'constructor declaration',
   'field declaration', 'field definition', 'struct specifier', 'protocol declaration',
+  // SWX patch: C/C++ symbol_types the (patched) chunker emits — without these,
+  // code-def is blind to C function prototypes, typedefs, and object-like
+  // macros. ('function' covers definitions + function-like macros and 'enum'
+  // covers enum_specifier via normalizeSymbolType; 'struct specifier' is
+  // already listed above.)
+  'declaration', 'type definition', 'union specifier', 'preproc def',
   // Dart: normalizeSymbolType has no rule for these four, so they arrive as
   // the node type with underscores replaced. class_definition/enum_declaration/
   // type_alias/function_signature already normalize into the list above.
