@@ -25,9 +25,9 @@ import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import { tmpdir } from 'os';
 import { collectSyncableFiles } from '../src/commands/import.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const ENV = 'GBRAIN_TOP_DIRS';
-let savedEnv: string | undefined;
 let tmp: string;
 
 function write(relPath: string, content: string): void {
@@ -44,7 +44,6 @@ function collectedRel(): string[] {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-top-dirs-'));
-  savedEnv = process.env[ENV];
   write('swx-allowed/page.md', '# Allowed\n');
   write('swx-allowed/nested/deep.md', '# Deep\n');
   write('other-repo/page.md', '# Other\n');
@@ -53,43 +52,42 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (savedEnv === undefined) delete process.env[ENV];
-  else process.env[ENV] = savedEnv;
   rmSync(tmp, { recursive: true, force: true });
 });
 
 describe('GBRAIN_TOP_DIRS allowlist (SWX)', () => {
-  test('FS-walk path: only allowlisted top dirs descend; root files still collect', () => {
-    process.env[ENV] = 'swx-allowed';
-    const got = collectedRel();
-    expect(got).toEqual(['root-level.md', 'swx-allowed/nested/deep.md', 'swx-allowed/page.md']);
+  test('FS-walk path: only allowlisted top dirs descend; root files still collect', async () => {
+    await withEnv({ [ENV]: 'swx-allowed' }, async () => {
+      expect(collectedRel()).toEqual(['root-level.md', 'swx-allowed/nested/deep.md', 'swx-allowed/page.md']);
+    });
   });
 
-  test('git-fast-path: the allowlist is NOT bypassed inside a work tree', () => {
+  test('git-fast-path: the allowlist is NOT bypassed inside a work tree', async () => {
     execFileSync('git', ['-C', tmp, 'init', '-q'], { stdio: 'ignore' });
     execFileSync('git', ['-C', tmp, 'add', '-A'], { stdio: 'ignore' });
-    process.env[ENV] = 'swx-allowed';
-    const got = collectedRel();
-    expect(got).toEqual(['root-level.md', 'swx-allowed/nested/deep.md', 'swx-allowed/page.md']);
+    await withEnv({ [ENV]: 'swx-allowed' }, async () => {
+      expect(collectedRel()).toEqual(['root-level.md', 'swx-allowed/nested/deep.md', 'swx-allowed/page.md']);
+    });
   });
 
-  test('comma list with spaces trims; empty entries ignored', () => {
-    process.env[ENV] = ' swx-allowed , ,other-repo,';
-    const got = collectedRel();
-    expect(got).toEqual([
-      'other-repo/page.md',
-      'root-level.md',
-      'swx-allowed/nested/deep.md',
-      'swx-allowed/page.md',
-    ]);
+  test('comma list with spaces trims; empty entries ignored', async () => {
+    await withEnv({ [ENV]: ' swx-allowed , ,other-repo,' }, async () => {
+      expect(collectedRel()).toEqual([
+        'other-repo/page.md',
+        'root-level.md',
+        'swx-allowed/nested/deep.md',
+        'swx-allowed/page.md',
+      ]);
+    });
   });
 
-  test('unset env collects everything (upstream default unchanged)', () => {
-    delete process.env[ENV];
-    const got = collectedRel();
-    expect(got).toContain('other-repo/page.md');
-    expect(got).toContain('future-repo/new.md');
-    expect(got).toContain('swx-allowed/page.md');
-    expect(got).toContain('root-level.md');
+  test('unset env collects everything (upstream default unchanged)', async () => {
+    await withEnv({ [ENV]: undefined }, async () => {
+      const got = collectedRel();
+      expect(got).toContain('other-repo/page.md');
+      expect(got).toContain('future-repo/new.md');
+      expect(got).toContain('swx-allowed/page.md');
+      expect(got).toContain('root-level.md');
+    });
   });
 });

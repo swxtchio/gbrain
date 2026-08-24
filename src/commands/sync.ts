@@ -1344,10 +1344,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   //
   // v0.41.13 (#1433): the original cleanup loop deleted EVERY pre-existing
   // page for unsyncable-modified paths, including `log.md`, `schema.md`,
-  // `README.md` (and, on upstream, `index.md` — the SWX fork keeps it
-  // syncable) — files that fail `isSyncable` precisely
-  // because they're metafiles by convention, not because the user
-  // "removed" them from the strategy. infiniteGameExp's domain `log.md`
+  // `index.md` (SWX: syncable here), `README.md` — files that fail
+  // `isSyncable` as metafiles by convention, not because the user "removed"
+  // them from the strategy. infiniteGameExp's domain `log.md`
   // pages had been indexed by an older gbrain version (or via direct
   // put_page) and were silently dropped on every subsequent sync. The
   // fix uses `unsyncableReason` (factored from `isSyncable` so they
