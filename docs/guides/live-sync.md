@@ -108,7 +108,8 @@ Triggers sync on push events for instant sync (<5s).
 Sync only indexes "syncable" markdown files. These are excluded by design:
 - Hidden paths (`.git/`, `.raw/`, etc.) and vendored/generated trees
   (`node_modules/`, `dist/`, `build/`, `venv/`)
-- Meta files: `README.md`, `index.md`, `schema.md`, `log.md`, `RESOLVER.md`
+- Meta files: `README.md`, `schema.md`, `log.md`, `RESOLVER.md` (the swxtch
+  fork syncs `index.md` — it is a folder's canonical entry page there)
 
 Everything else is ordinary synced content — including `ops/` (the bundled
 daily-task-manager skill files its canonical page under `ops/tasks`).

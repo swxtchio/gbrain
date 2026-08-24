@@ -87,11 +87,14 @@ find /data/brain -name '*.md' \
   -not -path '*/.raw/*' \
   -not -path '*/ops/*' \
   -not -name 'README.md' \
-  -not -name 'index.md' \
   -not -name 'schema.md' \
   -not -name 'log.md' \
   | wc -l
 ```
+
+(SWX fork note: `index.md` is deliberately NOT excluded above — the swxtch
+brain syncs it as a folder's canonical entry page. On upstream, which skips
+`index.md`, add `-not -name 'index.md'` to the find.)
 
 **Expected:** Page count in `gbrain stats` should be close to the file count.
 Some difference is normal (files added since last sync), but if page count is

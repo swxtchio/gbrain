@@ -86,6 +86,29 @@ Known transaction-pooler limitation: gbrain's **onboard checks hang on `:6543`**
 onboard shows a `[WARN]`. For full onboard/pack info run it against the session
 pooler: `GBRAIN_DATABASE_URL=$GBRAIN_DIRECT_DATABASE_URL gbrain onboard --check`.
 
+## REQUIRED at deploy: keep the brain DB-only (`sync.write_through`)
+
+Upstream defaults **write-through ON**: every `put_page` / capture /
+`brainstorm --save` also renders a `.md` mirror of the page into the
+registered source's `local_path` (or `sync.repo_path`). The old fork patch
+disabled that automatically on postgres engines; it is RETIRED in favor of
+upstream's config flag (introduced in the v0.46.23.0 roll `07f5d28d`,
+extended to the timeline lane in `055ac6c7`) — which means deploying this
+branch **re-enables** `.md` mirroring unless the flag is set.
+
+The shared brain is remote-postgres and DB-authoritative; the mirrors are
+redundant and litter whatever tree the server runs from. Set the flag ONCE
+(it is DB-backed, shared by every client of the brain — CLI, this service,
+and MCP callers all honor it):
+
+```bash
+set -a; . ~/.gbrain/http.env; set +a   # session-pooler URL for CLI use
+gbrain config set sync.write_through false
+gbrain config get sync.write_through    # verify: false
+```
+
+Verify after deploy: `gbrain config get sync.write_through` prints `false`.
+
 ## Upgrade gotcha: forward-reference bootstrap gap (long-lived brains)
 
 Upgrading a **long-lived** brain (one created many versions ago) can abort schema
