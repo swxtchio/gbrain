@@ -67,6 +67,8 @@ int spp_decode_packet(const uint8_t *src, int src_len);
 `;
 
 const CPP_SOURCE = `
+#include <stdint.h>
+
 namespace swx {
 namespace pipeline {
 
@@ -80,6 +82,13 @@ int compute_crc32(const char *data, int len) {
 
 } // namespace pipeline
 } // namespace swx
+
+// linkage_specification exists only in the C++ grammar — this block is what
+// genuinely exercises the PASSTHROUGH recursion through it (the C-header
+// fixture's 'extern "C"' lives inside preproc nodes under the C grammar).
+extern "C" {
+int spp_wire_checksum(const uint8_t *src, int len);
+}
 
 template <typename T>
 T clamp_value(T v, T lo, T hi) {
@@ -113,15 +122,12 @@ describe('SWX: C header symbol extraction (header guards + extern "C")', () => {
     expect(names.has('spp_encode_packet')).toBe(true);
     expect(names.has('spp_decode_packet')).toBe(true);
 
-    // Symbols must survive small-sibling merging: each named symbol above is
-    // its own chunk (not a "merged (N siblings)" blob with symbolName null).
-    const mergedBlob = chunks.find((c) => /merged \(\d+ siblings\)/.test(c.text));
-    if (mergedBlob) {
-      expect(mergedBlob.metadata.symbolName).toBeNull();
-      for (const s of ['spp_encode_packet', 'packet_header_t', 'SPP_MAX_PACKET_SIZE']) {
-        expect(mergedBlob.text).not.toContain(s);
-      }
-    }
+    // Merge survival is pinned by the names.has() assertions above, not by
+    // inspecting merge output: a symbol absorbed into a "merged (N siblings)"
+    // blob carries symbolName null there, so its name would be ABSENT from
+    // `names` and the assertions above would fail. (Round-1 advisory: the
+    // previous conditional `if (mergedBlob)` block asserted nothing for the
+    // committed fixture — removed rather than left as a hollow guard.)
   });
 
   test('every emitted C symbol_type is accepted by code-def DEF_TYPES', async () => {
@@ -145,6 +151,7 @@ describe('SWX: C++ symbol extraction (namespaces + templates)', () => {
     expect(names.has('compute_crc32')).toBe(true); // namespace member function
     expect(names.has('clamp_value')).toBe(true); // templated function
     expect(names.has('PacketHeaderView')).toBe(true); // plain struct
+    expect(names.has('spp_wire_checksum')).toBe(true); // extern "C" linkage_specification member
 
     // The namespace/template wrappers must NOT index as opaque unnamed chunks:
     // no chunk whose symbolType is 'namespace definition' or 'template declaration'.
@@ -158,7 +165,7 @@ describe('SWX: C++ symbol extraction (namespaces + templates)', () => {
     const { chunks } = await symbolsFor(CPP_SOURCE, 'fixture.cpp');
     const defTypes = new Set<string>(DEF_TYPES);
     const named = chunks.filter((c) => c.metadata.symbolName);
-    expect(named.length).toBeGreaterThanOrEqual(3);
+    expect(named.length).toBeGreaterThanOrEqual(4);
     for (const c of named) {
       expect(
         defTypes.has(c.metadata.symbolType),
