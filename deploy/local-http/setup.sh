@@ -14,9 +14,20 @@ UNIT="gbrain-http.service"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# The override must hold end to end: the health probe below uses ${PORT}, so
+# the installed unit must listen on it too — a knob that changes the check
+# but not the thing being checked falsely fails setup.
+[[ "${PORT}" =~ ^[0-9]+$ ]] || { echo "!! GBRAIN_HTTP_PORT must be numeric, got '${PORT}'" >&2; exit 2; }
+
 echo "==> Installing ${UNIT} -> ${DEST_DIR}/"
 mkdir -p "${DEST_DIR}"
 cp "${SRC_DIR}/${UNIT}" "${DEST_DIR}/${UNIT}"
+if [ "${PORT}" != "8787" ]; then
+  echo "==> GBRAIN_HTTP_PORT=${PORT} — templating the installed unit's --port"
+  sed -i "s/--port 8787/--port ${PORT}/" "${DEST_DIR}/${UNIT}"
+  grep -q -- "--port ${PORT}" "${DEST_DIR}/${UNIT}" \
+    || { echo "!! failed to template --port in ${DEST_DIR}/${UNIT}" >&2; exit 1; }
+fi
 
 echo "==> Reloading user systemd + enabling --now"
 systemctl --user daemon-reload
@@ -38,5 +49,5 @@ done
 
 echo "!! Service did not become healthy within 30s. Recent logs:" >&2
 systemctl --user status "${UNIT}" --no-pager -l 2>&1 | tail -20 >&2 || true
-journalctl --user -u "${UNIT}" --no-pager -n 40 2>&1 >&2 || true
+journalctl --user -u "${UNIT}" --no-pager -n 40 >&2 2>&1 || true
 exit 1
