@@ -56,7 +56,10 @@ set -euo pipefail
 INSTALL_DIR="${GBRAIN_DIR:-$HOME/tools/gbrain}"
 TRACK_BRANCH="${GBRAIN_TRACK:-master}"
 REMOTE="${GBRAIN_REMOTE:-origin}"
-LINK_PATH="${GBRAIN_LINK:-$HOME/.local/bin/gbrain-safe-update}"
+# NOTE: ${VAR-default} (no colon) so an explicitly-empty GBRAIN_LINK stays
+# empty and disables the self-link, as the usage header documents. The `:-`
+# form treated empty as unset and silently relinked the default path.
+LINK_PATH="${GBRAIN_LINK-$HOME/.local/bin/gbrain-safe-update}"
 BRAIN_DIR="${GBRAIN_HOME:-$HOME/.gbrain}"
 
 DRY_RUN=0
