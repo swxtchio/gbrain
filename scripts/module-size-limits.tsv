@@ -36,5 +36,5 @@ src/core/embedding-migration.ts	1545	ratchet	new row: crossed 1500 in v0.46.25.0
 src/core/github-source.ts	1560	ratchet	new row: crossed the 1500 unlisted cap in v0.46.23.0 review fix wave (scope-state gating, client hardening, symlink containment)
 src/core/bootstrap/harness.ts	1947	ratchet
 src/commands/hook.ts	1559	ratchet	cathedral-5 heartbeat extraction offsets part of the BrainBench-seam growth; grown v0.46.26.0 megawave hooks-ipc (#4245)
-src/core/chunkers/code.ts	1556	ratchet	new row: crossed the 1500 unlisted cap in v0.46.26.0 megawave (decorated-python defs #3821, version-gate + timeout chunker fixes)
+src/core/chunkers/code.ts	1647	ratchet	raised for SWX port: C/C++ symbol extraction (+91: PASSTHROUGH recursion, type_definition/enum/union/preproc top-level types, declarator-field name chain, C/C++ symbol-preserving merge). Intrinsic walker logic — inseparable into a sibling module without exporting mergeSmallSiblings/extractSymbolName internals.
 src/core/config.ts	1503	ratchet	new row: crossed the 1500 unlisted cap in v0.46.26.0 megawave (spend-controls hint #3703, config-set validation)

@@ -282,6 +282,20 @@ describe('#2185 subprocess smokes — end-to-end error surface', () => {
     expect(r.stderr).toContain("unknown flag --jsno for 'gbrain search'");
   });
 
+  // SWX port, round-1 finding: the doctor onboard-timeout hint mentions
+  // `gbrain onboard --check`; the registry generator's import-graph text scan
+  // bled that prose token onto sync/status/maintain, so all three ACCEPTED
+  // (and silently ignored) an inspection-shaped flag — a typed `sync --check`
+  // ran a real sync. The generator's consumption-gate lane strips it; this
+  // proves rejection end to end on all three commands.
+  for (const cmd of ['sync', 'status', 'maintain']) {
+    test(`gbrain ${cmd} --check is rejected (inspection-shaped prose bleed guard)`, () => {
+      const r = run([cmd, '--check']);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(`unknown flag --check for 'gbrain ${cmd}'`);
+    });
+  }
+
   test('--help still short-circuits before validation', () => {
     const r = run(['init', '--help']);
     expect(r.status).toBe(0);

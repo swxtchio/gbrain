@@ -170,13 +170,23 @@ export function buildFlagRegistry(): Record<string, string[]> {
   // `=== '--dry-run'`). Prose bleed embeds the flag inside a longer string, so
   // it never has quotes on both sides of the bare flag.
   const SAFETY_FLAGS = new Set(['--dry-run', '--allow-noncanonical-root']);
-  // Reindex scope/mode flags can bleed through upgrade's imported modules even
-  // though upgrade does not forward them. Require direct consumption on the
-  // affected dispatch surfaces so callers never get silently ignored selectors.
-  const SCOPING_FLAGS_BY_COMMAND: Record<string, string[]> = {
+  // Consumption-gated flags: flags whose TEXT bleeds through prose or imported
+  // modules onto commands that never act on them. Dangerous where the flag is
+  // inspection-shaped — a silently-ignored `--check` runs the REAL thing.
+  // Require direct consumption evidence on the affected dispatch surface so
+  // callers never get silently ignored selectors. Two observed classes:
+  //   - reindex scope/mode flags bleeding through upgrade's imported modules
+  //     even though upgrade does not forward them;
+  //   - `--check` bleeding onto sync/status/maintain from doctor.ts's
+  //     onboard-timeout hint (`gbrain onboard --check`) via the import-graph
+  //     scan — `gbrain sync --check` must be rejected, not run a real sync.
+  const CONSUMPTION_GATED_FLAGS_BY_COMMAND: Record<string, string[]> = {
     reindex: ['--type'],
     upgrade: ['--type', '--aliases'],
     'post-upgrade': ['--type', '--aliases'],
+    sync: ['--check'],
+    status: ['--check'],
+    maintain: ['--check'],
   };
   const consumes = (text: string, flag: string): boolean =>
     new RegExp(`['"\`]${flag}['"\`]`).test(text);
@@ -213,7 +223,7 @@ export function buildFlagRegistry(): Record<string, string[]> {
     for (const f of SAFETY_FLAGS) {
       if (flags.has(f) && !consumes(depthZeroText, f)) flags.delete(f);
     }
-    for (const f of SCOPING_FLAGS_BY_COMMAND[command] ?? []) {
+    for (const f of CONSUMPTION_GATED_FLAGS_BY_COMMAND[command] ?? []) {
       if (flags.has(f) && !consumes(depthZeroText, f)) flags.delete(f);
     }
     registry[command] = [...flags].sort();
