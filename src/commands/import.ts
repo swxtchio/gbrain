@@ -987,6 +987,21 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   const strategy: SyncStrategy = opts.strategy ?? 'markdown';
   const multimodalOn = process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true';
 
+  // SWX local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain root to an
+  // allowlist of top-level directory NAMES (comma-separated; e.g.
+  // "swx-srtx,swx-spp"). Used when the brain root sits above many sibling
+  // repos and only a subset should sync. Applied at the brain root only:
+  // top-level dirs not in the allowlist are skipped (present AND future ones
+  // — an exclusion list cannot express deny-all-except), root-level files
+  // still collect, subdirectories of an allowed dir descend normally. Must
+  // cover BOTH enumeration routes: the git fast path below (filtered after
+  // `git ls-files`) and the FS walk (descent gate at `d === dir`) — a
+  // walk-only filter is silently bypassed whenever the root is a work tree.
+  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
+  const topDirsAllow = topDirsEnv
+    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
+    : null;
+
   // v0.42.x (#1159 --respect-gitignore / #1483 .gbrainignore): when `dir` is a
   // git work tree, enumerate via `git ls-files` so the walk honors
   // `.gitignore`. Pre-fix the recursive FS walk below descended into every
@@ -998,7 +1013,16 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   // dirs (or git unavailable) fall through to the FS walk below.
   if (!opts.includeGitignored) {
     const gitFiles = gitListSyncableFiles(dir, strategy, multimodalOn, opts.onExcluded);
-    if (gitFiles) return gitFiles;
+    if (gitFiles) {
+      if (!topDirsAllow) return gitFiles;
+      return gitFiles.filter(abs => {
+        // relative() may carry either OS separator — split on both.
+        // Root-level files (single segment) collect, matching the walk's
+        // descent-only gate.
+        const segs = relative(dir, abs).split(/[\\/]/);
+        return segs.length === 1 || topDirsAllow.has(segs[0]);
+      });
+    }
   }
 
   const maxDepth = resolveMaxWalkDepth();
@@ -1046,6 +1070,9 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
       }
 
       if (stat.isDirectory()) {
+        // SWX local patch: at the brain root, restrict descent to
+        // GBRAIN_TOP_DIRS (see the parse site above for the full contract).
+        if (topDirsAllow && d === dir && !topDirsAllow.has(entry)) continue;
         const inodeKey = `${stat.dev}:${stat.ino}`;
         if (visitedInodes.has(inodeKey)) {
           console.warn(`[gbrain] walker cycle detected at ${full}; skipping`);
