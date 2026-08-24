@@ -29,9 +29,15 @@ if [ "${PORT}" != "8787" ]; then
     || { echo "!! failed to template --port in ${DEST_DIR}/${UNIT}" >&2; exit 1; }
 fi
 
-echo "==> Reloading user systemd + enabling --now"
+echo "==> Reloading user systemd + (re)starting"
 systemctl --user daemon-reload
-systemctl --user enable --now "${UNIT}"
+systemctl --user enable "${UNIT}"
+# restart, not `enable --now`: on a RE-RUN against an already-enabled,
+# already-active unit, enable --now is a no-op and daemon-reload restarts
+# nothing — the old process would keep listening on the OLD port while the
+# health probe below checks the new one. restart moves the serving process
+# onto the freshly-installed unit (and starts it on first install).
+systemctl --user restart "${UNIT}"
 
 echo "==> Waiting for ${HEALTH_URL} (up to 30s)"
 for _ in $(seq 1 30); do

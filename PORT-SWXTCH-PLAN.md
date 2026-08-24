@@ -101,10 +101,13 @@ two more suites pinning the old skip behavior:
 - test/doctor-categories.test.ts — the new `onboard_checks` timeout WARN name
   categorized OPS (infrastructure signal, not brain data quality).
 - test/cli-flag-validation.test.ts freshness guard — the timeout error message
-  mentions `gbrain onboard --check`; FLAG_RE scans doctor.ts text via the
-  maintain→doctor and status→sync→doctor chains, so `--check` became legal for
-  sync/status/maintain. Regenerated via the sanctioned
-  `bun run build:flag-registry` (3-line diff; prose mentions count by design).
+  mentioned `gbrain onboard --check`; FLAG_RE's text scan bled that token onto
+  sync/status/maintain, so an inspection-shaped flag was accepted and ignored
+  (a typed `sync --check` would run a real sync). Final resolution: the
+  reworded message carries no bare `--check` token, so scripts/generate-flag-registry.ts
+  and the registry are byte-identical to origin/master, and three subprocess
+  tests pin rejection of `--check` on all three commands (they redden if any
+  future prose bleed regenerates the token in).
 
 ### Pre-existing environmental failures on this box (NOT port-caused)
 
