@@ -31,7 +31,16 @@ export async function runOnboardChecksBounded(engine: BrainEngine): Promise<Chec
       : Number.isFinite(Number(timeoutRaw)) && Number(timeoutRaw) > 0
         ? Number(timeoutRaw)
         : 15000;
-  const onboardPromise = runAllOnboardChecks(engine);
+  // Round-1 review: racing a timer without cancelling was a wedge traded for
+  // a slow leak. The abandoned query keeps its pooler slot, and the whole
+  // deploy/local-http design exists because the session pooler caps at 15
+  // clients — so a doctor run that "completes" by walking away from its own
+  // queries eats the exact resource being rationed. The controller aborts the
+  // in-flight statements when the timer wins; `runAllOnboardChecks` forwards
+  // it to every counting query (see its doc comment for the two steps that
+  // take no signal).
+  const controller = new AbortController();
+  const onboardPromise = runAllOnboardChecks(engine, { signal: controller.signal });
   onboardPromise.catch(() => {}); // swallow a late rejection if the timeout already won the race
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -41,7 +50,8 @@ export async function runOnboardChecksBounded(engine: BrainEngine): Promise<Chec
             onboardPromise,
             new Promise<never>((_, reject) => {
               timer = setTimeout(
-                () =>
+                () => {
+                  controller.abort();
                   reject(
                     new Error(
                       // State the observed fact (the phase did not complete in
@@ -52,7 +62,8 @@ export async function runOnboardChecksBounded(engine: BrainEngine): Promise<Chec
                         'One known cause: the Supabase transaction pooler (:6543) wedges these checks; ' +
                         'against it, run `gbrain onboard` checks via the :5432 session pooler for full results.',
                     ),
-                  ),
+                  );
+                },
                 timeoutMs,
               );
             }),
@@ -69,5 +80,9 @@ export async function runOnboardChecksBounded(engine: BrainEngine): Promise<Chec
     ];
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    // Also abort on the success path: `Promise.all` settles when the LAST
+    // check resolves, and an earlier one may still hold a statement open if
+    // a sibling threw. Aborting an already-settled signal is a no-op.
+    controller.abort();
   }
 }

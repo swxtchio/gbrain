@@ -12,6 +12,14 @@
  *
  * Serial because it uses mock.module (R2 isolation rule) to simulate the hang.
  *
+ * Round-1 review added the second half of the property: the bound must
+ * CANCEL, not merely stop waiting. An abandoned query keeps holding its
+ * pooler slot, and the whole deploy/local-http design exists because the
+ * session pooler caps at 15 clients — so "doctor completes" bought by walking
+ * away from live queries trades a wedge for slow exhaustion of the exact
+ * resource being rationed. `runAllOnboardChecks` now takes an AbortSignal and
+ * forwards it to every counting query.
+ *
  * Fail-without proof: pre-patch, buildChecks awaits the never-resolving
  * onboard promise and this file's first test can only end by bun's per-test
  * timeout (a failure). Post-patch it passes in ~50ms.
@@ -63,6 +71,28 @@ describe('SWX: doctor onboard phase is bounded', () => {
     expect(onboard!.message).toMatch(/timed out after 50ms/);
     // The point of the bound: the other checks rendered instead of wedging.
     expect(checks.length).toBeGreaterThan(20);
+  });
+
+  test('the bound ABORTS the onboard work rather than abandoning it', async () => {
+    // The mock records the signal it was handed and whether it fired. A
+    // handle-free "hang" proves only latency; this proves the wedged work is
+    // told to stop, which is what frees the pooler slot.
+    let seen: AbortSignal | undefined;
+    let abortedAt: number | null = null;
+    mock.module('../src/core/onboard/checks.ts', () => ({
+      runAllOnboardChecks: (_engine: unknown, opts?: { signal?: AbortSignal }) => {
+        seen = opts?.signal;
+        seen?.addEventListener('abort', () => { abortedAt = Date.now(); }, { once: true });
+        return new Promise(() => {});
+      },
+    }));
+    process.env[TIMEOUT_ENV] = '50';
+
+    await buildChecks(engine, []);
+
+    expect(seen, 'the bound passed no AbortSignal to runAllOnboardChecks').toBeDefined();
+    expect(seen!.aborted).toBe(true);
+    expect(abortedAt).not.toBeNull();
   });
 
   test('happy path: resolved onboard results pass through the bound unchanged', async () => {

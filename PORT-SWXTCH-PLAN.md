@@ -283,6 +283,56 @@ Fail-without: removing the `classifySync` gate reddens the incremental case
 (1 pass / 1 fail); removing only the cleanup carve-out reddens the survival
 case (0 pass / 1 fail).
 
+### 5 — the bound has to CANCEL, not just stop waiting (round-1 cluster 4)
+
+The round-1 bound raced `runAllOnboardChecks` against a bare `setTimeout` with
+no `AbortSignal`. Two seats called it blocking and firstmate ruled with them:
+the wedged query keeps running after the WARN, and it keeps holding its pooler
+slot. That is not a tidiness point in this deployment —
+`deploy/local-http/README.md`'s own "Why" section says the shared HTTP server
+exists because the session pooler caps at **15 clients**
+(`EMAXCONNSESSION`). A doctor run that "completes" by walking away from its own
+queries trades a wedge for slow exhaustion of the exact resource being
+rationed. `src/core/onboard/checks.ts` documents the required shape verbatim
+("Per A20: callers can race this against an AbortSignal-bound timer"), and
+`PostgresEngine#runUnsafe` already implements real cancellation
+(postgres.js `.cancel()` plus an already-aborted short-circuit) — the signal
+simply never reached it.
+
+Threaded: `runAllOnboardChecks(engine, opts?)` forwards `opts.signal` to every
+check, each check to `safeCount` / `sampleVisibleEntityCoverage`, and those to
+`engine.executeRaw(sql, params, { signal })`. `runOnboardChecksBounded` owns an
+`AbortController`, aborts it when the timer wins, and also aborts in `finally`
+(`Promise.all` settles on the LAST check, so an earlier one can still hold a
+statement open if a sibling threw).
+
+This edits an upstream file the port had kept clean, which claude flagged as
+firstmate's call. It is kept minimal and additive: `opts` is optional
+everywhere, so `gbrain onboard`, autopilot and skillopt are byte-for-byte
+unchanged. Two steps are honestly NOT cancellable — the schema-pack lookups in
+`checkPackUpgradeAvailable`/`checkTypeProliferation` go through
+`engine.getConfig` and module imports, which take no signal — so the signal
+bounds the DB work, not the whole function, and the doc comment says so rather
+than implying full coverage.
+
+Tests: `test/doctor-onboard-timeout.serial.test.ts` gains a case asserting the
+bound actually hands down a signal and fires it (a handle-free hang proves only
+latency), and `test/onboard-checks-signal.test.ts` proves the signal reaches
+the ENGINE through the real aggregate, plus the no-signal upstream-unchanged
+case and an already-aborted case that still returns a full result set.
+Fail-without: dropping the forwarding in `safeCount` reddens the engine test
+(2 pass / 1 fail); removing the `controller.abort()` calls reddens the bound
+test (0 pass / 1 fail).
+
+**Why two files.** `mock.module` leaks for the life of the process and
+`mock.restore()` does not undo it (verified on bun 1.3.11 in both file orders,
+with both a static binding and a re-`import()`), so a test of the REAL
+aggregate cannot share a process with the file that mocks it to simulate the
+hang. `scripts/run-serial-tests.sh` gives every `*.serial.test.ts` its own bun
+process for exactly this reason, while plain files run in the parallel shards —
+so the split IS the repo's isolation contract, not a workaround. Both file
+headers say so, to stop a future editor merging them.
+
 ### CHUNKER_VERSION 6 → 1006 (round-1 cluster 2)
 
 The round-1 branch changed C/C++ chunk shape and symbol metadata while leaving

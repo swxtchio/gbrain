@@ -30,10 +30,34 @@ export interface OnboardCheckResult {
   remediations: RemediationStep[];
 }
 
-/** Internal sql helper. Returns first row or empty object on throw. */
-async function safeCount(engine: BrainEngine, sql: string, params: unknown[] = []): Promise<number> {
+/**
+ * Cancellation for the onboard phase. Optional everywhere, so every existing
+ * caller (`gbrain onboard`, autopilot, skillopt) is byte-for-byte unchanged;
+ * only a caller that bounds the phase passes one.
+ */
+export interface OnboardCheckOpts {
+  signal?: AbortSignal;
+}
+
+/**
+ * Internal sql helper. Returns first row or empty object on throw.
+ *
+ * `opts.signal` is forwarded to the engine so a caller that BOUNDS this phase
+ * (see `runAllOnboardChecks`'s A20 note) actually cancels the in-flight query
+ * rather than abandoning it. That matters beyond tidiness: an abandoned query
+ * keeps holding its pooler slot, and on a transaction pooler — the topology
+ * where these checks wedge — slots are the scarce resource being rationed.
+ * An AbortError lands in the catch below and reads as 0, same as any other
+ * failure, which is exactly what the bounded caller wants.
+ */
+async function safeCount(
+  engine: BrainEngine,
+  sql: string,
+  params: unknown[] = [],
+  opts?: OnboardCheckOpts,
+): Promise<number> {
   try {
-    const result = await engine.executeRaw(sql, params);
+    const result = await engine.executeRaw(sql, params, opts?.signal ? { signal: opts.signal } : undefined);
     const rows = (result as { rows?: Array<Record<string, unknown>> } | undefined)?.rows
       ?? (result as Array<Record<string, unknown>> | undefined)
       ?? [];
@@ -75,6 +99,7 @@ async function sampleVisibleEntityCoverage(
   engine: BrainEngine,
   sampleClause: string,
   feature: CoverageFeature,
+  opts?: OnboardCheckOpts,
 ): Promise<EntityCoverageSample> {
   try {
     const result = await engine.executeRaw(
@@ -93,6 +118,8 @@ async function sampleVisibleEntityCoverage(
            )
          )::int AS matched
          FROM sampled_entities s`,
+      undefined,
+      opts?.signal ? { signal: opts.signal } : undefined,
     );
     const rows = (result as { rows?: Array<Record<string, unknown>> } | undefined)?.rows
       ?? (result as Array<Record<string, unknown>> | undefined)
@@ -125,10 +152,13 @@ function coverageWithConfidence(sample: EntityCoverageSample): { coverage: numbe
  */
 export async function checkEmbedStaleness(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   const staleCount = await safeCount(
     engine,
     `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
+    undefined,
+    opts,
   );
   const remediations: RemediationStep[] = [];
   let status: 'ok' | 'warn' | 'fail' = 'ok';
@@ -223,6 +253,7 @@ async function resolveNerInferenceCapability(
  */
 export async function checkEntityLinkCoverage(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   // Total visible entity pages. Quarantined pages are hidden from the brain,
   // so they are outside both the coverage numerator and denominator.
@@ -230,6 +261,8 @@ export async function checkEntityLinkCoverage(
     engine,
     `SELECT COUNT(*) AS count FROM pages p
        WHERE ${VISIBLE_ENTITY_PREDICATE}`,
+    undefined,
+    opts,
   );
 
   if (totalEntities === 0) {
@@ -250,6 +283,7 @@ export async function checkEntityLinkCoverage(
     engine,
     sampleClause,
     { table: 'links', pageIdColumn: 'to_page_id' },
+    opts,
   );
   const { coverage, ci } = coverageWithConfidence(sample);
 
@@ -312,11 +346,14 @@ export async function checkEntityLinkCoverage(
  */
 export async function checkTimelineCoverage(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   const totalEntities = await safeCount(
     engine,
     `SELECT COUNT(*) AS count FROM pages p
        WHERE ${VISIBLE_ENTITY_PREDICATE}`,
+    undefined,
+    opts,
   );
 
   if (totalEntities === 0) {
@@ -336,6 +373,7 @@ export async function checkTimelineCoverage(
     engine,
     sampleClause,
     { table: 'timeline_entries', pageIdColumn: 'page_id' },
+    opts,
   );
   const { coverage, ci } = coverageWithConfidence(sample);
   const pct = Math.round(coverage * 100);
@@ -361,7 +399,10 @@ export async function checkTimelineCoverage(
       engine,
       `SELECT COUNT(*) AS count FROM pages
          WHERE type = 'meeting' AND effective_date IS NOT NULL AND deleted_at IS NULL`,
-    );
+    
+    undefined,
+    opts,
+  );
     if (datableMeetings > 0) {
       remediations.push(makeRemediationStep({
         id: 'onboard.extract_timeline_from_meetings',
@@ -392,10 +433,13 @@ export async function checkTimelineCoverage(
  */
 export async function checkTakesCount(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   const takesCount = await safeCount(
     engine,
     `SELECT COUNT(*) AS count FROM takes`,
+    undefined,
+    opts,
   );
 
   let bootstrapEnabled = false;
@@ -446,19 +490,29 @@ export async function checkTakesCount(
  * Per A20: callers can race this against an AbortSignal-bound timer for
  * partial-results fallthrough. Each individual safeCount() returns 0
  * on throw so a single check failure doesn't break the aggregate.
+ *
+ * `opts.signal` makes that race real rather than cosmetic: it reaches every
+ * counting query through `safeCount`/`sampleVisibleEntityCoverage`, so a
+ * caller whose timer fires cancels the in-flight statements instead of
+ * abandoning them to keep holding pooler slots. Not every step is
+ * cancellable — the schema-pack lookups in `checkPackUpgradeAvailable` and
+ * `checkTypeProliferation` go through `engine.getConfig` and module imports,
+ * which take no signal — so the signal bounds the DB work, not the whole
+ * function. Omit it and behaviour is byte-for-byte what it was.
  */
 export async function runAllOnboardChecks(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult[]> {
   return Promise.all([
-    checkEmbedStaleness(engine),
-    checkEntityLinkCoverage(engine),
-    checkTimelineCoverage(engine),
-    checkTakesCount(engine),
+    checkEmbedStaleness(engine, opts),
+    checkEntityLinkCoverage(engine, opts),
+    checkTimelineCoverage(engine, opts),
+    checkTakesCount(engine, opts),
     // v0.42 type-unification (T13-T15): 3 new checks added to onboard.
-    checkPackUpgradeAvailable(engine),
-    checkTypeProliferation(engine),
-    checkDanglingAliases(engine),
+    checkPackUpgradeAvailable(engine, opts),
+    checkTypeProliferation(engine, opts),
+    checkDanglingAliases(engine, opts),
   ]);
 }
 
@@ -474,6 +528,7 @@ export async function runAllOnboardChecks(
  */
 export async function checkPackUpgradeAvailable(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   try {
     const { loadActivePack, findPackSuccessors } = await import('../schema-pack/load-active.ts');
@@ -553,6 +608,7 @@ export async function checkPackUpgradeAvailable(
  */
 export async function checkTypeProliferation(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   let declared = 15;  // fallback to gbrain-base-v2 default if pack unavailable
   try {
@@ -571,6 +627,8 @@ export async function checkTypeProliferation(
   const n = await safeCount(
     engine,
     `SELECT COUNT(DISTINCT type) AS count FROM pages WHERE deleted_at IS NULL AND type IS NOT NULL`,
+    undefined,
+    opts,
   );
   const warn = declared + 5;
   const fail = declared * 2;
@@ -622,6 +680,7 @@ export async function checkTypeProliferation(
  */
 export async function checkDanglingAliases(
   engine: BrainEngine,
+  opts?: OnboardCheckOpts,
 ): Promise<OnboardCheckResult> {
   const slugAliases = await safeCount(
     engine,
@@ -631,6 +690,8 @@ export async function checkDanglingAliases(
       AND p.source_id = sa.source_id
       AND p.deleted_at IS NULL
      WHERE p.id IS NULL`,
+    undefined,
+    opts,
   );
   const pageAliases = await safeCount(
     engine,
@@ -640,6 +701,8 @@ export async function checkDanglingAliases(
       AND p.source_id = pa.source_id
       AND p.deleted_at IS NULL
      WHERE p.id IS NULL`,
+    undefined,
+    opts,
   );
   const n = slugAliases + pageAliases;
   if (n > 0) {
