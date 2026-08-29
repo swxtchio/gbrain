@@ -613,8 +613,8 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 2: 22545 pass / 1 fail / 10 skip**
-(`bun run test`, 1398s, 4 shards + the serial pass; all four shards clean). The
+**Final gate run after review round 3: 22548 pass / 1 fail / 10 skip**
+(`bun run test`, 1542s, 4 shards + the serial pass; all four shards clean). The
 single failure is pre-existing — see below. `bun run verify` 55/55 green;
 `shellcheck` clean on both fork shell scripts.
 
@@ -622,8 +622,20 @@ single failure is pre-existing — see below. `bun run verify` 55/55 green;
 `GBRAIN_UNIT_MAX_PARALLEL=2` produced 117 failures in one shard, every one a
 PGLite `Out of memory` at `connect` — the box's known WASM-OOM class, not a
 logic failure, and the runner's own serial rescue did not recover it.
-`GBRAIN_UNIT_MAX_PARALLEL=1 GBRAIN_SERIAL_POOL=1` is clean (and slower: ~23min
+`GBRAIN_UNIT_MAX_PARALLEL=1 GBRAIN_SERIAL_POOL=1` is clean (and slower: ~26min
 vs ~10). Same order the p2 phase recorded as in force box-wide.
+
+**Two shard-1 failures appeared once in round 3 and were triaged, not
+absorbed.** `skillify-check`'s `--recent` case was real and attributable:
+`execFileSync`'s 1MB default `maxBuffer` truncated a legitimately 1,107,704-byte
+JSON document, because `--recent` audits every file under `src/commands`,
+`src/core` and `scripts` with an mtime inside 7 days — a set this branch's own
+edits and fail-without probes grew past the line, and one that a fresh clone
+trips for anyone. Fixed at the cause (the harness's buffer), fail-without
+re-proven after a first probe that silently did not apply.
+`eval-brainbench-e2e`'s `runBrainBenchCore` case passes 22/22 in isolation on
+this branch, did not fail in the round-2 run, and did not reproduce on the
+re-run — shard pressure, recorded rather than claimed either way.
 
 Two failures the round-1 fix work introduced were caught by running the WHOLE
 suite rather than the touched files, and are fixed: a third numeric
