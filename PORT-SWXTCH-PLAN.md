@@ -618,10 +618,10 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 4: 22552 pass / 3 fail / 10 skip**
-(`bun run test`, 2807s under heavy box load). One failure is the known
-pre-existing upstream cell; the other two are load-induced subprocess timeouts
-proven not port-caused — see below. The
+**Final gate run after review round 4: 22554 pass / 2 fail / 10 skip**
+(`bun run test`, 2320s). **All three parallel shards clean** (8006 / 7143 /
+7405, zero failures). Both remaining failures are in the serial pass: the known
+pre-existing upstream cell, and one load-induced timeout — see below. The
 single failure is pre-existing — see below. `bun run verify` 55/55 green;
 `shellcheck` clean on both fork shell scripts.
 
@@ -632,17 +632,23 @@ logic failure, and the runner's own serial rescue did not recover it.
 `GBRAIN_UNIT_MAX_PARALLEL=1 GBRAIN_SERIAL_POOL=1` is clean (and slower: ~26min
 vs ~10). Same order the p2 phase recorded as in force box-wide.
 
-**Round-4 timeouts under box load, with the same pristine-master proof.**
-This run happened at load average 34-57 (eight users; other sessions), and two
-`cli-search-dispatch` / `commands-search` cases died with exit 124 — the
-subprocess `timeout` kill — after 7-15s. Not port-caused, and the check is the
-one already established for the rename cell: a pristine `origin/master` tree
-extracted with `git archive` fails the SAME four cases under the same load
-(`cli-search-dispatch` ×3 plus the `commands-search` hook timeout), while all
-four pass on this branch when the box is quiet. `bun run verify` hit the same
-wall once — `typecheck` alone takes 98s against verify's 120s cap — and passes
-at `GBRAIN_VERIFY_TIMEOUT=300`. These are the box, not the branch; record them
-as such rather than as a signal.
+**Round-4 ran on a saturated box, and that produced timeouts — not signals.**
+This round's runs happened at load average 10-57 (nine users; other sessions),
+and every extra failure it produced was a wall-clock kill of a subprocess- or
+server-spawning test, each proven environmental rather than assumed:
+
+| Case | Symptom | Proof it is the box |
+|---|---|---|
+| `cli-search-dispatch` ×3 | exit 124 after 7-15s | a pristine `origin/master` tree fails the SAME cases under the same load; both pass on this branch minutes later at lower load |
+| `commands-search` | `beforeEach` hook timeout | same pristine-master run, same result |
+| `admin-embed-spawn` | 90,006ms | 5 pass / 0 fail in isolation once load fell to 10 |
+| `bun run verify` `typecheck` | TIMED OUT at 120s | `tsc --noEmit` alone measures 98s against that cap; 55/55 green at `GBRAIN_VERIFY_TIMEOUT=300` |
+
+None appears in more than one run, none is in a surface this branch touches,
+and the pristine-master comparison is the same standard already accepted for
+the rename cell. Recorded so a future reader does not mistake a busy box for a
+regression — and so the *next* runner knows to check `uptime` before believing
+a wall-clock failure.
 
 **Two shard-1 failures appeared once in round 3 and were triaged, not
 absorbed.** `skillify-check`'s `--recent` case was real and attributable:
