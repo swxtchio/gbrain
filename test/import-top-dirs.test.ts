@@ -56,7 +56,15 @@ afterEach(() => {
 });
 
 describe('GBRAIN_TOP_DIRS allowlist (SWX)', () => {
-  test('FS-walk path: only allowlisted top dirs descend; root files still collect', async () => {
+  test('FS-walk path (NON-GIT root): the descent gate is the only enforcement here', async () => {
+    // `tmp` is deliberately not a git repo in this case, so the git fast path
+    // is skipped and the walk runs. Round-2 review established this matters:
+    // the walk emits via isCollectibleForWalker, which never calls isSyncable,
+    // and runImport does not re-filter the collected list through it — so the
+    // descent gate in collectSyncableFiles is the ONLY thing enforcing the
+    // allowlist on a non-git brain root. Deleting it as a "duplicate of
+    // classifySync" would silently un-scope every such brain, and this case is
+    // what would catch that.
     await withEnv({ [ENV]: 'swx-allowed' }, async () => {
       expect(collectedRel()).toEqual(['root-level.md', 'swx-allowed/nested/deep.md', 'swx-allowed/page.md']);
     });

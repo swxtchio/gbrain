@@ -256,9 +256,19 @@ Re-expressed to close the class rather than add a third copy of the filter:
 `src/core/sync.ts`, `classifySync` consults them (new `SyncableReason`
 `'top-dir-excluded'`), and `collectSyncableFiles` reads the same helpers. Every
 lane already routes through `isSyncable`/`unsyncableReason`, so all three agree
-by construction — the same way `SYNC_SKIP_FILES` makes them agree for 1a. The
-FS-walk descent gate stays, but only as an IO optimisation: removing it would
-cost walk time, not correctness.
+by construction — the same way `SYNC_SKIP_FILES` makes them agree for 1a.
+
+**The FS-walk descent gate is load-bearing, not an optimisation.** Round-1
+wrote it up as "IO only — `classifySync` rejects the same paths anyway", and
+round-2 review falsified that: `collectSyncableFiles`' walk emits through
+`isCollectibleForWalker`, which never calls `isSyncable`, and `runImport` does
+not re-filter the collected list through it either — it applies only the
+exclude globs. So on a NON-GIT brain root that descent gate is the only thing
+enforcing `GBRAIN_TOP_DIRS`. The git fast path re-applies `isAllowedTopDir`
+itself and incremental sync goes through `classifySync`, which is what made the
+gate look redundant. No live bug — the gate is there — but the comment invited
+the removal that would have created one, so both it and this paragraph now say
+the opposite.
 
 **A data-loss path the move exposed, fixed in the same commit.** The
 unsyncable-modified cleanup loop in `commands/sync.ts` deletes the page for any

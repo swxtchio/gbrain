@@ -226,14 +226,26 @@ gbrain code-def spp_encode_packet
 #    threading contracts, frame-layout tables live OUTSIDE every semantic node).
 gbrain search 'threading contract' --json | head -20
 
-# 4. The re-walk gate itself. sources.chunker_version must match the binary's
-#    CHUNKER_VERSION, or none of the above can be true yet.
-gbrain sources status
+# 4. The re-walk gate itself. A source whose stored chunker_version differs
+#    from this binary's is NOT counted "unchanged" by doctor's sync_freshness
+#    check — that mismatch is exactly what forces the full walk. No CLI
+#    surface prints the stored version itself, so this is the observable.
+gbrain doctor --json | grep -A3 '"name": "sync_freshness"'
 ```
 
 **If 2 or 3 come back empty**, the source is still stamped with an older
-chunker version and has not re-chunked. `gbrain sync --full` forces the walk;
-`gbrain reindex --code --force` re-chunks without waiting for a commit.
+chunker version and has not re-chunked. Two recovery paths:
+
+```bash
+gbrain sync --full                       # forces the walk on the next sync
+gbrain reindex-code --force --dry-run    # preview the re-chunk + its embed cost
+gbrain reindex-code --force --yes        # re-chunk now, without waiting for a commit
+```
+
+Two notes on that second path: `reindex-code` is its own command (`gbrain
+reindex` requires `--markdown` and refuses anything else), and it re-embeds, so
+it refuses to run non-interactively without `--yes` — take the `--dry-run`
+preview first.
 
 **If 1 comes back empty** but the repo has `index.md` files, check that this
 binary is the fork build — upstream skips `index.md` (`SYNC_SKIP_FILES` in
@@ -390,8 +402,9 @@ gbrain stats | grep -E 'links|timeline'
 # 8. JSONB integrity (v0.12.2 — Postgres only, PGLite always 0)
 gbrain repair-jsonb --dry-run --json
 
-# 9. swxtch carries landed (see 4d) — substitute a symbol from your own headers
-gbrain code-def <a C symbol you can grep in the repo>
+# 9. swxtch carries landed (see 4d). Substitute a symbol from your own
+#    headers — the placeholder below is not a real one.
+gbrain code-def spp_encode_packet
 ```
 
 If all nine return successfully, the installation is healthy. For the full

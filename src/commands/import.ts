@@ -1095,9 +1095,15 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
       }
 
       if (stat.isDirectory()) {
-        // SWX: at the brain root, don't descend into a non-allowlisted top
-        // dir. This is the IO optimisation only — `classifySync` rejects the
-        // same paths anyway, so removing it would cost time, not correctness.
+        // SWX: at the brain root, don't descend into a non-allowlisted top dir.
+        //
+        // LOAD-BEARING — do not remove as an optimisation. This walk emits via
+        // `isCollectibleForWalker`, which never calls `isSyncable`, and
+        // `runImport` does not re-filter the collected list through it either,
+        // so on a NON-GIT brain root this gate is the only thing enforcing
+        // GBRAIN_TOP_DIRS. (The git fast path re-applies `isAllowedTopDir`
+        // itself, and incremental sync goes through `classifySync`, which is
+        // why the round-1 comment here mistook it for a duplicate.)
         if (topDirsAllow && d === dir && !topDirsAllow.has(entry)) continue;
         const inodeKey = `${stat.dev}:${stat.ino}`;
         if (visitedInodes.has(inodeKey)) {
