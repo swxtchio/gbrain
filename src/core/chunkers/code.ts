@@ -992,6 +992,20 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
   // (def-types.ts), so the lookup allowlist and this guard cannot drift.
   const isDefChunk = (c: CodeChunk): boolean =>
     c.metadata.symbolName != null && MERGE_PROTECTED_SYMBOL_TYPES.has(c.metadata.symbolType);
+  // SWX: the residual half of the fork's C/C++ merge guard (88a02775).
+  // #4511's isDefChunk protects the aggregate forms but DELIBERATELY leaves
+  // 'declaration' and 'preproc def' in MERGEABLE_RUN_TYPES — upstream names
+  // "C #define/prototype runs" as what merging exists for. That is the exact
+  // shape a C API header is made of: a guarded header of N #defines and M
+  // prototypes indexes as ONE {symbolType:'merged', symbolName:null} chunk,
+  // and code-def has no recovery path for a merged chunk. The fork's brains
+  // are C/C++ (spp/srtx), where those prototypes and macros ARE the API
+  // surface, so the preserve-all arm stays — scoped to c/cpp so every other
+  // language keeps upstream's run-merging verbatim.
+  const lang = chunks[0]?.metadata.language;
+  const preserveAllSymbols = lang === 'c' || lang === 'cpp';
+  const isProtectedChunk = (c: CodeChunk): boolean =>
+    isDefChunk(c) || (preserveAllSymbols && c.metadata.symbolName != null);
   const merged: CodeChunk[] = [];
   let i = 0;
   while (i < chunks.length) {
@@ -1003,7 +1017,7 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
     // class body's 3 × 10-token methods are each their own chunk on
     // purpose — merging would erase the (in ClassName) scope header
     // Layer 6 just added.
-    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped || isDefChunk(current)) {
+    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped || isProtectedChunk(current)) {
       merged.push({ ...current, index: merged.length });
       i++;
       continue;
@@ -1014,7 +1028,10 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
     let j = i + 1;
     while (j < chunks.length) {
       const next = chunks[j]!;
-      if (isDefChunk(next)) break; // #4511: never fold a definition into a run
+      // #4511: never fold a definition into a run. SWX: on c/cpp that widens
+      // to every symbol-bearing chunk (see isProtectedChunk) — a leading
+      // symbol-less chunk must not swallow the prototypes that follow it.
+      if (isProtectedChunk(next)) break;
       const nextTokens = estimateTokens(next.text);
       if (groupTokens + nextTokens > chunkTarget) break;
       group.push(next);

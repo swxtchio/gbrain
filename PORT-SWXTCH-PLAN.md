@@ -145,7 +145,7 @@ verdicts changed**; the rest hold with refreshed evidence.
 | 1a index.md syncable | CARRIED | **CARRIED** (evidence refreshed) | `SYNC_SKIP_FILES` still lists `index.md` (`src/core/sync.ts:540`). The *harm* changed: reconcile now soft-deletes (`engine.softDeletePages`, `src/commands/sync.ts:4242`, #4587) instead of hard-deleting, so dropping the patch hides the `*/index` pages for a 72h recovery window and the autopilot purge phase hard-deletes them after it. Still data loss, just delayed. |
 | 1b GBRAIN_TOP_DIRS | CARRIED | **CARRIED** | No upstream allowlist appeared. The wave added `--include-hidden` and made `sync.exclude` persist on every path, but both route through `matchesAnyGlob` (`src/core/sync.ts:320`), which has no negation operator — exclusion still cannot express deny-all-except. Seam moved: `gitListSyncableFiles` gained an `includeHidden` parameter, so the git-fast-path filter re-applies one line lower. |
 | 1c N-segment slug resolver | RETIRED | **RETIRED** | Unchanged: the broadened `/^[a-z0-9][a-z0-9/_-]*$/` resolver is still in `src/core/link-extraction.ts:1206` and `src/commands/extract.ts:611`. Retiring commit stays `5e8816e7` (#3087). |
-| 1d C/C++ chunker | CARRIED (whole) | **SPLIT: carried in part, merge guard RETIRED** | See below — the merge-guard half is now upstream. |
+| 1d C/C++ chunker | CARRIED (whole) | **CARRIED** (re-expressed) | See below. p3 first read the merge guard as retired by `c860a411` (#4511); review round 1 falsified that and it is carried. |
 | 1e code-def DEF_TYPES | CARRIED (4 entries) | **CARRIED (2 entries)** | See below — half the entries were already upstream, and the list moved file. |
 | 1f gbrain-safe-update | CARRIED | **CARRIED** | `gbrain post-upgrade` is still a real command (`src/cli.ts:2195`); the wrapper's other externals (`bun install`, `systemctl --user`) are unaffected. |
 | 2 write-through gate | RETIRED | **RETIRED** | `isWriteThroughDisabled` / `sync.write_through` still gate `writePageThrough` (`src/core/write-through.ts:183,369`). Retiring commits stay `07f5d28d` + `055ac6c7`. The deploy-time ops step (`gbrain config set sync.write_through false`) stands. |
@@ -155,9 +155,9 @@ verdicts changed**; the rest hold with refreshed evidence.
 | 6 bootstrap v121/v122 | RETIRED | **RETIRED** (evidence strengthened) | Beyond `2fca1244`, upstream `d9909cdd` (v0.47.5.0, #4657/#4699) extracted the whole mechanism into `src/core/postgres-engine/forward-reference-bootstrap.ts` — a probe set incl. `timeline_event_page_id_exists` (line 162), an explicit v121 gate (line 293), and `ADD COLUMN IF NOT EXISTS event_page_id` repair (line 595) — plus the blob coverage gate. The fork's hand-added columns are now a strictly smaller subset of a self-repairing upstream path. |
 | 7 docs | MIXED | **MIXED** (unchanged) | CLAUDE.md MUST-DO + llms-full.txt stay DROPPED (upstream documents and mechanically enforces the invariant); the deploy README "Upgrade gotcha" stays CARRIED, now citing `d9909cdd` alongside `2fca1244`. |
 
-### 1d — the merge guard is retired by upstream `c860a411` (#4511)
+### 1d — carried, re-expressed on top of upstream `c860a411` (#4511)
 
-The fork's chunker patch had four parts. Three are still absent upstream and
+The fork's chunker patch has four parts. Three are still absent upstream and
 carry unchanged: `PASSTHROUGH_TYPES` + `collectSemanticNodes` (recursion
 through header guards / `#if` / `extern "C"` / namespace / template), the
 C/C++ `TOP_LEVEL_TYPES` additions (`type_definition`, `enum_specifier`,
@@ -167,30 +167,43 @@ on `7b7921d8`: `grep PASSTHROUGH|collectSemanticNodes|linkage_specification`
 over `src/core/chunkers/code.ts` returns nothing, and the `cpp:`/`c:` sets at
 `code.ts:419-423` are byte-identical to the pre-fork upstream.
 
-The fourth part — the C/C++-only `preserveSymbols` guard in
-`mergeSmallSiblings` — is **RETIRED**. Upstream `c860a411` (#4511, in the
-v0.47.4.0 test-gap closure wave) implemented the same protection at the same
-two seams:
+The fourth part — the C/C++ preserve-all guard in `mergeSmallSiblings` — is
+**also CARRIED**, re-expressed to sit beside upstream's mechanism instead of
+replacing it.
 
-- fork `currentHasSymbol` → upstream `isDefChunk(current)` in the
-  pass-through condition (`src/core/chunkers/code.ts:955`);
-- fork `if (preserveSymbols && next.metadata.symbolName) break` → upstream
-  `if (isDefChunk(next)) break` in the accumulation loop (`code.ts:966`).
+**p3's first pass got this wrong and review round 1 caught it (codex 0 /
+claude 0 / f5-panel 0, all blocking).** The reasoning that failed: upstream
+`c860a411` implements a guard at the same two seams
+(`isDefChunk`/`MERGE_PROTECTED_SYMBOL_TYPES`), derived from `DEF_TYPES`, so it
+looked like a superseding implementation. It is not — it covers only the
+aggregate half. `MERGEABLE_RUN_TYPES` (`def-types.ts:69-75`) deliberately
+keeps `'declaration'` and `'preproc def'` mergeable, naming "C
+`#define`/prototype runs" as what merging exists for. Three seats each
+reproduced the consequence independently on this branch: a guarded header of
+four `#define`s and five prototypes — the ordinary shape of a C API header —
+indexes as **one** `{symbolType:'merged', symbolName:null}` chunk, and
+`findCodeDef` has no recovery path from a merged chunk. Fork `88a02775` named
+"function prototypes ~5 tokens, macros" FIRST as the guard's purpose, and the
+fork's brains are C/C++ (spp/srtx) where those prototypes and macros are the
+API surface. So this is fork behaviour lost, not redundancy, and an "accepted
+delta" written into this plan was not the crew's call to make.
 
-Upstream's version is strictly better for our purpose: it is language-agnostic
-and it is a *derived view* of `code-def`'s allowlist
-(`MERGE_PROTECTED_SYMBOL_TYPES` in `src/core/chunkers/def-types.ts`), so a
-symbol type code-def can resolve cannot be erased by merging, and the two lists
-cannot drift.
+What is on the branch now: `isProtectedChunk = isDefChunk(c) ||
+(preserveAllSymbols && c.metadata.symbolName != null)`, with
+`preserveAllSymbols` scoped to `c`/`cpp` so every other language keeps
+upstream's run-merging verbatim, applied at both seams (`code.ts` ~1020 and
+~1034). Upstream's `isDefChunk` is kept and called first — the fork arm is
+additive, so a future upstream widening of `MERGE_PROTECTED_SYMBOL_TYPES`
+composes rather than conflicts.
 
-One deliberate behavioural delta is accepted rather than fought: upstream's
-`MERGEABLE_RUN_TYPES` keeps `'declaration'` and `'preproc def'` mergeable,
-naming "C `#define`/prototype runs" as exactly what `mergeSmallSiblings` exists
-for. That is a post-dating upstream decision on the fork's own case, so the
-fork's broader "preserve every symbol-bearing C/C++ chunk" rule is dropped, not
-re-litigated. The types the fork actually needed protected — the typedef'd
-aggregates — are covered instead by the 1e entries below, because protection is
-derived from `DEF_TYPES`.
+Fixture gap closed too (f5-panel 1, blocking): the round-1 test held exactly
+one prototype and one `#define`, and that `#define` was already merging
+anonymously with the `#include` un-asserted — nothing exercised a RUN.
+`test/chunkers/code-c-cpp.test.ts` now carries `C_RUN_HEADER` (four macros,
+five prototypes, nothing else) and asserts each is individually named AND that
+no anonymous merged chunk exists. Fail-without: with only the fork arm removed
+from `isProtectedChunk` and upstream's `isDefChunk` left in place, 5 pass /
+2 fail; restored, 7 pass.
 
 ### 1e — reduced from four DEF_TYPES entries to two, in a new file
 
@@ -242,7 +255,6 @@ retire verdict on this base:
 | Retired item | Fork patch (date) | Retiring upstream commit (date) | Ancestor of this branch |
 |---|---|---|---|
 | 1c N-segment slug resolver | `88a02775` 2026-06-09 | `5e8816e7` 2026-07-23 | yes |
-| 1d merge guard | `88a02775` 2026-06-09 | `c860a411` 2026-08-28 (#4511) | yes |
 | 1e `declaration` + `preproc def` | `88a02775` 2026-06-09 | `67e7e8a9` 2026-08-21 (#3789 audit) | yes |
 | 2 write-through engine gate | `425a06fb` 2026-06-10 | `07f5d28d` 2026-08-19 + `055ac6c7` 2026-08-21 | yes |
 | 6 bootstrap v121/v122 | `d74d45be` 2026-07-12 | `2fca1244` 2026-07-13, extended by `d9909cdd` 2026-08-28 | yes |
@@ -368,11 +380,6 @@ here instead:
   `cpp` set indexes `namespace_definition` and `template_declaration` as
   opaque top-level chunks, which is a bug by upstream's own standard (a
   namespace indexes only its name).
-- **C `#define` / prototype RUNS lose their symbol names** under upstream's
-  `MERGEABLE_RUN_TYPES` (see the 1d section). Isolated ones are unaffected.
-  This is an accepted upstream design decision, recorded here so a future
-  operator who finds `gbrain code-def SOME_MACRO` empty on a macro block knows
-  it is known, not a port regression.
 - **Upstream accepts `gbrain sync --check` and `gbrain status --check`** and
   silently ignores them, so a user typing `sync --check` expecting a dry
   inspection runs a real sync. Cause: the bare `--check` token in the

@@ -27,13 +27,14 @@
  *      `MERGE_PROTECTED_SYMBOL_TYPES` (derived from the same list) keeps
  *      small-sibling merging from erasing their `symbol_name`.
  *
- * NOT pinned here, deliberately: the fork's own C/C++-wide merge guard was
- * retired in favour of upstream's `MERGE_PROTECTED_SYMBOL_TYPES` (#4511,
- * c860a411), whose `MERGEABLE_RUN_TYPES` keeps `declaration` and
- * `preproc def` mergeable on purpose — so a RUN of adjacent bare prototypes
- * or object-like `#define`s still folds into one anonymous chunk. That is an
- * upstream design decision post-dating the fork patch; an isolated prototype
- * or macro between protected definitions keeps its name either way.
+ *   5. The fork's C/C++ preserve-all arm in `mergeSmallSiblings`, which sits
+ *      BESIDE upstream's `isDefChunk`/`MERGE_PROTECTED_SYMBOL_TYPES` (#4511)
+ *      rather than replacing it. Upstream's guard covers the aggregate forms
+ *      only — `MERGEABLE_RUN_TYPES` deliberately keeps `declaration` and
+ *      `preproc def` mergeable — so without the fork arm a guarded header
+ *      made of a RUN of `#define`s and prototypes, the ordinary shape of a C
+ *      API header, collapses into one anonymous `merged` chunk that code-def
+ *      cannot resolve anything in. `C_RUN_HEADER` below is that shape.
  */
 
 import { describe, test, expect } from 'bun:test';
@@ -85,6 +86,30 @@ int spp_encode_packet(const uint8_t *src, int src_len, uint8_t *dst);
 #endif
 
 #endif /* SPP_WIRE_H */
+`;
+
+// The shape the fork's merge guard exists for: a guarded C API header whose
+// entire content is a RUN of object-like macros and bare prototypes. Every one
+// of these normalizes to 'preproc def' or 'declaration', which #4511 keeps in
+// MERGEABLE_RUN_TYPES on purpose — so without the fork's preserve-all arm the
+// whole header collapses into one anonymous `merged` chunk and code-def can
+// find nothing in it.
+const C_RUN_HEADER = `
+#ifndef SPP_LIMITS_H
+#define SPP_LIMITS_H
+
+#define SPP_MAX_PACKET_SIZE 1500
+#define SPP_MAX_STREAMS 64
+#define SPP_DEFAULT_TTL 32
+#define SPP_RETRY_LIMIT 5
+
+int spp_encode_packet(const unsigned char *src, int src_len, unsigned char *dst);
+int spp_decode_packet(const unsigned char *src, int src_len);
+int spp_stream_open(int id);
+int spp_stream_close(int id);
+void spp_reset(void);
+
+#endif /* SPP_LIMITS_H */
 `;
 
 const CPP_SOURCE = `
@@ -178,6 +203,38 @@ describe('swxtch: C header symbol extraction (header guards + extern "C")', () =
         `chunk ${c.metadata.symbolName} has symbol_type '${c.metadata.symbolType}' not in DEF_TYPES — code-def would be blind to it`,
       ).toBe(true);
     }
+  });
+});
+
+describe('swxtch: C/C++ macro and prototype RUNS keep their symbol names', () => {
+  test('every macro and prototype in an all-run header is individually named', async () => {
+    const { chunks, names, named } = await symbolsFor(C_RUN_HEADER, 'spp_limits.h');
+
+    for (const macro of ['SPP_MAX_PACKET_SIZE', 'SPP_MAX_STREAMS', 'SPP_DEFAULT_TTL', 'SPP_RETRY_LIMIT']) {
+      expect(names.has(macro), `macro ${macro} lost its symbol name to merging`).toBe(true);
+    }
+    for (const fn of ['spp_encode_packet', 'spp_decode_packet', 'spp_stream_open', 'spp_stream_close', 'spp_reset']) {
+      expect(names.has(fn), `prototype ${fn} lost its symbol name to merging`).toBe(true);
+    }
+
+    // The whole point: none of them ended up inside an anonymous merged blob.
+    // Upstream's isDefChunk alone leaves 'preproc def' and 'declaration'
+    // mergeable, which collapses this header to a single unnamed chunk.
+    const anonymousMerged = chunks.filter(
+      (c) => c.metadata.symbolType === 'merged' && c.metadata.symbolName == null,
+    );
+    expect(anonymousMerged.map((c) => c.text.split('\n')[0])).toEqual([]);
+    expect(named.length).toBeGreaterThanOrEqual(9);
+  });
+
+  test('the run types are the ones upstream leaves mergeable', async () => {
+    const { typeOf } = await symbolsFor(C_RUN_HEADER, 'spp_limits.h');
+    // Pins WHY the fork arm is needed rather than assuming it: these are the
+    // normalized types, and MERGE_PROTECTED_SYMBOL_TYPES does not carry them.
+    expect(typeOf('SPP_MAX_PACKET_SIZE')).toBe('preproc def');
+    expect(typeOf('spp_encode_packet')).toBe('declaration');
+    expect(MERGE_PROTECTED_SYMBOL_TYPES.has('preproc def')).toBe(false);
+    expect(MERGE_PROTECTED_SYMBOL_TYPES.has('declaration')).toBe(false);
   });
 });
 
