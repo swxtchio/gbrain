@@ -327,6 +327,26 @@ shards + the serial pass).
   restored green after.
 
 
+## Repo notes for the next porter
+
+- **Do not run `fm-ensure-agents-md.sh` in this repo.** It refuses here
+  ("both AGENTS.md and CLAUDE.md are real files … reconcile them manually"),
+  and reconciling them is the wrong move: both are upstream-owned, published,
+  user-facing product docs (`AGENTS.md` is the non-Claude-harness install +
+  operating protocol; `CLAUDE.md` is the Claude Code orientation), not agent
+  scratch memory. Merging and symlinking them would be a permanent fork diff
+  in two shipped files — the same friction item 7 dropped the CLAUDE.md
+  MUST-DO prose to avoid. Fork-port knowledge belongs in THIS file.
+- **The in-code marker for a fork delta is `SWX` in a comment on the changed
+  line.** Several spellings are in use (`SWX:`, `SWX patch:`, `SWX local
+  patch:`, `SWX fork delta:`, `swxtch fork:`); a bare `grep -rn SWX src test
+  deploy scripts` finds all of them, which is why they were left alone rather
+  than churned.
+- **Two shell scripts carry fork behaviour** (`deploy/local-http/setup.sh`,
+  `scripts/gbrain-safe-update`) and are guarded hermetically by
+  `test/swx-fork-tooling.test.ts`. Run `shellcheck` on both after touching
+  them; the repo has no shellcheck lane of its own.
+
 ## Follow-ups deliberately NOT filed
 
 `swxtchio/gbrain` is public, has issues disabled, and is not in
