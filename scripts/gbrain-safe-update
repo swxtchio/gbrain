@@ -178,6 +178,61 @@ if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
   say "$CUSTOM_BRANCH carries $CUSTOM_AHEAD commit(s) to replay onto the new $TRACK_BRANCH."
 fi
 
+# ---- write-through posture gate --------------------------------------------
+#
+# Placed HERE, before the stash and the rebase, because the rebase is the
+# irreversible step. The `gbrain` CLI is bun-linked to this checkout, so the
+# instant `git rebase` lands, every new CLI process on the box — capture,
+# `brainstorm --save`, cron sync, minion workers — runs the new code. The HTTP
+# server is not the only disk sink, which is why round-2's placement in front
+# of the explicit restart established nothing: the unit is enabled with
+# `Restart=on-failure` and `WantedBy=default.target`, so systemd re-activates
+# it on the next crash, login or reboot regardless of what this script skips.
+#
+# SCOPED to the deployment it was written for. `gbrain-http.service` being
+# installed is what makes "shared, DB-authoritative brain" true; on a box with
+# no unit this is an ordinary PGLite/file-authoritative brain, where an unset
+# key — the fork's inherited mirror-on posture — is CORRECT, and telling the
+# operator to run `sync.write_through false` there would disable the .md mirror
+# that IS that brain's source of truth. So: no unit, no gate, no probe, no
+# advice.
+#
+# What this establishes and what it does not: it establishes that at this
+# moment the DB-plane posture is decided, and refuses to put new code on the
+# box while it is not. It cannot establish that the posture stays decided —
+# the flag is DB-backed and any client can change it later. No deploy-time
+# check can promise more than that, and the message does not pretend to.
+HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
+if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
+  WT_STATE="unknown:probe-not-run"
+  WT_PROBE="$INSTALL_DIR/deploy/local-http/write-through-probe.ts"
+  if ! command -v bun >/dev/null 2>&1; then
+    WT_STATE="unknown:bun-not-on-path"
+  elif [ ! -r "$WT_PROBE" ]; then
+    WT_STATE="unknown:probe-missing"
+  else
+    WT_STATE="$(bun "$WT_PROBE" 2>/dev/null | tail -1 || true)"
+    [ -n "$WT_STATE" ] || WT_STATE="unknown:probe-no-output"
+  fi
+  case "$WT_STATE" in
+    disabled) ok "sync.write_through is off — brain stays DB-only." ;;
+    *)
+      if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
+        warn "$WT_STATE — proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1."
+      else
+        die "$WT_STATE — refusing to update $INSTALL_DIR.
+   $HTTP_SERVICE is installed, so this box serves the shared DB-authoritative
+   brain, and upstream's sync.write_through flag FAILS OPEN. Rebasing would put
+   the new code behind every gbrain process here — the HTTP server, and also
+   capture, 'brainstorm --save', cron sync and minion workers, all bun-linked to
+   this checkout — each writing a .md mirror into the registered source's tree.
+   Nothing has been changed. Decide once:
+     gbrain config set sync.write_through false   # DB-only, then re-run this
+     GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # keep the mirrors, on purpose"
+      fi ;;
+  esac
+fi
+
 if [ "$CHECK_ONLY" = 1 ]; then
   exit 0
 fi
@@ -366,59 +421,10 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
     warn "gbrain not on PATH — run 'gbrain post-upgrade' manually after this"
   fi
 
-  # The moment the write-through posture can flip, checked BEFORE the restart
-  # that would flip it.
-  #
-  # The fork used to disable disk write-through automatically on postgres
-  # engines; that is retired in favour of upstream's `sync.write_through`
-  # flag, which FAILS OPEN (unset reads as ON). This script rebases the new
-  # code in and restarts the serving process, so a brain whose key was never
-  # set starts mirroring every put_page / capture / brainstorm --save into its
-  # source tree from the restart onward.
-  #
-  # An UNSET key SKIPS the restart rather than warning past it: the upgrade
-  # itself is complete and the running service stays on the code it already
-  # has, which is a known state, instead of being activated into a posture
-  # nobody chose. GBRAIN_ALLOW_WRITE_THROUGH=1 records the "yes, mirror"
-  # answer and proceeds.
-  #
-  # Read through write-through-probe.ts, not `gbrain config get`: `config get`
-  # resolves the FILE plane above the DB plane, while every runtime disk sink
-  # asks `isWriteThroughDisabled`, which reads only the DB plane. The probe
-  # calls that predicate, so it cannot report off while the brain mirrors.
-  WT_STATE="unknown:probe-not-run"
-  WT_PROBE="$INSTALL_DIR/deploy/local-http/write-through-probe.ts"
-  if command -v bun >/dev/null 2>&1 && [ -r "$WT_PROBE" ]; then
-    WT_STATE="$(bun "$WT_PROBE" 2>/dev/null | tail -1 || true)"
-    [ -n "$WT_STATE" ] || WT_STATE="unknown:probe-no-output"
-  elif ! command -v bun >/dev/null 2>&1; then
-    WT_STATE="unknown:bun-not-on-path"
-  else
-    WT_STATE="unknown:probe-missing"
-  fi
-  WT_BLOCKS_RESTART=0
-  case "$WT_STATE" in
-    disabled) ok "sync.write_through is off — brain stays DB-only." ;;
-    *)
-      if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
-        warn "$WT_STATE — proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1."
-      else
-        WT_BLOCKS_RESTART=1
-        warn "$WT_STATE — NOT restarting the HTTP MCP server.
-   Restarting would activate the new code with disk mirroring ON: every
-   put_page / capture / brainstorm --save would also write a .md mirror into
-   the registered source's tree. The upgrade is complete; the running service
-   stays on its current code until you decide:
-     gbrain config set sync.write_through false   # DB-only, then re-run this
-     GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # keep the mirrors, on purpose"
-      fi ;;
-  esac
-
   # Restart the shared HTTP MCP server so it loads the freshly-rebased code.
   # The `gbrain` CLI is bun-linked to this checkout, so a long-running
   # `gbrain serve --http` (deploy/local-http/) keeps the OLD code in memory until
   # restarted. Non-fatal + loopback-only: machines without the service just skip.
-  HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
   # ONE port contract, and the installed unit is what holds it.
   # deploy/local-http/setup.sh templates GBRAIN_HTTP_PORT into the unit's
   # ExecStart, so a literal 8787 here meant every update of a moved service
@@ -439,9 +445,7 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
       | sed -n 's/.*--port[= ]\([0-9][0-9]*\).*/\1/p' | tail -1 || true)"
   fi
   HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:${HTTP_PORT:-8787}/health}"
-  if [ "$WT_BLOCKS_RESTART" = 1 ]; then
-    : # the write-through gate above owns this decision; message already printed
-  elif command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
     say "Restarting $HTTP_SERVICE to load the updated code…"
     run systemctl --user restart "$HTTP_SERVICE"
     if [ "$DRY_RUN" != 1 ]; then

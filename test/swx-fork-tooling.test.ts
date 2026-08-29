@@ -224,18 +224,38 @@ describe('scripts/gbrain-safe-update', () => {
   test('GBRAIN_HOME is a PARENT dir: the brain is read at <home>/.gbrain', () => {
     // gbrain's own configDir() appends '.gbrain' to GBRAIN_HOME. Treating the
     // override as the final directory inspects and backs up the wrong path.
-    // Proven through behaviour: a config.json at <home>/.gbrain answers the
-    // engine read, so the run gets past the abort above.
-    stubGbrainConfig({});
+    //
+    // ARMED, round 3: this case used to leave the bare upstream un-advanced,
+    // so BEHIND=0, the upgrade block never ran, and the engine read it asserts
+    // on never executed — it passed with the config.json deleted, and with the
+    // file written at the PRE-FIX location. advanceUpstream is what makes the
+    // block reachable; the PGLite store makes the backup arm reachable; the
+    // assertion is that the engine read SUCCEEDED and migrations ran.
+    stubGbrainConfig({}); // both reads must fall through to config.json
     const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'disabled');
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 1`);
     const brainHome = join(sandbox, 'brainhome');
     mkdirSync(join(brainHome, '.gbrain'), { recursive: true });
     writeFileSync(join(brainHome, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite' }));
+    // The default store, at the CANONICAL location — reachable only if
+    // BRAIN_DIR resolved to <home>/.gbrain rather than <home>.
+    mkdirSync(join(brainHome, '.gbrain', 'brain.pglite'), { recursive: true });
+    writeFileSync(join(brainHome, '.gbrain', 'brain.pglite', 'marker'), 'store\n');
+    advanceUpstream('pusher-parentdir');
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_HOME: brainHome });
 
     expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
     expect(String(r.stderr)).not.toContain('Cannot determine the brain engine');
+    // Pre-fix (BRAIN_DIR=$GBRAIN_HOME) the config read finds nothing at
+    // <home>/config.json and the run dies before here.
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).toContain('post-upgrade');
+    // And the backup landed under the canonical dir, not the override itself.
+    expect(existsSync(join(brainHome, '.gbrain', 'backups'))).toBe(true);
+    expect(existsSync(join(brainHome, 'backups'))).toBe(false);
   });
 
   /** Advance the bare upstream so BEHIND != 0 and the upgrade block runs. */
@@ -263,76 +283,111 @@ describe('scripts/gbrain-safe-update', () => {
     writeFileSync(join(dir, 'write-through-probe.ts'), `console.log('${state}');\n`);
   }
 
-  test('an unset write_through key SKIPS the restart instead of warning past it', () => {
-    // Round-2: a confirmation placed downstream of the flip is a post-mortem.
-    // The restart is what activates the new code with mirroring on, so an
-    // undecided posture must stop before it — leaving the service on the code
-    // it already has, a known state.
+  test('NO unit installed → the gate does not fire at all', () => {
+    // The scope predicate. gbrain-http.service being installed is what makes
+    // "shared, DB-authoritative brain" true. On a box without it this is an
+    // ordinary PGLite/file-authoritative brain, where an unset key is the
+    // fork's CORRECT inherited posture — and telling that operator to run
+    // `sync.write_through false` would disable the .md mirror that IS the
+    // brain's source of truth.
     stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
     stubWriteThroughProbe(install, 'enabled:unset');
-    // A real bun must run the probe, so point the stub at the real binary.
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    // `cat` exits 1 = no such unit.
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 1`);
+    advanceUpstream('pusher-no-unit');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    // No refusal, no advice to turn the mirror off, and the honest no-unit
+    // branch is reached instead of being masked by the gate.
+    expect(out).not.toContain('refusing to update');
+    expect(out).not.toContain('gbrain config set sync.write_through false');
+    expect(out).toContain('not installed');
+    // The upgrade ran to completion.
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).toContain('post-upgrade');
+  });
+
+  test('unit installed + undecided posture → ABORTS BEFORE the rebase', () => {
+    // The rebase is the irreversible step: the gbrain CLI is bun-linked to
+    // this checkout, so every new process on the box runs the new code the
+    // instant it lands. Suppressing the later restart establishes nothing —
+    // the unit is enabled with Restart=on-failure, so systemd re-activates it
+    // anyway. The observable is that the tree is UNTOUCHED.
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'enabled:unset');
     writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
     writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
-    advanceUpstream('pusher-wt-unset');
+    advanceUpstream('pusher-abort');
+    const headBefore = execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
 
-    const out = `${r.stdout}${r.stderr}`;
-    expect(out).toContain('NOT restarting');
-    expect(out).toContain('gbrain config set sync.write_through false');
+    expect(r.status).not.toBe(0);
+    expect(String(r.stderr)).toContain('refusing to update');
+    // Nothing happened: no rebase, no install, no migrations, no restart.
+    expect(execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim())
+      .toBe(headBefore);
     const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
-    expect(calls, 'the service was restarted despite an undecided posture')
-      .not.toContain('systemctl --user restart');
+    expect(calls).not.toContain('bun install');
+    expect(calls).not.toContain('post-upgrade');
+    expect(calls).not.toContain('systemctl --user restart');
   });
 
-  test('GBRAIN_ALLOW_WRITE_THROUGH=1 records the decision and lets the restart run', () => {
+  test('GBRAIN_ALLOW_WRITE_THROUGH=1 records the decision and lets the update run', () => {
     stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
     stubWriteThroughProbe(install, 'enabled:unset');
     writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
     writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
     writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
-    advanceUpstream('pusher-wt-allow');
+    advanceUpstream('pusher-allow');
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_ALLOW_WRITE_THROUGH: '1' });
 
     expect(`${r.stdout}${r.stderr}`).toContain('GBRAIN_ALLOW_WRITE_THROUGH=1');
     const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).toContain('post-upgrade');
     expect(calls).toContain('systemctl --user restart');
   });
 
-  test('a disabled posture restarts without comment', () => {
+  test('unit installed + decided posture → updates without comment', () => {
     stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
     stubWriteThroughProbe(install, 'disabled');
     writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
     writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
     writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
-    advanceUpstream('pusher-wt-off');
+    advanceUpstream('pusher-off');
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
-
     const out = `${r.stdout}${r.stderr}`;
+
     expect(out).toContain('brain stays DB-only');
-    expect(out).not.toContain('NOT restarting');
+    expect(out).not.toContain('refusing to update');
     const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
     expect(calls).toContain('systemctl --user restart');
   });
 
-  test('an unresolvable posture also stops — an unverified state is not a pass', () => {
+  test('unit installed + unresolvable posture also aborts — unverified is not a pass', () => {
     stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
     // No probe file in the fixture checkout at all.
     writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
     writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
-    advanceUpstream('pusher-wt-unknown');
+    advanceUpstream('pusher-unknown');
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
 
-    expect(`${r.stdout}${r.stderr}`).toContain('NOT restarting');
+    expect(r.status).not.toBe(0);
+    expect(String(r.stderr)).toContain('refusing to update');
     const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
-    expect(calls).not.toContain('systemctl --user restart');
+    expect(calls).not.toContain('post-upgrade');
   });
 
   test('a custom database_path PGLite store is the one backed up', () => {
@@ -440,7 +495,7 @@ exit 0`);
   });
 
   test('no-op rebase does not arm the upgrade block (no install/migrate/restart)', () => {
-    stubSafeUpdateExternals();
+    stubSafeUpdateExternals();  // systemctl stub exits 1 = no unit, so the gate is out of scope
     const install = buildSafeUpdateFixture();
     const r = runScript(SAFE_UPDATE, ['--no-backup'], { GBRAIN_DIR: install });
     expect(r.status).toBe(0);
@@ -448,7 +503,11 @@ exit 0`);
     const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
     expect(calls).not.toContain('bun install');
     expect(calls).not.toContain('post-upgrade');
-    expect(calls).not.toContain('systemctl');
+    // `systemctl --user restart`, not bare 'systemctl': round 3 added a
+    // read-only `systemctl --user cat` ahead of everything to decide whether
+    // the write-through gate is even in scope. Scope detection is not the
+    // upgrade block, which is what this case is about.
+    expect(calls).not.toContain('systemctl --user restart');
   });
 });
 
@@ -501,11 +560,11 @@ exit 0`;
     return p;
   }
 
-  test('an undecided write_through posture stops BEFORE the service is started', () => {
-    // Round-2 cluster 1: round-1 put this check after `systemctl --user
-    // restart`, so the serving process was already live with mirroring on
-    // when it printed. The assertion is ordering, observed through the
-    // systemctl stub log: nothing may be enabled or started.
+  test('an undecided posture stops before ANY state change (round-3 placement)', () => {
+    // Round-1 checked after the restart; round-2 moved it above the restart
+    // but left `cp` of the unit and the `sed -i --port` above it, so a refusal
+    // still left a rewritten unit on disk naming a port the running process
+    // did not use. The assertion is that NOTHING was written or run.
     writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
     // The real probe runs here (setup.sh finds it beside itself in the repo)
     // and reports unknown:no-brain-configured against the empty sandbox HOME.
@@ -514,14 +573,35 @@ exit 0`;
     const r = runScript(SETUP_SH, [], { XDG_CONFIG_HOME: unitsRoot });
 
     expect(r.status).toBe(3);
-    expect(String(r.stderr)).toContain(`Refusing to start`);
+    expect(String(r.stderr)).toContain('Refusing to install');
+    expect(String(r.stderr)).toContain('Nothing has been installed or started');
     const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
-    expect(calls, 'the unit was started despite an unverified posture')
-      .not.toContain('systemctl --user restart');
+    expect(calls).not.toContain('systemctl --user restart');
     expect(calls).not.toContain('systemctl --user enable');
-    // The unit file IS installed — the message says so, and a re-run after the
-    // decision must not have to redo it.
-    expect(existsSync(join(unitsRoot, 'systemd', 'user', 'gbrain-http.service'))).toBe(true);
+    expect(calls).not.toContain('daemon-reload');
+    // No unit file on disk: the cp never ran.
+    expect(existsSync(join(unitsRoot, 'systemd', 'user', 'gbrain-http.service'))).toBe(false);
+  });
+
+  test('the enabled arm refuses too — the condition the gate was written for', () => {
+    // claude 7: the `enabled:*` arm — an unset key on a real brain, the actual
+    // field condition — had no test. The unknown arm and this one both exit 3,
+    // so only a probe reporting `enabled:` distinguishes them.
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    const unitsRoot = join(sandbox, 'units-enabled');
+    // Point setup.sh at a fixture copy of the tree whose probe reports enabled.
+    const fakeRepo = join(sandbox, 'fake-deploy', 'deploy', 'local-http');
+    mkdirSync(fakeRepo, { recursive: true });
+    writeFileSync(join(fakeRepo, 'write-through-probe.ts'), "console.log('enabled:unset');\n");
+    writeFileSync(join(fakeRepo, 'gbrain-http.service'), '[Service]\nExecStart=/x --port 8787\n');
+    writeFileSync(join(fakeRepo, 'setup.sh'), readFileSync(SETUP_SH, 'utf-8'));
+
+    const r = runScript(join(fakeRepo, 'setup.sh'), [], { XDG_CONFIG_HOME: unitsRoot });
+
+    expect(r.status).toBe(3);
+    expect(String(r.stderr)).toContain('disk mirroring would be ON');
+    expect(String(r.stderr)).toContain('enabled:unset');
+    expect(existsSync(join(unitsRoot, 'systemd', 'user', 'gbrain-http.service'))).toBe(false);
   });
 
   test('after a port-change re-run, the SERVING process answers on the selected port', async () => {

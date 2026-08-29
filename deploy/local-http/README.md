@@ -110,15 +110,33 @@ upstream's config flag (introduced in the v0.46.23.0 roll `07f5d28d`,
 extended to the timeline lane in `055ac6c7`) — which means deploying this
 branch **re-enables** `.md` mirroring unless the flag is set.
 
-Both entrypoints CHECK it rather than trusting this page, **before** the step
-that would make mirroring live, and neither proceeds past an undecided posture:
+Both entrypoints CHECK it rather than trusting this page, before the first
+change either one makes, and neither proceeds past an undecided posture:
 
-- `deploy/local-http/setup.sh` checks after installing the unit file and
-  before starting it. An undetermined or mirroring posture exits 3 with the
-  unit installed and nothing started.
-- `scripts/gbrain-safe-update` checks before the restart. The upgrade still
-  completes; only the restart is skipped, so the running service stays on the
-  code it already has rather than being activated into a posture nobody chose.
+- `deploy/local-http/setup.sh` checks before it writes or runs anything. An
+  undetermined or mirroring posture exits 3 with nothing installed and nothing
+  started — earlier revisions checked after the restart, then after the unit
+  had already been copied and re-templated, which left a rewritten unit on disk
+  for the next reboot to pick up.
+- `scripts/gbrain-safe-update` checks before the REBASE, and aborts the whole
+  update rather than skipping a restart. The `gbrain` CLI is bun-linked to this
+  checkout, so the moment the rebase lands every new process on the box —
+  capture, `brainstorm --save`, cron sync, minion workers — runs the new code;
+  the HTTP server is not the only disk sink. And the unit is enabled with
+  `Restart=on-failure` + `WantedBy=default.target`, so skipping one restart
+  would only defer activation to the next crash or reboot.
+- **Only when the unit is installed.** `gbrain-http.service` being present is
+  what makes "shared, DB-authoritative brain" true. On a box without it — an
+  ordinary PGLite/file-authoritative brain — an unset key is the CORRECT
+  inherited posture, and turning write-through off there would disable the
+  `.md` mirror that IS that brain's source of truth. No unit, no gate, no
+  advice.
+
+**What the gate establishes, and what it cannot.** It establishes that at the
+moment it runs the DB-plane posture is decided, and refuses to put new code on
+the box while it is not. It cannot establish that the posture stays decided:
+the flag is DB-backed and any client can change it afterwards. No deploy-time
+check can promise more, and neither message pretends to.
 
 Either way the decision is made once and recorded:
 
