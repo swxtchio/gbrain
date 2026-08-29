@@ -28,7 +28,14 @@ deploy/local-http/setup.sh
 ```
 
 Idempotent. Installs `gbrain-http.service` into `~/.config/systemd/user/`,
-enables + starts it, and waits for `http://127.0.0.1:8787/health`. The brain's
+enables it, `restart`s it (not `enable --now`: on a re-run against an
+already-active unit that is a no-op, so the OLD process would keep serving the
+OLD unit), and waits for `http://127.0.0.1:8787/health`.
+
+`GBRAIN_HTTP_PORT=<n> deploy/local-http/setup.sh` moves the service off 8787:
+the value is numeric-validated, the installed unit copy is templated to
+`--port <n>`, and the health probe checks that same port — so the override
+holds end to end rather than changing only the check. The brain's
 DB URL, OpenAI key, and **embedding model (pinned to `openai:text-embedding-3-large`
 @ 1536)** are read from `~/.gbrain/config.json` — not duplicated in the unit, so
 the file-plane pin stays the single source of truth.
@@ -122,27 +129,36 @@ The blob's `CREATE INDEX` statements run *unconditionally*, but
 `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists — so a new
 column added to that table by a recent migration never lands during the replay,
 and the blob's index-on-that-column throws before the migration that would add it
-can run. `applyForwardReferenceBootstrap` (in both engine files) exists to
-pre-add exactly these columns, but it only covers them if someone remembered to
-add the new column to it. When a release adds a forward-referenced column and
-*doesn't* extend the bootstrap, every pre-that-version brain wedges on upgrade.
-(Fixed upstream for the v121/v122 Life Chronicle columns by `2fca1244`
+can run. `applyForwardReferenceBootstrap` exists to pre-add exactly these columns, but
+it only covers them if someone remembered to add the new column to it. When a
+release adds a forward-referenced column and *doesn't* extend the bootstrap,
+every pre-that-version brain wedges on upgrade.
+
+Fixed upstream for the v121/v122 Life Chronicle columns by `2fca1244`
 "fix(schema): unblock pre-v121 schema replay (#2724) (#2735)" — the fork's own
-bootstrap patch is retired in favor of it, and `test/schema-bootstrap-coverage.test.ts`
-now guards the whole class mechanically; the class can still recur on any future
-release that adds a static-schema-indexed column.)
+bootstrap patch is retired in favor of it — and hardened again by `d9909cdd`
+(v0.47.5.0, #4657), which moved the Postgres probe set + DDL into the shared
+`src/core/postgres-engine/forward-reference-bootstrap.ts` so BOTH replay
+entrypoints (`PostgresEngine.initSchema()` and the standalone `db.initSchema()`)
+run it, and added a blob coverage gate. `test/schema-bootstrap-coverage.test.ts`
+guards the class mechanically. It can still recur on any future release that
+adds a static-schema-indexed column.
 
 **Recovery / workaround if it recurs:**
 
 1. **Identify the missing column** from the error (`column "X" does not exist`)
    and which migration adds it (`grep -n "ADD COLUMN.*X" src/core/migrate.ts`).
-2. **Extend the bootstrap** — the correct fix. In *both*
-   `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts`
-   `applyForwardReferenceBootstrap`: add an `information_schema` probe for the
-   column, a `needs…` flag, include it in the early-return guard, and an
-   `ADD COLUMN IF NOT EXISTS` apply block. Keep the two engines in parity
-   (guarded by `test/schema-bootstrap-coverage.test.ts`). Then re-run the
-   migration; the CLI runs from source so the fix is live immediately.
+2. **Extend the bootstrap** — the correct fix. Two places, kept in parity:
+   `src/core/postgres-engine/forward-reference-bootstrap.ts` (the Postgres
+   probe set + DDL, which `PostgresEngine#applyForwardReferenceBootstrap`
+   delegates to) and `PGLiteEngine#applyForwardReferenceBootstrap` in
+   `src/core/pglite-engine.ts`. In each: add an `information_schema` probe for
+   the column, a `needs…` flag, include it in the early-return guard, and an
+   `ADD COLUMN IF NOT EXISTS` apply block. Parity is guarded by
+   `test/schema-bootstrap-coverage.test.ts` (PGLite side + the Postgres-blob
+   CREATE-INDEX gate, which parses the module's source) and
+   `test/e2e/postgres-bootstrap.test.ts`. Then re-run the migration; the CLI
+   runs from source so the fix is live immediately.
 3. **Then run** `gbrain init --migrate-only` (NOT bare `apply-migrations` — the
    wedge is in the blob replay, which `init --migrate-only` drives). Verify:
    `psql "$GBRAIN_DIRECT_DATABASE_URL" -tc "SELECT value FROM config WHERE key='version'"`
