@@ -22,6 +22,15 @@ function run(args: string[]): { exitCode: number; stdout: string; stderr: string
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: REPO,
+      // `--recent` audits every file under src/commands, src/core and scripts
+      // with an mtime inside 7 days, and emits a full 12-item record per file.
+      // On an actively-worked checkout — or any fresh clone, where every file
+      // has today's mtime — that JSON runs past execFileSync's 1MB default
+      // maxBuffer, which kills the child and leaves TRUNCATED stdout for
+      // JSON.parse to choke on. Measured at 1,107,704 bytes here. The document
+      // is legitimately that big and parses fine when run directly, so the cap
+      // is the harness's, not the command's.
+      maxBuffer: 64 * 1024 * 1024,
     });
     return { exitCode: 0, stdout, stderr: '' };
   } catch (err: any) {
