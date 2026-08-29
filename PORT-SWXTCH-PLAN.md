@@ -560,6 +560,16 @@ An earlier run of the same suite, before the fixes below, reported 22526 pass
   frontmatter slug-authority rejection at the destination is retried, never
   falsely checkpointed". Fails identically on a pristine `origin/master`
   worktree at `7b7921d8` (57 pass / 1 fail there), so it is not port-caused.
+  **Firstmate ruled on this in round 1** (adjudicating codex 4 / claude 11 /
+  f5-panel 9): a failure that reproduces byte-identically on pristine master is
+  a pre-existing upstream defect and out of this branch's scope; the branch's
+  gate is "no new failures versus master", with the pristine-master proof
+  recorded here and the cell named as an unfiled upstream follow-up. The brief
+  scaffold's absolute green-gate lacking that carve-out is a brief defect owned
+  by firstmate and tracked elsewhere. Claude's round-1 isolation experiment
+  narrowed it further: reverting ONLY this branch's two sync files to
+  `origin/master` and re-running still gives 57 pass / 1 fail, and the test
+  references none of the fork's surfaces — so no branch change is available.
 - **2 were this branch's own tests asserting something false.** p2's
   `sync/status/maintain --check` rejection trio. On this base `--check` IS in
   the generated registry for `sync` and `status` — and on pristine master too:
@@ -594,6 +604,33 @@ An earlier run of the same suite, before the fixes below, reported 22526 pass
   `test/swx-fork-tooling.test.ts`. Run `shellcheck` on both after touching
   them; the repo has no shellcheck lane of its own.
 
+## The two wave overlaps the brief named (verified, not assumed)
+
+The brief singled out **sync soft-delete** and the **embed stall watchdog** as
+the changes most likely to retire a fork customization, and said to verify
+rather than assume either direction. Both checks, and both results:
+
+**Sync soft-delete — real overlap, verdict unchanged.** `#4587` made full-sync
+reconcile call `engine.softDeletePages` (`src/commands/sync.ts:4242`) instead
+of hard-deleting. It touches 1a directly: it changes the HARM of dropping the
+index.md carry from immediate page removal to a 72h hidden window ending in the
+autopilot purge. It does not retire the carry — `SYNC_SKIP_FILES` still lists
+`index.md` (`src/core/sync.ts`), so the pages still go away, just later. Row 1a
+and the in-code comment both say this now.
+
+**Embed stall watchdog — NO overlap. Null result.** The watchdog is
+`GBRAIN_EMBED_STALL_ABORT_SECONDS` in `src/core/embed-stall.ts` (new in the
+v0.47.6.0 wave). Checked against the fork commits by enumerating every file
+the seven of them touch — 20 files, listed by `git show --name-only` across
+`88a02775 425a06fb 194d067c 9bbafc96 3eb9aa4a d74d45be 63c50bb2` — and **none
+is an embed path**: the set is the two engines, sync/import/extract,
+link-extraction, the code chunker, code-def, doctor, brainstorm, write-through,
+the deploy files and docs. This branch touches no embed file either
+(`git diff --name-only origin/master..HEAD | grep -i embed` is empty). So the
+watchdog neither retires nor is affected by any of the seven. Recorded so the
+next porter does not redo the check.
+
+
 ## Follow-ups deliberately NOT filed
 
 `swxtchio/gbrain` is public, has issues disabled, and is not in
@@ -619,6 +656,17 @@ here instead:
   on a pristine `origin/master` worktree. Belongs in a PR to
   `garrytan/gbrain`, not in this fork port — the fix is either rewording the
   comment or teaching the generator to ignore tokens inside comments.
+- **`extractSymbolName`'s declarator arm drops the outermost namespace** on an
+  out-of-line C++ definition: `int swx::pipeline::Engine::run(int)` is named
+  `pipeline::Engine::run`, because the `qualified_identifier` `name`-field dive
+  returns the inner `qualified_identifier`. Verified against `origin/master`
+  this is still a strict improvement, not a regression — master returned `null`
+  there, and named `MyType make_thing(int)` as `MyType`, the return type. Worth
+  fixing upstream alongside the rest of the C/C++ reach.
+- **`test/sync-rename-reconcile.serial.test.ts` fails on pristine
+  `origin/master`** at `7b7921d8` (57 pass / 1 fail, same env, both sides).
+  Upstream's own test, from `3f2f3004`. Belongs in a report to
+  `garrytan/gbrain`; there is no branch-side fix.
 - **R8 (the argv `run()` refactor in `scripts/gbrain-safe-update`) has no
   reachable failure** on the non-dry-run path — see the B1 section. It is kept
   as hardening. If it is ever revisited, the honest framing is "class-level

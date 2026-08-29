@@ -5774,6 +5774,51 @@ gbrain search "<text from the correction>"
 
 ---
 
+## 4d. Fork carries actually landed (swxtch)
+
+The three swxtch carries that change what gets INDEXED all deliver only after a
+re-walk, so an install can look healthy while none of them has taken effect.
+These four commands are how you tell.
+
+**Say to your agent:** *"check the swxtch fork carries landed"* — your agent
+runs the commands below.
+
+```bash
+# 1. index.md is a page, not a skipped metafile. Any folder entry page will do.
+gbrain search 'index' --json | head -20
+#    Expect at least one hit whose slug ends in `/index`. Zero hits on a brain
+#    whose repo has index.md files means the carry is not active.
+
+# 2. C/C++ symbols are findable. Substitute a symbol from your own headers —
+#    a function-like macro and a bare prototype are the interesting cases,
+#    because upstream merges runs of those into anonymous chunks.
+gbrain code-def SPP_MAX_PACKET_SIZE
+gbrain code-def spp_encode_packet
+#    Expect a file + line for each. "No definition found" for a symbol you can
+#    grep in the repo means the C/C++ chunker carry has not re-walked yet.
+
+# 3. File-level prose from a C/C++ header is still searchable (licence blocks,
+#    threading contracts, frame-layout tables live OUTSIDE every semantic node).
+gbrain search 'threading contract' --json | head -20
+
+# 4. The re-walk gate itself. sources.chunker_version must match the binary's
+#    CHUNKER_VERSION, or none of the above can be true yet.
+gbrain sources status
+```
+
+**If 2 or 3 come back empty**, the source is still stamped with an older
+chunker version and has not re-chunked. `gbrain sync --full` forces the walk;
+`gbrain reindex --code --force` re-chunks without waiting for a commit.
+
+**If 1 comes back empty** but the repo has `index.md` files, check that this
+binary is the fork build — upstream skips `index.md` (`SYNC_SKIP_FILES` in
+`src/core/sync.ts`), and a mixed install can leave the upstream binary on PATH.
+
+**Scoping note.** If `GBRAIN_TOP_DIRS` is set, every one of these is scoped to
+the allowlisted top-level directories — a symbol in a non-allowlisted sibling
+repo is correctly absent, not missing. `echo "$GBRAIN_TOP_DIRS"` before
+concluding anything is wrong.
+
 ## 5. Embedding Coverage
 
 **Command:**
@@ -5919,9 +5964,12 @@ gbrain stats | grep -E 'links|timeline'
 
 # 8. JSONB integrity (v0.12.2 — Postgres only, PGLite always 0)
 gbrain repair-jsonb --dry-run --json
+
+# 9. swxtch carries landed (see 4d) — substitute a symbol from your own headers
+gbrain code-def <a C symbol you can grep in the repo>
 ```
 
-If all eight return successfully, the installation is healthy. For the full
+If all nine return successfully, the installation is healthy. For the full
 end-to-end sync test (4c), push a real change and verify it appears in search.
 
 ---
