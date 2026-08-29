@@ -621,9 +621,8 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 **Final gate run after review round 4: 22554 pass / 2 fail / 10 skip**
 (`bun run test`, 2320s). **All three parallel shards clean** (8006 / 7143 /
 7405, zero failures). Both remaining failures are in the serial pass: the known
-pre-existing upstream cell, and one load-induced timeout — see below. The
-single failure is pre-existing — see below. `bun run verify` 55/55 green;
-`shellcheck` clean on both fork shell scripts.
+pre-existing upstream cell, and one load-induced timeout — see below.
+`bun run verify` 55/55 green; `shellcheck` clean on both fork shell scripts.
 
 **Run it serially on this box.** An earlier round-2 attempt at
 `GBRAIN_UNIT_MAX_PARALLEL=2` produced 117 failures in one shard, every one a
@@ -839,6 +838,41 @@ underlying point to firstmate: the objective's absolute green-gate has no
 pre-existing-upstream carve-out, so either the scaffold gains one or the
 waiver is recorded against this task. That is firstmate's to settle, not a
 branch change.
+
+## Round-6 record
+
+**One wrong proxy, two armed surfaces.** `BEHIND != 0` asks whether the mirror
+moved; the property both the posture gate and the upgrade block need is whether
+the SERVED ref moves, because the `gbrain` CLI is bun-linked to this checkout.
+Those come apart in both directions, and each direction was live: a lagging
+mirror with the custom branch already rebased made the gate refuse a run whose
+rebase is a no-op on code the box already executes, while a current mirror with
+the custom branch behind made the gate say "lands nothing" as the rebase moved
+HEAD. The same proxy armed the expensive half — `bun install`, a `pg_dump` of
+the live brain, migrations, and a session-dropping restart — for code already
+in service, and it MISSED the fast-forward branch, which moves HEAD without
+setting `REBASED`.
+
+Replaced by one mechanism: `SERVED_HEAD_BEFORE` is captured before anything
+mutates; the gate PREDICTS with an ancestry question against `$UPSTREAM` (the
+ref the rebase lands on — the old code asked `$TRACK_BRANCH`, the
+pre-fast-forward mirror), and the upgrade block CONFIRMS by comparing HEAD to
+that capture. Prediction and confirmation of the same fact, so the two sites
+can no longer disagree about what an upgrade is.
+
+**Crossing axes, not just adding them.** Round 4's record diagnosed that a
+guard set can be blind along an axis it holds constant, and round 4 then added
+the mode axis without CROSSING it with the opt-in — which is exactly how an
+inverted dry-run prediction shipped under twelve green cases. The lesson has a
+sharper form now: adding an axis is not covering it. The crossed cells are in
+place, and the two lagging-mirror cells cover the proxy's other direction.
+
+**Prose that describes a mechanism the artifact does not implement** was swept
+across the round's delta: the gate comment asserting the mirror-based rule (the
+very sentence that would have caught the bug), the chunker sample's claim that
+all five of its rows were type-alias constructs when two have no alias at all,
+and a stale round-3 headline left standing beside the round-4 one. All three
+corrected in place.
 
 ## Follow-ups deliberately NOT filed
 

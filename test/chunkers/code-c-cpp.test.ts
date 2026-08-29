@@ -244,38 +244,50 @@ describe('swxtch: C header symbol extraction (header guards + extern "C")', () =
     expect(typeOf('packet_header_t')).toBe('type definition');
   });
 
-  test('no other language emits that symbol type, so a hit means the C/C++ carry ran', async () => {
+  test("a sample of other languages, incl. every type-alias one, emits no 'type definition'", async () => {
     // The other half of the runbook's claim, asserted against what the chunker
     // PRODUCES rather than against how its source is written. An earlier
     // revision read src/core/chunkers/code.ts as text and checked which
     // TOP_LEVEL_TYPES entries own `type_definition` — that made this repo's own
     // source the subject, which is not a check this crew builds.
     //
-    // Sampled, not exhaustive: these are the languages whose grammars have a
-    // type-alias or typedef-shaped construct, i.e. the plausible sources of a
-    // collision. It cannot prove the negative for all ~35 registered
-    // languages; it does catch the realistic ways the string could stop being
-    // C/C++-exclusive.
-    // Each fixture is written so its type-alias construct reaches
-    // normalizeSymbolType as a TOP-LEVEL chunk — a bare `type Alias = …`
-    // rather than an exported one, which would chunk as the `export statement`
-    // wrapper and never exercise the path. Verified: these emit
-    // type / type declaration / type item / struct item respectively.
-    const others: Array<[string, string, string]> = [
+    // The name says "a sample" because that is what it is: five of ~35
+    // registered languages. It cannot prove the universal the runbook states;
+    // it covers the realistic ways the string could stop being C/C++-exclusive.
+    //
+    // Two groups, because they are not the same evidence. Round-5 review caught
+    // the earlier version calling all five "type-alias constructs" when Java
+    // has no type alias at all and its anchor was `class` — prose describing a
+    // mechanism two of its own rows do not implement.
+
+    // (a) ALIAS-BEARING: the alias construct reaches normalizeSymbolType as a
+    //     top-level chunk, so a normalization drift toward 'type definition'
+    //     shows up here. Bare `type Alias = …`, not exported — an exported one
+    //     chunks as the `export statement` wrapper and never exercises the path.
+    //     Anchors measured, not remembered: ts -> type, go -> type declaration,
+    //     rust -> type item.
+    const aliasBearing: Array<[string, string, string]> = [
       ['t.ts', 'type Alias = { a: number };\ninterface I { b: string }\nfunction g() { return 1; }\n', 'type'],
       ['t.go', 'package m\n\ntype Alias struct{ A int }\n\nfunc F() {}\n', 'type declaration'],
       ['t.rs', 'pub type Alias = u32;\npub struct S { a: u32 }\nfn f() {}\n', 'type item'],
+    ];
+
+    // (b) NO ALIAS CONSTRUCT: these languages have none, so they carry no
+    //     collision risk through normalization. They are here as breadth — a
+    //     grammar upgrade that introduced a `type_definition` node would show
+    //     up — and their anchors are just "this file chunked at all".
+    //     Measured: java -> class, c# -> namespace declaration.
+    const noAlias: Array<[string, string, string]> = [
       ['t.java', 'class C { int f() { return 1; } }\n', 'class'],
       ['t.cs', 'namespace N { class C { int F() => 1; } }\n', 'namespace declaration'],
     ];
 
-    for (const [path, source, aliasType] of others) {
+    for (const [path, source, anchor] of [...aliasBearing, ...noAlias]) {
       const chunks = await chunkCodeText(source, path);
       const types = chunks.map((c) => c.metadata.symbolType);
-      // The sample is only meaningful if the alias-shaped construct actually
-      // became a chunk — otherwise "no offenders" would hold for the wrong
-      // reason, and the case could not redden if normalizeSymbolType drifted.
-      expect(types, `${path} never chunked its type-alias construct`).toContain(aliasType);
+      // Anti-vacuity: without this, "no offenders" could hold because the file
+      // produced nothing, and the case could not redden on a drift.
+      expect(types, `${path} did not chunk its anchor construct (${anchor})`).toContain(anchor);
       const offenders = chunks
         .filter((c) => c.metadata.symbolType === 'type definition')
         .map((c) => `${path}:${c.metadata.symbolName}`);
