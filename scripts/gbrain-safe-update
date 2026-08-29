@@ -4,8 +4,9 @@
 #
 # Why this exists:
 #   This gbrain checkout is a swxtch FORK: `origin` mirrors upstream (garrytan/gbrain,
-#   default branch `master`) and your work lives as `SWX:` commits on the `swxtch`
-#   branch (pushed to swxtchio/gbrain). The documented upgrade (`git pull origin master`)
+#   default branch `master`) and your work lives on the `swxtch` branch (pushed to
+#   swxtchio/gbrain), where the in-code deltas are marked `SWX` in a comment on the
+#   changed line. The documented upgrade (`git pull origin master`)
 #   assumes a vanilla `master` checkout — run from `swxtch` it would merge upstream INTO
 #   your fork (or, worse, a hard reset elsewhere would discard your commits). This script
 #   instead:

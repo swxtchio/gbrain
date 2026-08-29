@@ -1,22 +1,27 @@
 /**
- * SWX fork tooling — hermetic guards for the round-1 shell fixes.
+ * SWX fork tooling — hermetic guards for the fork's two shell scripts.
  *
- * Round-2 blocking item: three round-1 fixes shipped with no test that can
- * fail. These three tests are the guards. Everything is hermetic: temporary
- * git repos with local bare remotes (no network), stubbed bun/gbrain/
- * systemctl on a prepended PATH, and a REAL loopback listener + REAL curl
- * for the service-port test (the round-2 anti-gap: asserting the unit FILE
- * contains the port would pass while the old process keeps serving the old
- * port — the assertion must be that the SERVING PROCESS answers on the
- * selected port after a re-run).
+ * Everything is hermetic: temporary git repos with local bare remotes (no
+ * network), stubbed bun/gbrain/systemctl on a prepended PATH, and a REAL
+ * loopback listener + REAL curl for the service-port test. That last part is
+ * the point of the third test: asserting the unit FILE contains the port
+ * would pass while the old process keeps serving the old port, so the
+ * assertion has to be that the SERVING PROCESS answers on the selected port
+ * after a re-run.
  *
- * Fail-without mapping:
- *  1. argv run(): under the old `eval "$@"` runner, the stash call site's
- *     spaced message ("gbrain-safe-update auto-stash") re-parses into a
- *     pathspec that matches nothing -> nonzero exit under set -e -> red.
+ * Fail-without mapping — each verified by reverting ONLY that fix:
+ *  1. argv run(): the pre-fix `--dry-run` renderer echoed "$*", which
+ *     flattens argv into a space-joined string, so the printed command does
+ *     not re-parse into what would actually run -> the stash message comes
+ *     back as four bare words -> red.
+ *     (NOT a stash-failure guard: the pre-fix `eval "$@"` runner executes the
+ *     pre-quoted stash call site correctly — the single quotes survive the
+ *     re-parse — so the non-dry-run path is identical either way. Reverting
+ *     it was tried and the test stayed green, which is why this test asserts
+ *     the dry-run rendering instead.)
  *  2. no-op-rebase gate: pre-fix, REBASED=1 armed the upgrade block on a
- *     no-change run -> the stub log would record bun install / post-upgrade /
- *     systemctl restart -> red.
+ *     no-change run -> the stub log records bun install / post-upgrade ->
+ *     red.
  *  3. port templating + re-run: pre-fix setup.sh (a) never templated the
  *     unit (first install on a nondefault port dies at the probe -> red) and
  *     (b) `enable --now` on an already-active unit never restarted the
