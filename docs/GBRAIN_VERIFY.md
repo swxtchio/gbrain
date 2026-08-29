@@ -223,7 +223,10 @@ gbrain search 'index' --json | head -20
 #    and no version number — it observes the carried behaviour itself.
 gbrain query 'typedef' --lang c --symbol-kind 'type definition' --json
 gbrain query 'typedef' --lang cpp --symbol-kind 'type definition' --json
-#    Expect at least one hit on any brain holding C/C++ headers with typedefs.
+#    Expect at least one hit ACROSS THE PAIR. Either line alone can be empty
+#    and that is not a failure: `.h` files classify as `c`, so a C-only brain
+#    hits on the first and returns [] on the second. Only both empty, on a
+#    brain that does hold C/C++ typedefs, means the carry has not landed.
 #    (`--symbol-kind` is an exact match on symbol_type — search/cjk-keyword-sql.ts.)
 
 # 3. Named symbols, for a brain you know. Substitute your own: a function-like

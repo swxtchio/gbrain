@@ -411,14 +411,19 @@ while it is not. It cannot establish that the posture stays decided — the flag
 is DB-backed and any client can change it afterwards. No deploy-time check can
 promise more, and neither message pretends to.
 
-**Coverage.** Eight cases in `test/swx-fork-tooling.test.ts` (no-unit → gate
-silent and the upgrade completes; unit + undecided → abort with HEAD unmoved
-and no install/migrate/restart; the recorded opt-in; decided → proceeds;
-unresolvable → aborts; setup.sh stops before any state change, and its
-`enabled:*` arm) plus three in `test/write-through-probe.serial.test.ts`, which
-drives a real scratch PGLite brain with both planes disagreeing — the guard
-that reddens if the probe ever regresses to `config get` (fail-without:
-1 pass / 2 fail).
+**Coverage.** Twelve gate cases in `test/swx-fork-tooling.test.ts`, in two
+groups. STATE — no-unit → gate silent and the upgrade completes; unit +
+undecided → abort with HEAD unmoved and no install/migrate/restart; the
+recorded opt-in; decided → proceeds; unresolvable → aborts naming a remedy a
+re-run can reach; setup.sh stops before any state change; setup.sh's
+`enabled:*` arm. MODE (added in round 4, because the state group holds the
+invocation mode constant and so could not express a mode regression) —
+`--check` and `--dry-run` do not fire the gate; a run that would land no code
+does not fire it; and the hole guard, `BEHIND=0` with the custom branch behind
+the mirror, which still aborts. Plus three cases in
+`test/write-through-probe.serial.test.ts`, which drives a real scratch PGLite
+brain with both planes disagreeing — the guard that reddens if the probe ever
+regresses to `config get` (fail-without: 1 pass / 2 fail).
 
 ### 1f/3/4 — the two deploy scripts (round-1 clusters 6 and 8)
 
@@ -772,6 +777,48 @@ CHANGED. The correct scope is every fixture whose MEANING the diff moves: the
 `spawnEnv` `GBRAIN_HOME` correction is what made the PARENT-dir case's
 precondition load-bearing, and that case was left vacuous for a round because
 it was not in the changed set.
+
+## Round-4 record
+
+**The dominant finding was a regression in the round-3 repair, not a residual.**
+Moving the write-through gate above the rebase also moved it above the
+`--check` exit and the no-op short-circuit, so three invocations that land no
+code began aborting — on the fork's own box, since the unit is installed and
+the key is recorded UNSET. It also inverted the gate's own stated principle by
+charging a recorded posture decision as the price of a READ. Scoped in round 4
+to invocations that will actually mutate, keeping the round-3 property that it
+still precedes the stash and the rebase. The predicate is deliberately NOT
+`BEHIND=0`: the rebase block replays the custom branch whenever it is not
+already on the mirror, so a naive skip would reopen the hole — there is a cell
+that fails against exactly that shortcut.
+
+**A guard set can be blind along an axis it holds constant.** The round-3
+cases formed a STATE matrix (unit present/absent × posture
+decided/undecided/unknown) with the invocation MODE fixed at "default,
+mutating", which is why none of them could see a mode regression. The mode
+group added in round 4 is the missing axis. Worth remembering next to the
+round-3 lesson about scope (sweep every fixture whose MEANING the diff moves,
+not only the ones it changed): both are ways a complete-looking guard set can
+still be blind.
+
+**The specification check was deleted, and its property re-expressed.** Reading
+`src/core/chunkers/code.ts` as text to pin a docs claim made this repo's own
+source the subject. The replacement asserts what the chunker PRODUCES, over a
+sample of other languages, and says in the test that it is a sample rather than
+a proof. Two corrections were needed to make it able to fail at all — the first
+sample used an exported type alias, which chunks as the export wrapper and
+never reaches the normalizer — so each fixture now also asserts its
+alias-shaped construct actually chunked.
+
+**Still out of scope, fourth round running:** the red
+`test/sync-rename-reconcile.serial.test.ts` cell. Byte-identical on a pristine
+`origin/master` tree, `git diff --name-only 7b7921d8..HEAD` empty for both that
+test and its subject, and no branch-side change exists short of editing
+`garrytan/gbrain`'s own test inside a fork port. One seat has escalated the
+underlying point to firstmate: the objective's absolute green-gate has no
+pre-existing-upstream carve-out, so either the scaffold gains one or the
+waiver is recorded against this task. That is firstmate's to settle, not a
+branch change.
 
 ## Follow-ups deliberately NOT filed
 
