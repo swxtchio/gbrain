@@ -618,10 +618,10 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 4: 22554 pass / 2 fail / 10 skip**
-(`bun run test`, 2320s). **All three parallel shards clean** (8006 / 7143 /
-7405, zero failures). Both remaining failures are in the serial pass: the known
-pre-existing upstream cell, and one load-induced timeout — see below.
+**Final gate run after review round 6: 22559 pass / 1 fail / 10 skip**
+(`bun run test`, 1819s, on a quiet box — load average 7.8). **All three
+parallel shards clean** (8006 / 7143 / 7410, zero failures), and the single
+remaining failure is the known pre-existing upstream cell in the serial pass.
 `bun run verify` 55/55 green; `shellcheck` clean on both fork shell scripts.
 
 **Run it serially on this box.** An earlier round-2 attempt at
