@@ -107,21 +107,47 @@ function stubSafeUpdateExternals(): void {
 }
 
 afterEach(() => {
+  // The systemctl stub launches a REAL loopback listener and banks its pid in
+  // the sandbox. Only the stub's own next `restart` reaps it, so a run that
+  // ends early — a failing assertion, a filtered test — would leave the
+  // process listening after the sandbox is gone. Reap it here instead.
+  // Path mirrors the stub's `state_dir="${XDG_CONFIG_HOME}/fixture-state"`,
+  // with XDG_CONFIG_HOME = <sandbox>/units in the setup.sh tests.
+  const pidFile = join(sandbox, 'units', 'fixture-state', 'pid');
+  if (existsSync(pidFile)) {
+    const pid = Number(readFileSync(pidFile, 'utf-8').trim());
+    if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid); } catch { /* already gone */ } }
+  }
   rmSync(sandbox, { recursive: true, force: true });
 });
 
 describe('scripts/gbrain-safe-update', () => {
-  test('run() preserves argv: a spaced stash message round-trips a dirty tree', () => {
+  test('run() renders --dry-run commands that re-parse to the same argv', () => {
     stubSafeUpdateExternals();
     const install = buildSafeUpdateFixture();
     // Dirty a TRACKED file so `git diff --quiet` fails and the stash path runs.
     writeFileSync(join(install, 'package.json'), '{"version":"0.0.1","dirty":true}\n');
-    const r = runScript(SAFE_UPDATE, ['--no-backup'], { GBRAIN_DIR: install });
-    expect({ status: r.status, stderr: r.stderr, stdout: r.stdout }).toEqual(
-      expect.objectContaining({ status: 0 }),
+    const r = runScript(SAFE_UPDATE, ['--dry-run', '--no-backup'], { GBRAIN_DIR: install });
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+
+    const line = String(r.stdout)
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.startsWith('[dry-run] git stash push'));
+    expect(line, `no dry-run stash line in:\n${r.stdout}`).toBeDefined();
+
+    // The point of --dry-run is that the operator can read (and run) exactly
+    // what the real path would execute. Re-parse the rendered line the way a
+    // shell would and require it to reproduce the original argv — the stash
+    // message must still be ONE argument. The pre-fix runner interpolated
+    // "$*", which flattens argv into a space-joined string, so the message
+    // re-parses into four bare words (git reads them as pathspecs).
+    const argv = JSON.parse(
+      execFileSync('bash', ['-c', `printf '%s\\n' ${line!.replace('[dry-run] ', '')} | ` +
+        `python3 -c "import sys,json; print(json.dumps(sys.stdin.read().splitlines()))"`],
+        { encoding: 'utf-8' }),
     );
-    // The stash was pushed AND popped: the dirty edit is back in the tree.
-    expect(readFileSync(join(install, 'package.json'), 'utf-8')).toContain('"dirty":true');
+    expect(argv).toEqual(['git', 'stash', 'push', '-u', '-m', 'gbrain-safe-update auto-stash']);
   });
 
   test('no-op rebase does not arm the upgrade block (no install/migrate/restart)', () => {
