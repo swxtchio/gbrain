@@ -41,6 +41,17 @@ export const DEF_TYPES = [
   'trait definition', 'object definition',                 // Scala
   'contract declaration', 'modifier definition', 'event definition', // Solidity
   'namespace definition', 'template declaration', 'declaration', 'preproc def', // C/C++
+  // swxtch fork: the two remaining C/C++ aggregate forms normalizeSymbolType
+  // has no rule for, so they arrive as the node type with underscores
+  // replaced. `typedef struct {...} Foo;` parses as type_definition (NOT
+  // declaration) and `union U {...}` as union_specifier, so without these
+  // every idiomatic C type alias and union is invisible to code-def — and,
+  // because MERGE_PROTECTED_SYMBOL_TYPES below is derived from this list,
+  // their symbol_name is also erased by small-sibling merging. (enum_specifier
+  // normalizes to 'enum', preproc_function_def to 'function', and
+  // struct_specifier is already listed above.) The chunker only emits these
+  // node types with the fork's c/cpp TOP_LEVEL_TYPES entries in code.ts.
+  'type definition', 'union specifier',                     // C/C++
   'type declaration', 'const declaration', 'var declaration', // Go
   'struct item', 'trait item', 'impl item', 'mod item',    // Rust
   'type item', 'const item', 'static item',                // Rust
