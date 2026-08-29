@@ -304,10 +304,14 @@ Item 2's retirement needs no new test: upstream's own `disabled_by_config`
 cases in `test/write-through.test.ts` pin the replacement behaviour, and the
 ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
-## Full-suite result and the two failures it exposed
+## Full-suite result
 
-`bun run test` on this branch: **22526 pass / 3 fail / 10 skip** (722s, 4
-shards + the serial pass).
+**Final gate run on the finished branch: 22526 pass / 1 fail / 10 skip**
+(`bun run test`, 1127s, 3 shards + the serial pass). The single failure is
+pre-existing — see below.
+
+An earlier run of the same suite, before the fixes below, reported 22526 pass
+/ 3 fail. The three were:
 
 - **1 pre-existing.** `test/sync-rename-reconcile.serial.test.ts` — "a
   frontmatter slug-authority rejection at the destination is retried, never
