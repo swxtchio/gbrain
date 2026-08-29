@@ -354,32 +354,71 @@ process for exactly this reason, while plain files run in the parallel shards �
 so the split IS the repo's isolation contract, not a workaround. Both file
 headers say so, to stop a future editor merging them.
 
-### 2 — retiring to a fail-open flag needs a compensating check (round-1 cluster 5)
+### 2 — retired to a fail-open flag, with a deploy-time posture gate
 
-Fork `425a06fb` turned the disk mirror OFF automatically whenever the engine
-was Postgres. Upstream's replacement is a config flag, and
-`isWriteThroughDisabled` (`src/core/write-through.ts:183-195`) **fails open**:
-it returns "disabled" only when `sync.write_through` is explicitly set to an
-off value, so an unset key reads as ON. This plan itself records that key as
-verified UNSET on the live brain. Merging plus the safe-update restart would
-therefore flip a DB-authoritative shared brain into writing a `.md` mirror for
-every `put_page` / capture / `brainstorm --save`, until a human ran a command
-that existed only as prose in `deploy/local-http/README.md`.
+**The problem.** Fork `425a06fb` turned the disk mirror OFF automatically
+whenever the engine was Postgres. Upstream's replacement is a config flag, and
+`isWriteThroughDisabled` (`src/core/write-through.ts`) **fails open**: it
+returns "disabled" only when `sync.write_through` is explicitly set to an off
+value, so an unset key reads as ON. `07f5d28d` / `055ac6c7` supply a mechanism,
+not "the code that now does the job", and README prose is not a control. So the
+retirement needed something in the deploy path — and it took three rounds to
+get the shape of that right. This section records the settled design; the two
+earlier shapes are described only where knowing they failed explains the
+current one.
 
-Three seats said the same thing and firstmate ruled it blocking: `07f5d28d` /
-`055ac6c7` supply a mechanism, not "the code that now does the job", and README
-prose is not a control. The branch owns both entrypoints, so the confirmation
-lives in them:
+**Scope: only where the deployment makes mirrors wrong.** The gate runs only
+when `gbrain-http.service` is installed. That unit's presence is what makes
+"shared, DB-authoritative brain" true. On a box without it — an ordinary
+PGLite/file-authoritative brain — an unset key is the fork's CORRECT inherited
+posture, and advising `sync.write_through false` there would disable the `.md`
+mirror that IS that brain's source of truth. Round 2 gated unconditionally and
+did exactly that, while also masking the honest "not installed — skipping"
+branch. No unit, no probe, no gate, no advice.
 
-- `deploy/local-http/setup.sh` reads the flag back after installing the unit.
-- `scripts/gbrain-safe-update` reads it on the run that would actually flip the
-  posture — it rebases the new code in and restarts the serving process.
+**Placement: before the first irreversible change, and abort rather than
+suppress.**
 
-Both print what they found plus the exact fix, and both are **advisory**: a
-brain may legitimately want mirrors, and neither command's job is to gate on
-it. Positive confirmation (read the value back and say what it was), never an
-assumption. Pinned by two cases in `test/swx-fork-tooling.test.ts` — unset
-warns with the fix command, off stays quiet — fail-without 0 pass / 2 fail.
+- `scripts/gbrain-safe-update` checks before the **rebase**, and dies there
+  with the tree untouched. The rebase is the irreversible step because the
+  `gbrain` CLI is bun-linked to this checkout: the moment it lands, every new
+  process on the box — capture, `brainstorm --save`, cron sync, minion workers
+  — runs the new code. The HTTP server is not the only disk sink, which is why
+  round 2's placement in front of the explicit restart established nothing;
+  the unit is enabled with `Restart=on-failure` + `WantedBy=default.target`, so
+  systemd re-activates on the next crash, login or reboot regardless.
+- `deploy/local-http/setup.sh` checks before it writes or runs **anything**.
+  Round 1 checked after the restart; round 2 moved it above the restart but
+  left the `cp` of the unit and the `sed -i --port` above it, so exit 3 left a
+  rewritten unit on disk naming a port the running process did not use.
+
+**Reading the plane the runtime reads.** Both go through
+`deploy/local-http/write-through-probe.ts`, which calls `isWriteThroughDisabled`
+itself. `gbrain config get` is deliberately not used: it resolves the FILE
+plane above the DB plane, so a stale value in `~/.gbrain/config.json` makes it
+report an off value while the brain still mirrors. Reproduced on a real brain:
+`config get --raw` → `false`, probe → `enabled:unset`.
+
+**The decision is recorded, not defaulted.** An undecided posture stops the
+command; `GBRAIN_ALLOW_WRITE_THROUGH=1` is the explicit "keep the mirrors"
+answer. Unknown (probe missing, bun absent, brain unreadable) fails closed for
+the same reason the flag should not have: an unverified posture is the state
+that let this ship silently in the first place.
+
+**What it establishes and what it cannot.** It establishes that at the moment
+it runs the DB-plane posture is decided, and refuses to put new code on the box
+while it is not. It cannot establish that the posture stays decided — the flag
+is DB-backed and any client can change it afterwards. No deploy-time check can
+promise more, and neither message pretends to.
+
+**Coverage.** Eight cases in `test/swx-fork-tooling.test.ts` (no-unit → gate
+silent and the upgrade completes; unit + undecided → abort with HEAD unmoved
+and no install/migrate/restart; the recorded opt-in; decided → proceeds;
+unresolvable → aborts; setup.sh stops before any state change, and its
+`enabled:*` arm) plus three in `test/write-through-probe.serial.test.ts`, which
+drives a real scratch PGLite brain with both planes disagreeing — the guard
+that reddens if the probe ever regresses to `config get` (fail-without:
+1 pass / 2 fail).
 
 ### 1f/3/4 — the two deploy scripts (round-1 clusters 6 and 8)
 
@@ -688,6 +727,40 @@ watchdog neither retires nor is affected by any of the seven. Recorded so the
 next porter does not redo the check.
 
 
+## Round-3 record
+
+**The red cell is settled, with evidence, and stays out of scope.** Round 3
+saw one seat re-file `test/sync-rename-reconcile.serial.test.ts` as a P1
+against the branch. The other two settled it the same way, independently: the
+failure reproduces byte-identically on a pristine `origin/master` tree at
+`7b7921d8` (the `git archive` recipe recorded above — 57 pass / 1 fail on both
+sides, the same cell, the `(fail)` lines differing only in elapsed ms), and the
+test touches none of the fork's surfaces. No branch-side change turns it green;
+requiring one asks this crew to fix `garrytan/gbrain`'s test inside a fork
+port. Firstmate ruled it out of scope in round 1 and that ruling stands; the
+gap is the brief scaffold's absolute green-gate lacking a pre-existing-upstream
+carve-out, which firstmate owns.
+
+**Fixture classification for the round** (the obligation, not a defect list).
+ALIGNED, each proved by ablation: the rewritten
+`onboard-checks-signal` aborted-signal case (2 pass / 1 fail with `safeCount`'s
+catch removed, where the old version passed verbatim); `sync-chunker-rewalk`
+(1 pass / 1 fail with the version gate forced false); `code-c-cpp`'s prose case
+(red with the inter-node flush disabled, and separately with the trailing
+flush disabled); the new `write-through-probe.serial` guard (1 pass / 2 fail
+with the probe regressed to file-plane-first); the newly armed `GBRAIN_HOME`
+PARENT-dir case (0 pass / 1 fail with `BRAIN_DIR` reverted); the no-unit gate
+case (0 pass / 1 fail with the scope predicate removed). QUALIFIED:
+`import-top-dirs`' renamed case proves `collectSyncableFiles` filters; the
+"only enforcement" half of its name rests on reading `runImport`, and the
+case's own comment says so.
+
+**A scoping lesson worth keeping.** Round 2 swept the fixtures the diff
+CHANGED. The correct scope is every fixture whose MEANING the diff moves: the
+`spawnEnv` `GBRAIN_HOME` correction is what made the PARENT-dir case's
+precondition load-bearing, and that case was left vacuous for a round because
+it was not in the changed set.
+
 ## Follow-ups deliberately NOT filed
 
 `swxtchio/gbrain` is public, has issues disabled, and is absent from
@@ -705,12 +778,15 @@ so the trail is complete, not because they are outstanding): the
 place, not appended to; the `config get` plane mismatch became the
 `write-through-probe.ts` fix; the `checks.ts` indentation was fixed in passing;
 the three fixture overstatements were rewritten to prove their names; and the
-isolation recipe above was replaced. The genuinely deferred items follow.
+isolation recipe above was replaced.
 
+**Round-3 non-blocking findings, likewise resolved rather than deferred:** the
+duplicated preamble this paragraph replaces (the round-2 text was inserted
+above the pre-existing one instead of replacing it); the fixture
+classification, which is folded into the round-3 record below; and the
+`enabled:unset|enabled:*` subsumed alternative in `setup.sh`, dropped.
 
-`swxtchio/gbrain` is public, has issues disabled, and is not in
-`config/gh-repo-allowlist`, so no issue is opened for these. They are recorded
-here instead:
+The genuinely deferred items follow.
 
 - **brainstorm 3-sibling issue** (carried over unfiled from p2's round-1 report):
   `formatSaveOutcome`'s sibling branches were reviewed together and one
@@ -745,6 +821,14 @@ here instead:
   A minimum-size threshold (fold a sub-N-byte gap into the next one, or drop
   comment-only fragments) is the obvious follow-up; not taken here because
   choosing N is a retrieval-quality question that wants an eval, not a guess.
+- **No CLI surface prints `sources.chunker_version`.** The verify runbook
+  works around it by observing the carried behaviour instead (the
+  `type definition` symbol_type only this carry can emit — see 4d check 2), but
+  an operator diagnosing "why did it not re-walk" still cannot read the stored
+  stamp against the binary's. `gbrain sources status` would be the natural home
+  for a column, or doctor's `sync_freshness` message could name both numbers.
+  Upstream-shaped; not taken here because it widens the port into a CLI surface
+  the fork does not otherwise touch.
 - **No test anywhere observes PG cancellation actually landing** — postgres.js
   `.cancel()` reaching a live server, or the pool slot returning. The fork
   proves the signal arrives at `engine.executeRaw`; upstream pins its own
