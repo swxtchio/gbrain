@@ -109,6 +109,40 @@ function stubSafeUpdateExternals(): void {
   for (const c of ['bun', 'gbrain']) {
     writeStub(c, `echo "${c} $*" >> "${stubLog}"\nexit 0`);
   }
+  stubSafeUpdateSystemctl();
+}
+
+/**
+ * `systemctl` for the safe-update tests. Without it the script reaches the
+ * REAL user bus — `systemctl --user cat gbrain-http.service` would find this
+ * box's live fleet service and read ITS port. Exits 1 for `cat`, the shape of
+ * a machine with no such unit, which is what these fixtures represent.
+ */
+function stubSafeUpdateSystemctl(): void {
+  writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 1`);
+}
+
+/**
+ * A `gbrain` stub that answers `config get <key>` from a table and logs every
+ * invocation. `config get` exits 1 with nothing on stdout for an unset key,
+ * which is exactly how the real CLI reports "not found" — the scripts' unset
+ * branch depends on that shape.
+ */
+function stubGbrainConfig(values: Record<string, string>): void {
+  const cases = Object.entries(values)
+    .map(([k, v]) => `    ${k}) echo "${v}" ;;`)
+    .join('\n');
+  writeStub('gbrain', `echo "gbrain $*" >> "${stubLog}"
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+  case "$3" in
+${cases}
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+exit 0`);
+  writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexit 0`);
+  stubSafeUpdateSystemctl();
 }
 
 afterEach(() => {
@@ -153,6 +187,144 @@ describe('scripts/gbrain-safe-update', () => {
         { encoding: 'utf-8' }),
     );
     expect(argv).toEqual(['git', 'stash', 'push', '-u', '-m', 'gbrain-safe-update auto-stash']);
+  });
+
+  test('an unreadable engine ABORTS instead of silently skipping the backup', () => {
+    // The reported defect: `|| echo pglite` turned "cannot determine the
+    // engine" into "assume pglite", the pglite arm then matched nothing on a
+    // Postgres brain, and the script ran migrations against the live brain
+    // with no snapshot. A gbrain stub that cannot answer + no config.json is
+    // exactly that state.
+    stubGbrainConfig({}); // every `config get` exits 1
+    const install = buildSafeUpdateFixture();
+    // Force the upgrade block: make the mirror advance so REBASED/BEHIND arm.
+    const upstream = join(sandbox, 'safe-update', 'upstream.git');
+    const clone = join(sandbox, 'pusher');
+    execFileSync('git', ['clone', '-q', upstream, clone]);
+    execFileSync('git', ['-C', clone, 'config', 'user.email', 't@t.t']);
+    execFileSync('git', ['-C', clone, 'config', 'user.name', 'T']);
+    writeFileSync(join(clone, 'upstream.txt'), 'new\n');
+    execFileSync('git', ['-C', clone, 'add', '-A']);
+    execFileSync('git', ['-C', clone, 'commit', '-qm', 'upstream advance']);
+    execFileSync('git', ['-C', clone, 'push', '-q', 'origin', 'HEAD:master']);
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_HOME: join(sandbox, 'brainhome') });
+
+    expect(r.status).not.toBe(0);
+    expect(String(r.stderr)).toContain('Cannot determine the brain engine');
+    // And it aborted BEFORE migrations — the whole point of the backup block.
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).not.toContain('post-upgrade');
+  });
+
+  test('GBRAIN_HOME is a PARENT dir: the brain is read at <home>/.gbrain', () => {
+    // gbrain's own configDir() appends '.gbrain' to GBRAIN_HOME. Treating the
+    // override as the final directory inspects and backs up the wrong path.
+    // Proven through behaviour: a config.json at <home>/.gbrain answers the
+    // engine read, so the run gets past the abort above.
+    stubGbrainConfig({});
+    const install = buildSafeUpdateFixture();
+    const brainHome = join(sandbox, 'brainhome');
+    mkdirSync(join(brainHome, '.gbrain'), { recursive: true });
+    writeFileSync(join(brainHome, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite' }));
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_HOME: brainHome });
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(String(r.stderr)).not.toContain('Cannot determine the brain engine');
+  });
+
+  test('warns when sync.write_through is unset, because upstream reads that as ON', () => {
+    // Retiring the fork's engine-kind gate handed the posture to a flag that
+    // FAILS OPEN. This script is the run that flips it (new code + restart),
+    // so it is where the operator has to hear about it.
+    stubGbrainConfig({ engine: 'pglite' }); // sync.write_through → exit 1 = unset
+    const install = buildSafeUpdateFixture();
+    const upstream = join(sandbox, 'safe-update', 'upstream.git');
+    const clone = join(sandbox, 'pusher2');
+    execFileSync('git', ['clone', '-q', upstream, clone]);
+    execFileSync('git', ['-C', clone, 'config', 'user.email', 't@t.t']);
+    execFileSync('git', ['-C', clone, 'config', 'user.name', 'T']);
+    writeFileSync(join(clone, 'upstream.txt'), 'new\n');
+    execFileSync('git', ['-C', clone, 'add', '-A']);
+    execFileSync('git', ['-C', clone, 'commit', '-qm', 'upstream advance']);
+    execFileSync('git', ['-C', clone, 'push', '-q', 'origin', 'HEAD:master']);
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    const out = `${r.stdout}${r.stderr}`;
+    expect(out).toContain('sync.write_through is UNSET');
+    expect(out).toContain('gbrain config set sync.write_through false');
+  });
+
+  test('stays quiet when sync.write_through is already off', () => {
+    stubGbrainConfig({ engine: 'pglite', 'sync.write_through': 'false' });
+    const install = buildSafeUpdateFixture();
+    const upstream = join(sandbox, 'safe-update', 'upstream.git');
+    const clone = join(sandbox, 'pusher3');
+    execFileSync('git', ['clone', '-q', upstream, clone]);
+    execFileSync('git', ['-C', clone, 'config', 'user.email', 't@t.t']);
+    execFileSync('git', ['-C', clone, 'config', 'user.name', 'T']);
+    writeFileSync(join(clone, 'upstream.txt'), 'new\n');
+    execFileSync('git', ['-C', clone, 'add', '-A']);
+    execFileSync('git', ['-C', clone, 'commit', '-qm', 'upstream advance']);
+    execFileSync('git', ['-C', clone, 'push', '-q', 'origin', 'HEAD:master']);
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    expect(r.status).toBe(0);
+    const out = `${r.stdout}${r.stderr}`;
+    expect(out).not.toContain('sync.write_through is UNSET');
+    expect(out).toContain('brain stays DB-only');
+  });
+
+  test('the health probe follows the port in the INSTALLED unit, not a literal', () => {
+    // One port contract. setup.sh templates GBRAIN_HTTP_PORT into the unit's
+    // ExecStart, so a literal 8787 here meant every update of a moved service
+    // spent 30s probing a dead port and reported a false "did not pass
+    // health". The stub reports a unit on a non-default port and answers
+    // is-active, so the script's probe URL is observable in what it prints.
+    const movedPort = 39117;
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"
+if [ "$2" = "cat" ]; then
+  echo "[Service]"
+  echo "ExecStart=/x/bun /x/gbrain serve --http --port ${movedPort} --bind 127.0.0.1"
+  exit 0
+fi
+exit 0`);
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexit 0`);
+    writeStub('gbrain', `echo "gbrain $*" >> "${stubLog}"
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+  case "$3" in
+    engine) echo "pglite" ;;
+    sync.write_through) echo "false" ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+exit 0`);
+    // The curl stub SUCCEEDS so the probe loop breaks on its first iteration:
+    // what is asserted is WHICH url the script probed, and a failing stub
+    // would spend the full 30s retry budget to prove the same thing.
+    writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
+
+    const install = buildSafeUpdateFixture();
+    const upstream = join(sandbox, 'safe-update', 'upstream.git');
+    const clone = join(sandbox, 'pusher4');
+    execFileSync('git', ['clone', '-q', upstream, clone]);
+    execFileSync('git', ['-C', clone, 'config', 'user.email', 't@t.t']);
+    execFileSync('git', ['-C', clone, 'config', 'user.name', 'T']);
+    writeFileSync(join(clone, 'upstream.txt'), 'new\n');
+    execFileSync('git', ['-C', clone, 'add', '-A']);
+    execFileSync('git', ['-C', clone, 'commit', '-qm', 'upstream advance']);
+    execFileSync('git', ['-C', clone, 'push', '-q', 'origin', 'HEAD:master']);
+
+    runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls, 'the script never probed the moved port').toContain(`127.0.0.1:${movedPort}/health`);
+    expect(calls).not.toContain('127.0.0.1:8787/health');
   });
 
   test('no-op rebase does not arm the upgrade block (no install/migrate/restart)', () => {

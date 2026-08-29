@@ -61,7 +61,15 @@ REMOTE="${GBRAIN_REMOTE:-origin}"
 # empty and disables the self-link, as the usage header documents. The `:-`
 # form treated empty as unset and silently relinked the default path.
 LINK_PATH="${GBRAIN_LINK-$HOME/.local/bin/gbrain-safe-update}"
-BRAIN_DIR="${GBRAIN_HOME:-$HOME/.gbrain}"
+# GBRAIN_HOME is a PARENT dir: gbrain's own configDir() appends '.gbrain' to it
+# (src/core/config.ts), so GBRAIN_HOME=/srv/x means the brain lives at
+# /srv/x/.gbrain. Treating the override as the final directory — which this
+# script used to do — inspects and backs up the WRONG path under any override.
+if [ -n "${GBRAIN_HOME:-}" ]; then
+  BRAIN_DIR="${GBRAIN_HOME%/}/.gbrain"
+else
+  BRAIN_DIR="$HOME/.gbrain"
+fi
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -256,7 +264,34 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
   #               recovery net; this is a convenient logical restore point. Non-fatal.
   #   pglite   -> copy the local brain dir (the only net for an embedded brain).
   if [ "$NO_BACKUP" != 1 ]; then
-    ENGINE="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.gbrain/config.json'))).get('engine','pglite'))" 2>/dev/null || echo pglite)"
+    # The engine read decides WHICH backup to take, so a failed read must not
+    # quietly become "pglite": under a Postgres brain that arm matches nothing,
+    # no snapshot is written, and the script proceeds to run migrations against
+    # the live brain with no net — the exact opposite of what this block is
+    # for. Read through the CLI's own resolution first (file plane wins, and it
+    # honours GBRAIN_HOME the way the runtime does), fall back to reading the
+    # canonical config.json directly for a box whose CLI is mid-upgrade, and
+    # abort loudly if neither answers.
+    ENGINE=""
+    if command -v gbrain >/dev/null 2>&1; then
+      ENGINE="$(gbrain config get engine --raw 2>/dev/null | tail -1 || true)"
+    fi
+    case "$ENGINE" in
+      postgres|pglite) ;;
+      *)
+        if command -v bun >/dev/null 2>&1 && [ -r "$BRAIN_DIR/config.json" ]; then
+          ENGINE="$(bun -e 'const f=process.argv[1];const j=JSON.parse(require("fs").readFileSync(f,"utf8"));process.stdout.write(String(j.engine??""))' "$BRAIN_DIR/config.json" 2>/dev/null || true)"
+        fi
+        ;;
+    esac
+    case "$ENGINE" in
+      postgres|pglite) ;;
+      *)
+        die "Cannot determine the brain engine (read '$BRAIN_DIR/config.json' and 'gbrain config get engine'; got '${ENGINE:-<empty>}').
+   Refusing to run migrations against a live brain with no backup.
+   Fix the config, or re-run with --no-backup to accept that risk deliberately."
+        ;;
+    esac
     mkdir -p "$BRAIN_DIR/backups"
     TS="$(date +%Y%m%d-%H%M%S)"
     if [ "$ENGINE" = "postgres" ]; then
@@ -267,8 +302,18 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
       elif ! command -v pg_dump >/dev/null 2>&1; then
         warn "pg_dump not on PATH — skipping snapshot (relying on Supabase PITR)."
       else
-        DBURL="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.gbrain/config.json')))['database_url'])")"
-        if PGSSLMODE=require pg_dump --no-owner --no-privileges "$DBURL" | gzip > "$BK"; then
+        # Same canonical path as the engine read, and the same posture: an
+        # unreadable URL is a visible skip, not a `set -e` death mid-upgrade.
+        DBURL=""
+        if command -v gbrain >/dev/null 2>&1; then
+          DBURL="$(gbrain config get database_url --raw 2>/dev/null | tail -1 || true)"
+        fi
+        if [ -z "$DBURL" ] && command -v bun >/dev/null 2>&1 && [ -r "$BRAIN_DIR/config.json" ]; then
+          DBURL="$(bun -e 'const f=process.argv[1];const j=JSON.parse(require("fs").readFileSync(f,"utf8"));process.stdout.write(String(j.database_url??""))' "$BRAIN_DIR/config.json" 2>/dev/null || true)"
+        fi
+        if [ -z "$DBURL" ]; then
+          warn "could not read database_url — skipping snapshot (relying on Supabase PITR). (--no-backup to silence)"
+        elif PGSSLMODE=require pg_dump --no-owner --no-privileges "$DBURL" | gzip > "$BK"; then
           ok "Brain snapshot saved ($(du -h "$BK" | cut -f1))."
         else
           rm -f "$BK"
@@ -289,12 +334,51 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
     warn "gbrain not on PATH — run 'gbrain post-upgrade' manually after this"
   fi
 
+  # The moment the write-through posture can flip. The fork used to disable
+  # disk write-through automatically on postgres engines; that is retired in
+  # favour of upstream's `sync.write_through` flag, which FAILS OPEN (unset
+  # reads as ON). This script rebases the new code in and restarts the serving
+  # process, so a brain whose key was never set starts mirroring every
+  # put_page / capture / brainstorm --save into its source tree from here on.
+  # Positive confirmation, on the run that would cause it; advisory, because
+  # a brain may legitimately want mirrors and this is an upgrade, not a gate.
+  if command -v gbrain >/dev/null 2>&1; then
+    WT="$(gbrain config get sync.write_through --raw 2>/dev/null | tail -1 || true)"
+    case "$(printf '%s' "$WT" | tr '[:upper:]' '[:lower:]')" in
+      false|0|off|no) ok "sync.write_through=$WT — brain stays DB-only." ;;
+      "") warn "sync.write_through is UNSET, which upstream reads as ON: this brain will now
+   write a .md mirror for every put_page / capture / brainstorm --save.
+   DB-authoritative brain?  gbrain config set sync.write_through false" ;;
+      *)  warn "sync.write_through=$WT — disk mirroring is ON for this brain.
+   Turn it off with:  gbrain config set sync.write_through false" ;;
+    esac
+  fi
+
   # Restart the shared HTTP MCP server so it loads the freshly-rebased code.
   # The `gbrain` CLI is bun-linked to this checkout, so a long-running
   # `gbrain serve --http` (deploy/local-http/) keeps the OLD code in memory until
   # restarted. Non-fatal + loopback-only: machines without the service just skip.
   HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
-  HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:8787/health}"
+  # ONE port contract, and the installed unit is what holds it.
+  # deploy/local-http/setup.sh templates GBRAIN_HTTP_PORT into the unit's
+  # ExecStart, so a literal 8787 here meant every update of a moved service
+  # spent 30s probing a port nothing listens on and then reported a false
+  # "did not pass health" — unless the operator also set a second,
+  # undocumented GBRAIN_HTTP_HEALTH. Read the port back out of the unit this
+  # script is about to restart (the same `systemctl --user cat` output the
+  # guard below already needs), so the two can't disagree. The env override
+  # still wins for a service fronted by a proxy or on another host.
+  # `|| true`: with `set -euo pipefail` a failing command substitution in an
+  # assignment kills the script, and `systemctl --user cat` exits non-zero
+  # whenever the unit is absent — which is the ordinary case on a machine that
+  # doesn't run the service. Falling back to the default port is correct there;
+  # dying mid-upgrade is not.
+  HTTP_PORT=""
+  if command -v systemctl >/dev/null 2>&1; then
+    HTTP_PORT="$(systemctl --user cat "$HTTP_SERVICE" 2>/dev/null \
+      | sed -n 's/.*--port[= ]\([0-9][0-9]*\).*/\1/p' | tail -1 || true)"
+  fi
+  HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:${HTTP_PORT:-8787}/health}"
   if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
     say "Restarting $HTTP_SERVICE to load the updated code…"
     run systemctl --user restart "$HTTP_SERVICE"

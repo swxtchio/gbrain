@@ -34,8 +34,13 @@ OLD unit), and waits for `http://127.0.0.1:8787/health`.
 
 `GBRAIN_HTTP_PORT=<n> deploy/local-http/setup.sh` moves the service off 8787:
 the value is numeric-validated, the installed unit copy is templated to
-`--port <n>`, and the health probe checks that same port — so the override
-holds end to end rather than changing only the check. The brain's
+`--port <n>`, and setup's health probe checks that same port.
+`scripts/gbrain-safe-update` reads the port back out of the installed unit
+before probing, so an update of a moved service does not false-red. **Every
+`8787` written below is the default** — if you moved the port, substitute it,
+including in the `gbrain connect` line, which writes the endpoint into
+`~/.claude.json` at user scope and would otherwise register a dead address.
+The brain's
 DB URL, OpenAI key, and **embedding model (pinned to `openai:text-embedding-3-large`
 @ 1536)** are read from `~/.gbrain/config.json` — not duplicated in the unit, so
 the file-plane pin stays the single source of truth.
@@ -48,6 +53,8 @@ login (already enabled on this VM; the command is idempotent if you need it).
 ```bash
 gbrain auth create "claude-code-vm"                 # prints a long-lived gbrain_… bearer token
 gbrain connect http://127.0.0.1:8787/mcp --token gbrain_… --install --force
+# moved the port? use it here too — setup.sh's own success line prints the
+# exact command with the port it just installed.
 ```
 
 `--install` runs `claude mcp add` and smoke-tests the token (`get_brain_identity`)
@@ -102,6 +109,13 @@ disabled that automatically on postgres engines; it is RETIRED in favor of
 upstream's config flag (introduced in the v0.46.23.0 roll `07f5d28d`,
 extended to the timeline lane in `055ac6c7`) — which means deploying this
 branch **re-enables** `.md` mirroring unless the flag is set.
+
+Both entrypoints now CHECK it rather than trusting this page:
+`deploy/local-http/setup.sh` reads the flag back after installing the unit, and
+`scripts/gbrain-safe-update` reads it on the run that would flip the posture
+(it rebases the new code in and restarts the serving process). Both print what
+they found and the exact fix; both are advisory, because a brain may
+legitimately want mirrors and neither command's job is to gate on it.
 
 The shared brain is remote-postgres and DB-authoritative; the mirrors are
 redundant and litter whatever tree the server runs from. Set the flag ONCE

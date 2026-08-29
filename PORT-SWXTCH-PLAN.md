@@ -148,7 +148,7 @@ verdicts changed**; the rest hold with refreshed evidence.
 | 1d C/C++ chunker | CARRIED (whole) | **CARRIED** (re-expressed) | See below. p3 first read the merge guard as retired by `c860a411` (#4511); review round 1 falsified that and it is carried. |
 | 1e code-def DEF_TYPES | CARRIED (4 entries) | **CARRIED (2 entries)** | See below — half the entries were already upstream, and the list moved file. |
 | 1f gbrain-safe-update | CARRIED | **CARRIED** | `gbrain post-upgrade` is still a real command (`src/cli.ts:2195`); the wrapper's other externals (`bun install`, `systemctl --user`) are unaffected. |
-| 2 write-through gate | RETIRED | **RETIRED** | `isWriteThroughDisabled` / `sync.write_through` still gate `writePageThrough` (`src/core/write-through.ts:183,369`). Retiring commits stay `07f5d28d` + `055ac6c7`. The deploy-time ops step (`gbrain config set sync.write_through false`) stands. |
+| 2 write-through gate | RETIRED | **RETIRED, with a compensating check** | The upstream flag replaces the mechanism but FAILS OPEN, so the retirement was not behaviour-preserving on its own — see below. |
 | 3 deploy/local-http | CARRIED | **CARRIED** | Re-verified every referenced surface on the new base: `--http`/`--port`/`--bind` (`src/commands/serve.ts:210,238,268`), `/health` (`src/commands/serve-http.ts:1343`), `GBRAIN_POOL_SIZE` (`src/core/postgres-engine.ts:301`), `GBRAIN_DIRECT_DATABASE_URL` (`src/core/connection-manager.ts:51`). |
 | 4 safe-update restart | CARRIED | **CARRIED** | Rides in `scripts/gbrain-safe-update`; content unchanged. |
 | 5 doctor onboard bound | CARRIED | **CARRIED** | The seam is still a bare `await runAllOnboardChecks(engine)` with no bound — it only moved from `doctor.ts:3939` to `doctor.ts:4081` inside the same `buildChecks`. No upstream timeout exists (`GBRAIN_DOCTOR_ONBOARD_TIMEOUT_MS` grep: absent). |
@@ -332,6 +332,78 @@ hang. `scripts/run-serial-tests.sh` gives every `*.serial.test.ts` its own bun
 process for exactly this reason, while plain files run in the parallel shards —
 so the split IS the repo's isolation contract, not a workaround. Both file
 headers say so, to stop a future editor merging them.
+
+### 2 — retiring to a fail-open flag needs a compensating check (round-1 cluster 5)
+
+Fork `425a06fb` turned the disk mirror OFF automatically whenever the engine
+was Postgres. Upstream's replacement is a config flag, and
+`isWriteThroughDisabled` (`src/core/write-through.ts:183-195`) **fails open**:
+it returns "disabled" only when `sync.write_through` is explicitly set to an
+off value, so an unset key reads as ON. This plan itself records that key as
+verified UNSET on the live brain. Merging plus the safe-update restart would
+therefore flip a DB-authoritative shared brain into writing a `.md` mirror for
+every `put_page` / capture / `brainstorm --save`, until a human ran a command
+that existed only as prose in `deploy/local-http/README.md`.
+
+Three seats said the same thing and firstmate ruled it blocking: `07f5d28d` /
+`055ac6c7` supply a mechanism, not "the code that now does the job", and README
+prose is not a control. The branch owns both entrypoints, so the confirmation
+lives in them:
+
+- `deploy/local-http/setup.sh` reads the flag back after installing the unit.
+- `scripts/gbrain-safe-update` reads it on the run that would actually flip the
+  posture — it rebases the new code in and restarts the serving process.
+
+Both print what they found plus the exact fix, and both are **advisory**: a
+brain may legitimately want mirrors, and neither command's job is to gate on
+it. Positive confirmation (read the value back and say what it was), never an
+assumption. Pinned by two cases in `test/swx-fork-tooling.test.ts` — unset
+warns with the fix command, off stays quiet — fail-without 0 pass / 2 fail.
+
+### 1f/3/4 — the two deploy scripts (round-1 clusters 6 and 8)
+
+**The backup could be skipped silently (cluster 6, blocking).**
+`gbrain-safe-update` read the engine with
+`python3 … || echo pglite`, so "cannot determine the engine" became "assume
+pglite". On a Postgres brain the pglite arm then matched nothing, no snapshot
+was written, and the script proceeded to run migrations against the live brain
+with no net — the exact opposite of what that block is for. Two further faults
+in the same read: `BRAIN_DIR` treated `GBRAIN_HOME` as the final directory
+though gbrain's own `configDir()` appends `.gbrain` to it
+(`src/core/config.ts:1556-1572`), so any override inspected and backed up the
+wrong path; and the adjacent `database_url` read had no fallback at all and
+would die under `set -e` mid-upgrade.
+
+Now: `BRAIN_DIR` resolves canonically; the engine is read through the CLI's own
+resolution (`gbrain config get engine --raw`) with a direct read of the
+canonical `config.json` as the fallback for a box whose CLI is mid-upgrade; an
+unreadable engine **aborts** with the reason and the `--no-backup` escape
+hatch; and the `database_url` read degrades to a visible skip. Pinned by two
+cases (abort-without-backup, `GBRAIN_HOME` parent-dir semantics).
+
+**One port contract (cluster 8, blocking).** `setup.sh` templates
+`GBRAIN_HTTP_PORT` into the installed unit while `gbrain-safe-update` probed a
+literal `127.0.0.1:8787`, so every update of a moved service spent 30s on a
+dead port and reported a false "did not pass health" — unless the operator also
+set a second, undocumented `GBRAIN_HTTP_HEALTH`. The script now reads the port
+back out of the unit it is about to restart, from the same
+`systemctl --user cat` output the guard below it already needs. The env
+override still wins for a proxied or remote service.
+
+Swept the rest of the claim rather than the one line: the README asserted the
+override "holds end to end", which was false — `gbrain connect
+http://127.0.0.1:8787/mcp` writes the endpoint into `~/.claude.json` at user
+scope and would have registered a dead address on a moved service, and two
+more curl examples hardcoded it. The README now states plainly that every
+`8787` on the page is the default and points at setup's own success line, which
+prints the command with the port it just installed.
+
+Two test-hygiene fixes the work exposed: the safe-update fixtures never stubbed
+`systemctl`, so they reached this box's REAL user bus and would have read the
+live fleet service's port; and the new `HTTP_PORT` assignment needed `|| true`,
+because under `set -euo pipefail` a failing command substitution in an
+assignment kills the script and `systemctl --user cat` exits non-zero whenever
+the unit is absent — the ordinary case on a machine that does not run it.
 
 ### CHUNKER_VERSION 6 → 1006 (round-1 cluster 2)
 
