@@ -244,45 +244,45 @@ describe('swxtch: C header symbol extraction (header guards + extern "C")', () =
     expect(typeOf('packet_header_t')).toBe('type definition');
   });
 
-  test("a sample of other languages, incl. every type-alias one, emits no 'type definition'", async () => {
+  test("every type-alias emitter found emits its own type, never 'type definition'", async () => {
     // The other half of the runbook's claim, asserted against what the chunker
     // PRODUCES rather than against how its source is written. An earlier
     // revision read src/core/chunkers/code.ts as text and checked which
     // TOP_LEVEL_TYPES entries own `type_definition` — that made this repo's own
     // source the subject, which is not a check this crew builds.
     //
-    // The name says "a sample" because that is what it is: five of ~35
-    // registered languages. It cannot prove the universal the runbook states;
-    // it covers the realistic ways the string could stop being C/C++-exclusive.
-    //
-    // Two groups, because they are not the same evidence. Round-5 review caught
-    // the earlier version calling all five "type-alias constructs" when Java
-    // has no type alias at all and its anchor was `class` — prose describing a
-    // mechanism two of its own rows do not implement.
+    // The name is now what the rows cover, and the rows were expanded to match
+    // it. Two earlier names overstated: "no other language" (a universal over
+    // ~35 registered languages) and "incl. every type-alias one" (which then
+    // omitted Dart, TSX and C#, and put C# in the no-alias group though
+    // `using Alias = …` is exactly an alias). Every anchor below was measured
+    // by running the chunker, not recalled.
 
-    // (a) ALIAS-BEARING: the alias construct reaches normalizeSymbolType as a
-    //     top-level chunk, so a normalization drift toward 'type definition'
-    //     shows up here. Bare `type Alias = …`, not exported — an exported one
-    //     chunks as the `export statement` wrapper and never exercises the path.
-    //     Anchors measured, not remembered: ts -> type, go -> type declaration,
-    //     rust -> type item.
-    const aliasBearing: Array<[string, string, string]> = [
+    // (a) ALIAS EMITTERS — languages whose alias construct reaches
+    //     normalizeSymbolType as a top-level chunk. These are where a
+    //     normalization drift toward 'type definition' would surface. Bare
+    //     declarations, not exported ones: an exported alias chunks as the
+    //     `export statement` wrapper and never exercises the path.
+    const aliasEmitters: Array<[string, string, string]> = [
       ['t.ts', 'type Alias = { a: number };\ninterface I { b: string }\nfunction g() { return 1; }\n', 'type'],
-      ['t.go', 'package m\n\ntype Alias struct{ A int }\n\nfunc F() {}\n', 'type declaration'],
+      ['t.tsx', 'type Alias = { a: number };\nfunction G() { return null; }\n', 'type'],
+      ['t.dart', 'typedef Alias = int Function(int);\nclass C { int f() => 1; }\n', 'type'],
+      ['t.go', 'package m\n\ntype Alias = int\n\nfunc F() {}\n', 'type declaration'],
       ['t.rs', 'pub type Alias = u32;\npub struct S { a: u32 }\nfn f() {}\n', 'type item'],
+      ['t.cs', 'using Alias = System.Collections.Generic.List<int>;\nnamespace N { class C { int F() => 1; } }\n', 'using directive'],
     ];
 
-    // (b) NO ALIAS CONSTRUCT: these languages have none, so they carry no
-    //     collision risk through normalization. They are here as breadth — a
-    //     grammar upgrade that introduced a `type_definition` node would show
-    //     up — and their anchors are just "this file chunked at all".
-    //     Measured: java -> class, c# -> namespace declaration.
-    const noAlias: Array<[string, string, string]> = [
+    // (b) BREADTH — no alias construct reaches the chunker, so no collision
+    //     risk through normalization; they are here so a grammar upgrade that
+    //     introduced a `type_definition` node would show up. Swift is in this
+    //     group on measurement, not assumption: `typealias_declaration` is not
+    //     among its top-level types, so a top-level typealias emits nothing.
+    const breadth: Array<[string, string, string]> = [
       ['t.java', 'class C { int f() { return 1; } }\n', 'class'],
-      ['t.cs', 'namespace N { class C { int F() => 1; } }\n', 'namespace declaration'],
+      ['t.swift', 'typealias Alias = Int\nclass C { func f() {} }\n', 'class'],
     ];
 
-    for (const [path, source, anchor] of [...aliasBearing, ...noAlias]) {
+    for (const [path, source, anchor] of [...aliasEmitters, ...breadth]) {
       const chunks = await chunkCodeText(source, path);
       const types = chunks.map((c) => c.metadata.symbolType);
       // Anti-vacuity: without this, "no offenders" could hold because the file

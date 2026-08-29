@@ -839,6 +839,61 @@ pre-existing-upstream carve-out, so either the scaffold gains one or the
 waiver is recorded against this task. That is firstmate's to settle, not a
 branch change.
 
+## Round-7 record — the design settled
+
+**Four generations, one unsettled design.** `BEHIND != 0` (r4) → an
+ancestry-only `gate_lands_code` (r5) → a post-hoc `HEAD != SERVED_HEAD_BEFORE`
+(r6). Each repair was a coordinate: it fixed the input the reviewer brought and
+left the question unsettled, so the next reviewer brought a different input.
+Round-6 review then swept the class and found **four non-equivalent predicates**
+answering that one question — the ancestry test, the post-hoc comparison,
+`REBASED`, and the closing summary's version diff — which falsifies the
+round-6 claim, recorded in the section below, that prediction and confirmation
+had made it "one mechanism". It had not; it had made it two, beside two more.
+
+**The settlement.** One function, one evaluation, one value, a written
+contract in the script above `run_lands_code`. Inputs: the branch topology
+before anything mutates — served ref at launch, the ref the run ends on, the
+fetched `$UPSTREAM` — and explicitly NOT the mode flags, because the answer is
+a property of the plan rather than of whether we carry it out. Output:
+`RUN_LANDS_CODE`. Invariant: every site reads that one value, so a `--dry-run`
+prediction and the real run it predicts cannot disagree, because they are the
+same number.
+
+Two terms, because the run both checks out a ref and moves it: (a) it ends on
+a different ref than it launched on — the term whose absence let a run started
+on the mirror arm the entire upgrade block with the gate silent; (b) that ref
+is not already on the fetched upstream. Planned state rather than post-hoc,
+because `run()` prints mutations under `--dry-run` without performing them, so
+a HEAD comparison is unsatisfiable there and hid the destructive half of the
+script from the operator's only pre-flight.
+
+Sites, all reading the one value: the posture gate, the upgrade block's arming
+condition, the `--dry-run` path (inside both), and the closing summary — that
+last was the fourth predicate, printing "no upstream change" directly above the
+warning that the branch had been rebased.
+
+**The matrix is indexed by (branch × mode × posture)**, because indexing by
+SITE alone is what left the guard set blind three rounds running: every arming
+cell asserted absence on a real run, every gate cell launched from the custom
+branch, and both holes lay on axes the round had "added coverage along". 52
+cells in `test/swx-safe-update-matrix.serial.test.ts`; the landing states also
+assert the invariant directly, running one fixture twice — once predicting,
+once doing — and requiring the destructive half to appear in the prediction
+exactly when it happens for real.
+
+It catches every generation, which is the test of a settlement rather than a
+patch: r4's `BEHIND != 0` → 18 fail; r5's ancestry-only → 12 fail; r6's missing
+launch term → 6 fail; r6's post-hoc arming → 3 fail, exactly the invariant
+cells.
+
+**The lesson, in its final form.** Round 3 said sweep every fixture whose
+MEANING the diff moves. Round 4 said a guard set can be blind along an axis it
+holds constant. Round 6 said adding an axis is not covering it. Round 7's is
+the one underneath all three: *when the same question has more than one
+answer in the tree, every fix is a coordinate.* Settle the question — one
+function, one contract, one value — and the coordinates stop.
+
 ## Round-6 record
 
 **One wrong proxy, two armed surfaces.** `BEHIND != 0` asks whether the mirror
