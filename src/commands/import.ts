@@ -16,6 +16,8 @@ import {
   matchesAnyGlob,
   pruneDir,
   isPathPruned,
+  isAllowedTopDir,
+  topDirsAllowlist,
   SYNC_SKIP_FILES,
   type SyncStrategy,
 } from '../core/sync.ts';
@@ -1023,19 +1025,13 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   const multimodalOn = process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true';
 
   // SWX local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain root to an
-  // allowlist of top-level directory NAMES (comma-separated; e.g.
-  // "swx-srtx,swx-spp"). Used when the brain root sits above many sibling
-  // repos and only a subset should sync. Applied at the brain root only:
-  // top-level dirs not in the allowlist are skipped (present AND future ones
-  // — an exclusion list cannot express deny-all-except), root-level files
-  // still collect, subdirectories of an allowed dir descend normally. Must
-  // cover BOTH enumeration routes: the git fast path below (filtered after
-  // `git ls-files`) and the FS walk (descent gate at `d === dir`) — a
-  // walk-only filter is silently bypassed whenever the root is a work tree.
-  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
-  const topDirsAllow = topDirsEnv
-    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
-    : null;
+  // allowlist of top-level directory NAMES. The contract, the parser and the
+  // per-path predicate all live in core/sync.ts (`topDirsAllowlist` /
+  // `isAllowedTopDir`), which `classifySync` also consults — so incremental
+  // sync's git-diff manifest agrees with this enumerator by construction
+  // rather than by a second copy of the filter. Resolved once here so the
+  // walk's descent gate and the git fast path share one snapshot for the run.
+  const topDirsAllow = topDirsAllowlist();
 
   // v0.42.x (#1159 --respect-gitignore / #1483 .gbrainignore): when `dir` is a
   // git work tree, enumerate via `git ls-files` so the walk honors
@@ -1050,13 +1046,7 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
     const gitFiles = gitListSyncableFiles(dir, strategy, multimodalOn, opts.onExcluded, opts.includeHidden);
     if (gitFiles) {
       if (!topDirsAllow) return gitFiles;
-      return gitFiles.filter(abs => {
-        // relative() may carry either OS separator — split on both.
-        // Root-level files (single segment) collect, matching the walk's
-        // descent-only gate.
-        const segs = relative(dir, abs).split(/[\\/]/);
-        return segs.length === 1 || topDirsAllow.has(segs[0]);
-      });
+      return gitFiles.filter(abs => isAllowedTopDir(relative(dir, abs), topDirsAllow));
     }
   }
 
@@ -1105,8 +1095,9 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
       }
 
       if (stat.isDirectory()) {
-        // SWX local patch: at the brain root, restrict descent to
-        // GBRAIN_TOP_DIRS (see the parse site above for the full contract).
+        // SWX: at the brain root, don't descend into a non-allowlisted top
+        // dir. This is the IO optimisation only — `classifySync` rejects the
+        // same paths anyway, so removing it would cost time, not correctness.
         if (topDirsAllow && d === dir && !topDirsAllow.has(entry)) continue;
         const inodeKey = `${stat.dev}:${stat.ino}`;
         if (visitedInodes.has(inodeKey)) {

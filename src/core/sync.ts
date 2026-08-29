@@ -317,6 +317,48 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp(regex);
 }
 
+/**
+ * SWX local patch: `GBRAIN_TOP_DIRS` scopes a multi-repo brain root to an
+ * allowlist of top-level directory NAMES (comma-separated, e.g.
+ * "swx-srtx,swx-spp"). Used when the brain root sits above many sibling repos
+ * and only a subset should sync.
+ *
+ * This lives beside `matchesAnyGlob` and is read by `classifySync` — NOT by
+ * one enumerator — because the brain has three file-selection lanes, not two:
+ * `collectSyncableFiles`'s FS walk, its git fast path, and `performSyncInner`'s
+ * git-diff manifest. Round-1 review found the allowlist applied only to the
+ * first two, so a file under a non-allowlisted top dir was skipped by the
+ * first full sync and then imported by the next commit-driven one. Landing it
+ * in the shared classifier is what makes all three agree by construction, the
+ * same way `SYNC_SKIP_FILES` does.
+ *
+ * `--exclude` / `sync.exclude` cannot express this: `matchesAnyGlob` has no
+ * negation operator, so exclusion cannot say deny-all-except.
+ *
+ * Read from the environment on every call rather than cached, so a long-lived
+ * process (the HTTP MCP server, the minion supervisor) picks up an operator's
+ * change without a restart. Returns null when unset — the upstream default,
+ * where every top-level directory is allowed.
+ */
+export function topDirsAllowlist(): Set<string> | null {
+  const raw = process.env.GBRAIN_TOP_DIRS;
+  if (!raw) return null;
+  const names = raw.split(',').map(x => x.trim()).filter(Boolean);
+  return names.length > 0 ? new Set(names) : null;
+}
+
+/**
+ * SWX: true when `path` (relative to the brain root, either separator) is
+ * allowed by `GBRAIN_TOP_DIRS`. Root-level files — a single segment — always
+ * pass, matching the walk's descent-only gate: the allowlist scopes which
+ * SUBTREES sync, not whether the root itself does.
+ */
+export function isAllowedTopDir(path: string, allow: Set<string> | null = topDirsAllowlist()): boolean {
+  if (!allow) return true;
+  const segments = path.replace(/\\/g, '/').split('/');
+  return segments.length === 1 || allow.has(segments[0]!);
+}
+
 export function matchesAnyGlob(path: string, patterns?: string[]): boolean {
   if (!patterns || patterns.length === 0) return false;
   const normalized = path.replace(/\\/g, '/');
@@ -463,7 +505,9 @@ export type SyncableReason =
   | 'pruned-dir'
   | 'include-glob-miss'
   | 'exclude-glob-hit'
-  | 'malformed-path';
+  | 'malformed-path'
+  /** SWX: first path segment is outside the `GBRAIN_TOP_DIRS` allowlist. */
+  | 'top-dir-excluded';
 
 /**
  * Path segments that can never be legitimate page filenames: square brackets
@@ -578,6 +622,11 @@ function classifySync(path: string, opts: SyncableOptions = {}): SyncableReason 
 
   if (opts.include && opts.include.length > 0 && !matchesAnyGlob(path, opts.include)) return 'include-glob-miss';
   if (opts.exclude && opts.exclude.length > 0 && matchesAnyGlob(path, opts.exclude)) return 'exclude-glob-hit';
+
+  // SWX: the GBRAIN_TOP_DIRS allowlist — see `isAllowedTopDir`. Last, so a
+  // path is only reclassified here when it would otherwise be syncable, and
+  // every other reason keeps the tag it had before the fork patch.
+  if (!isAllowedTopDir(path)) return 'top-dir-excluded';
 
   return null;
 }

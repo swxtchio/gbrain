@@ -143,7 +143,7 @@ verdicts changed**; the rest hold with refreshed evidence.
 | # | p2 verdict | p3 verdict | What the new base changed |
 |---|---|---|---|
 | 1a index.md syncable | CARRIED | **CARRIED** (evidence refreshed) | `SYNC_SKIP_FILES` still lists `index.md` (`src/core/sync.ts:540`). The *harm* changed: reconcile now soft-deletes (`engine.softDeletePages`, `src/commands/sync.ts:4242`, #4587) instead of hard-deleting, so dropping the patch hides the `*/index` pages for a 72h recovery window and the autopilot purge phase hard-deletes them after it. Still data loss, just delayed. |
-| 1b GBRAIN_TOP_DIRS | CARRIED | **CARRIED** | No upstream allowlist appeared. The wave added `--include-hidden` and made `sync.exclude` persist on every path, but both route through `matchesAnyGlob` (`src/core/sync.ts:320`), which has no negation operator — exclusion still cannot express deny-all-except. Seam moved: `gitListSyncableFiles` gained an `includeHidden` parameter, so the git-fast-path filter re-applies one line lower. |
+| 1b GBRAIN_TOP_DIRS | CARRIED | **CARRIED** (re-expressed through the shared classifier) | No upstream allowlist appeared: the wave's `--include-hidden` and persisted `sync.exclude` both route through `matchesAnyGlob` (`src/core/sync.ts`), which has no negation operator, so exclusion still cannot express deny-all-except. Round-1 review found the carry incomplete — see below. |
 | 1c N-segment slug resolver | RETIRED | **RETIRED** | Unchanged: the broadened `/^[a-z0-9][a-z0-9/_-]*$/` resolver is still in `src/core/link-extraction.ts:1206` and `src/commands/extract.ts:611`. Retiring commit stays `5e8816e7` (#3087). |
 | 1d C/C++ chunker | CARRIED (whole) | **CARRIED** (re-expressed) | See below. p3 first read the merge guard as retired by `c860a411` (#4511); review round 1 falsified that and it is carried. |
 | 1e code-def DEF_TYPES | CARRIED (4 entries) | **CARRIED (2 entries)** | See below — half the entries were already upstream, and the list moved file. |
@@ -239,6 +239,49 @@ fixed state is master's byte coverage plus the three symbols master could not
 name — not a trade-off in either direction. Pinned by the two coverage cases
 in `test/chunkers/code-c-cpp.test.ts`; fail-without (gap emission disabled,
 everything else intact): 7 pass / 2 fail.
+
+### 1b — the allowlist has to live in the classifier, not an enumerator (round-1 cluster 3)
+
+The round-1 carry put `GBRAIN_TOP_DIRS` inside `collectSyncableFiles`, and the
+plan claimed it covered "BOTH enumeration routes". Three seats found the same
+defect: **the brain has three file-selection lanes, not two.**
+`performSyncInner` filters its git-diff manifest through
+`inScope`/`excluded`/`isSyncable` and never calls that enumerator, so a file
+under a non-allowlisted top dir was excluded by the first full sync and then
+imported by the next commit-driven one — the allowlist leaked one commit at a
+time.
+
+Re-expressed to close the class rather than add a third copy of the filter:
+`topDirsAllowlist()` + `isAllowedTopDir()` now live beside `matchesAnyGlob` in
+`src/core/sync.ts`, `classifySync` consults them (new `SyncableReason`
+`'top-dir-excluded'`), and `collectSyncableFiles` reads the same helpers. Every
+lane already routes through `isSyncable`/`unsyncableReason`, so all three agree
+by construction — the same way `SYNC_SKIP_FILES` makes them agree for 1a. The
+FS-walk descent gate stays, but only as an IO optimisation: removing it would
+cost walk time, not correctness.
+
+**A data-loss path the move exposed, fixed in the same commit.** The
+unsyncable-modified cleanup loop in `commands/sync.ts` deletes the page for any
+path that is modified-but-unsyncable, with carve-outs for `'metafile'` and
+`'pruned-dir'`. `'top-dir-excluded'` needed the same carve-out for identical
+reasons: sync never imports those paths, so a page there can only come from a
+deliberate `put_page` or from before the allowlist was turned on, and "the file
+was modified" is no evidence the page is stale. Without it, switching the
+allowlist on and then editing a now-blocked file would destroy its page — the
+exact #2404 class. This is why the finding had to be swept as a class: fixing
+only the reported coordinate would have traded one bug for a worse one.
+
+Tests: `test/sync-top-dirs.serial.test.ts` (real git repo + PGLite) covers the
+reported reproduction end to end — full sync excludes `blocked/seed.md`, then a
+commit adding `blocked/later.md` AND `allowed/later.md` imports only the
+allowed one, so the absence is the allowlist rather than a sync that did
+nothing — plus the newly-blocked-page survival case and the unset-env upstream
+default. `test/sync-isSyncable-shape.test.ts` gains the duality cases for the
+new reason (including the Windows-separator form and a case asserting every
+pre-existing classification is untouched when the env is unset).
+Fail-without: removing the `classifySync` gate reddens the incremental case
+(1 pass / 1 fail); removing only the cleanup carve-out reddens the survival
+case (0 pass / 1 fail).
 
 ### CHUNKER_VERSION 6 → 1006 (round-1 cluster 2)
 

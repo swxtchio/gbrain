@@ -2192,7 +2192,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // the page is stale. Deleting here silently destroyed put-created
     // pages every time their materialized file landed in a commit.
     const reason = unsyncableReason(path, syncOpts);
-    if (reason === 'metafile' || reason === 'pruned-dir') continue;
+    // SWX: 'top-dir-excluded' joins the same carve-out for the same reason.
+    // Sync never imports a path outside GBRAIN_TOP_DIRS, so a page there can
+    // only exist from a deliberate put_page or from before the allowlist was
+    // set — "the file was modified" is not evidence the page is stale, and
+    // deleting here would destroy exactly those pages the first time their
+    // file landed in a commit. Identical to the #2404 pruned-dir class.
+    if (reason === 'metafile' || reason === 'pruned-dir' || reason === 'top-dir-excluded') continue;
     // Bare-bracket markdown (pre-gate imports like `notes [draft].md`) keeps
     // its row — only the poison signature (`](`/control chars) is sweepable.
     // Deleting a legit page's row while its file sits on disk is data loss.

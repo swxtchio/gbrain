@@ -9,6 +9,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
+import { withEnv } from './helpers/with-env.ts';
 import {
   isSyncable,
   isPoisonedPath,
@@ -61,6 +62,28 @@ describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', 
   test('exclude glob: matching path returns exclude-glob-hit', () => {
     expect(unsyncableReason('drafts/wip.md', { exclude: ['drafts/**'] })).toBe('exclude-glob-hit');
     expect(isSyncable('drafts/wip.md', { exclude: ['drafts/**'] })).toBe(false);
+  });
+
+  test('SWX top-dirs: a path outside GBRAIN_TOP_DIRS returns top-dir-excluded, and the duality holds', () => {
+    withEnv({ GBRAIN_TOP_DIRS: 'allowed' }, () => {
+      expect(unsyncableReason('blocked/note.md')).toBe('top-dir-excluded');
+      expect(isSyncable('blocked/note.md')).toBe(false);
+      expect(unsyncableReason('allowed/note.md')).toBeNull();
+      expect(isSyncable('allowed/note.md')).toBe(true);
+      // Root-level files always pass: the allowlist scopes which SUBTREES
+      // sync, not whether the root itself does (matches the walk's
+      // descent-only gate).
+      expect(unsyncableReason('note.md')).toBeNull();
+      // Windows separators reach the classifier from the walk route.
+      expect(unsyncableReason('blocked\\note.md')).toBe('top-dir-excluded');
+    });
+  });
+
+  test('SWX top-dirs: unset env leaves every path classified exactly as upstream', () => {
+    withEnv({ GBRAIN_TOP_DIRS: undefined }, () => {
+      for (const c of cases) expect(unsyncableReason(c.path)).toBe(c.expected);
+      expect(unsyncableReason('blocked/note.md')).toBeNull();
+    });
   });
 
   test('SYNC_SKIP_FILES export contains the canonical structural metafiles (SWX: index.md is syncable)', () => {
