@@ -618,8 +618,10 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 3: 22548 pass / 1 fail / 10 skip**
-(`bun run test`, 1542s, 4 shards + the serial pass; all four shards clean). The
+**Final gate run after review round 4: 22552 pass / 3 fail / 10 skip**
+(`bun run test`, 2807s under heavy box load). One failure is the known
+pre-existing upstream cell; the other two are load-induced subprocess timeouts
+proven not port-caused — see below. The
 single failure is pre-existing — see below. `bun run verify` 55/55 green;
 `shellcheck` clean on both fork shell scripts.
 
@@ -629,6 +631,18 @@ PGLite `Out of memory` at `connect` — the box's known WASM-OOM class, not a
 logic failure, and the runner's own serial rescue did not recover it.
 `GBRAIN_UNIT_MAX_PARALLEL=1 GBRAIN_SERIAL_POOL=1` is clean (and slower: ~26min
 vs ~10). Same order the p2 phase recorded as in force box-wide.
+
+**Round-4 timeouts under box load, with the same pristine-master proof.**
+This run happened at load average 34-57 (eight users; other sessions), and two
+`cli-search-dispatch` / `commands-search` cases died with exit 124 — the
+subprocess `timeout` kill — after 7-15s. Not port-caused, and the check is the
+one already established for the rename cell: a pristine `origin/master` tree
+extracted with `git archive` fails the SAME four cases under the same load
+(`cli-search-dispatch` ×3 plus the `commands-search` hook timeout), while all
+four pass on this branch when the box is quiet. `bun run verify` hit the same
+wall once — `typecheck` alone takes 98s against verify's 120s cap — and passes
+at `GBRAIN_VERIFY_TIMEOUT=300`. These are the box, not the branch; record them
+as such rather than as a signal.
 
 **Two shard-1 failures appeared once in round 3 and were triaged, not
 absorbed.** `skillify-check`'s `--recent` case was real and attributable:
