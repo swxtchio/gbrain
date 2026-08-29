@@ -339,6 +339,108 @@ describe('scripts/gbrain-safe-update', () => {
     expect(calls).not.toContain('systemctl --user restart');
   });
 
+  /** Unit present + undecided posture: the shape the gate is written for. */
+  function gatedFixture(tag: string): string {
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'enabled:unset');
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);  // unit IS installed
+    writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
+    void tag;
+    return install;
+  }
+
+  test('--check is a READ: the gate does not fire, even with the unit installed', () => {
+    // The regression the gate move introduced. --check's whole contract is
+    // "change nothing", and its documented job is to report. Charging a
+    // recorded posture decision as the price of a read also inverts the gate's
+    // own principle — the only ways to make the read succeed were to change
+    // the brain's config or to declare "keep the mirrors, on purpose".
+    const install = gatedFixture('check');
+    advanceUpstream('pusher-check');
+
+    const r = runScript(SAFE_UPDATE, ['--check'], { GBRAIN_DIR: install });
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(`${r.stdout}${r.stderr}`).not.toContain('refusing to update');
+  });
+
+  test('--dry-run REPORTS what a real run would refuse, and exits 0', () => {
+    // Dry-run's job is to say what would happen — so the gate speaks, but as a
+    // prediction rather than a refusal, and nothing on disk moves.
+    const install = gatedFixture('dryrun');
+    advanceUpstream('pusher-dryrun');
+    const headBefore = execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+
+    const r = runScript(SAFE_UPDATE, ['--dry-run', '--no-backup'], { GBRAIN_DIR: install });
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(out).toContain('[dry-run]');
+    expect(out).toContain('would REFUSE to update');
+    expect(execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim())
+      .toBe(headBefore);
+  });
+
+  test('a run that would land no code does not fire the gate', () => {
+    // Mirror current AND the custom branch already sitting on it: the rebase
+    // below would be a no-op, so there is no posture decision to force.
+    const install = gatedFixture('noop');
+    // No advanceUpstream, and put swxtch onto master so nothing replays.
+    execFileSync('git', ['-C', install, 'checkout', '-q', 'swxtch']);
+    execFileSync('git', ['-C', install, 'reset', '--hard', '-q', 'master']);
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(`${r.stdout}${r.stderr}`).not.toContain('refusing to update');
+  });
+
+  test('HOLE GUARD: BEHIND=0 but the custom branch is behind the mirror → still aborts', () => {
+    // A naive `BEHIND=0 → skip` passes the case above and fails here. With the
+    // mirror already current, the rebase block STILL replays the custom branch
+    // when it does not yet sit on the mirror (a prior aborted run, or a
+    // hand-fast-forwarded mirror), and that replay lands new code.
+    const install = gatedFixture('hole');
+    // Advance the mirror locally WITHOUT advancing origin: BEHIND stays 0
+    // while swxtch is left behind master.
+    execFileSync('git', ['-C', install, 'checkout', '-q', 'master']);
+    writeFileSync(join(install, 'mirror-only.txt'), 'landed via rebase\n');
+    execFileSync('git', ['-C', install, 'add', '-A'], { cwd: install });
+    execFileSync('git', ['-C', install, 'commit', '-qm', 'mirror advance']);
+    execFileSync('git', ['-C', install, 'push', '-q', 'origin', 'master']);
+    execFileSync('git', ['-C', install, 'checkout', '-q', 'swxtch']);
+    const headBefore = execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    expect(r.status).not.toBe(0);
+    expect(String(r.stderr)).toContain('refusing to update');
+    expect(execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim())
+      .toBe(headBefore);
+  });
+
+  test('an unresolvable posture names a remedy a re-run can actually reach', () => {
+    // The two undecided shapes are not the same problem: re-running cures
+    // neither a missing probe nor bun off PATH, so printing the enabled-arm
+    // "config set … then re-run this" there sends the operator nowhere.
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();  // no probe file at all
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-remedy');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+    const err = String(r.stderr);
+
+    expect(r.status).not.toBe(0);
+    expect(err).toContain('unknown:probe-missing');
+    expect(err).toContain('restore');
+    expect(err, 'the unknown arm printed the enabled arm\'s remedy')
+      .not.toContain('gbrain config set sync.write_through false');
+  });
+
   test('GBRAIN_ALLOW_WRITE_THROUGH=1 records the decision and lets the update run', () => {
     stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
@@ -475,7 +577,8 @@ exit 0`);
 
     const install = buildSafeUpdateFixture();
     // This test is about the port contract, not the write-through posture —
-    // give it a decided one so the gate above the restart lets it through.
+    // give it a decided one so the gate (which sits above the REBASE, not the
+    // restart) lets it through.
     stubWriteThroughProbe(install, 'disabled');
     const upstream = join(sandbox, 'safe-update', 'upstream.git');
     const clone = join(sandbox, 'pusher4');

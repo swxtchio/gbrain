@@ -178,32 +178,59 @@ if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
   say "$CUSTOM_BRANCH carries $CUSTOM_AHEAD commit(s) to replay onto the new $TRACK_BRANCH."
 fi
 
+if [ "$CHECK_ONLY" = 1 ]; then
+  exit 0
+fi
+
 # ---- write-through posture gate --------------------------------------------
 #
-# Placed HERE, before the stash and the rebase, because the rebase is the
-# irreversible step. The `gbrain` CLI is bun-linked to this checkout, so the
-# instant `git rebase` lands, every new CLI process on the box — capture,
-# `brainstorm --save`, cron sync, minion workers — runs the new code. The HTTP
-# server is not the only disk sink, which is why round-2's placement in front
-# of the explicit restart established nothing: the unit is enabled with
-# `Restart=on-failure` and `WantedBy=default.target`, so systemd re-activates
-# it on the next crash, login or reboot regardless of what this script skips.
+# Placed here: AFTER the read-only exits, BEFORE the stash and the rebase.
+#
+# The rebase is the state change that matters. The `gbrain` CLI is bun-linked
+# to this checkout, so the instant it lands every new process on the box —
+# capture, `brainstorm --save`, cron sync, minion workers — runs the new code.
+# The HTTP server is not the only disk sink, which is why gating the explicit
+# restart established nothing: the unit is enabled with `Restart=on-failure`
+# and `WantedBy=default.target`, so systemd re-activates it regardless.
+#
+# But only for invocations that will actually mutate. An earlier revision put
+# this above the `--check` exit, which charged a recorded posture decision as
+# the price of a READ: `--check`, `--dry-run`, and an already-current run all
+# died, and the message ("Rebasing would put the new code…") was counterfactual
+# in all three. `--check` exits above; `--dry-run` reports instead of dying;
+# and `gate_lands_code` answers whether anything would land at all.
+#
+# That predicate is NOT `BEHIND=0`. With the mirror already current the rebase
+# block below still replays the custom branch whenever it does not yet sit on
+# the mirror — a prior aborted run, or a hand-fast-forwarded mirror — and that
+# replay lands new code. So: the mirror advances, OR the custom branch is not
+# already on it.
 #
 # SCOPED to the deployment it was written for. `gbrain-http.service` being
-# installed is what makes "shared, DB-authoritative brain" true; on a box with
+# installed is what makes "shared, DB-authoritative brain" true. On a box with
 # no unit this is an ordinary PGLite/file-authoritative brain, where an unset
-# key — the fork's inherited mirror-on posture — is CORRECT, and telling the
-# operator to run `sync.write_through false` there would disable the .md mirror
-# that IS that brain's source of truth. So: no unit, no gate, no probe, no
-# advice.
+# key — the fork's inherited mirror-on posture — is CORRECT, and telling that
+# operator to run `sync.write_through false` would disable the .md mirror that
+# IS that brain's source of truth.
 #
 # What this establishes and what it does not: it establishes that at this
 # moment the DB-plane posture is decided, and refuses to put new code on the
 # box while it is not. It cannot establish that the posture stays decided —
-# the flag is DB-backed and any client can change it later. No deploy-time
-# check can promise more than that, and the message does not pretend to.
+# the flag is DB-backed and any client can change it later.
+gate_lands_code() {
+  [ "$BEHIND" != 0 ] && return 0
+  git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" || return 1
+  git merge-base --is-ancestor "$TRACK_BRANCH" "$CUSTOM_BRANCH" && return 1
+  return 0
+}
+
 HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
-if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
+if gate_lands_code \
+   && command -v systemctl >/dev/null 2>&1 \
+   && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
+  # Read through write-through-probe.ts, not `gbrain config get`: `config get`
+  # resolves the FILE plane above the DB plane, while every runtime disk sink
+  # asks `isWriteThroughDisabled`, which reads only the DB plane.
   WT_STATE="unknown:probe-not-run"
   WT_PROBE="$INSTALL_DIR/deploy/local-http/write-through-probe.ts"
   if ! command -v bun >/dev/null 2>&1; then
@@ -217,24 +244,34 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" 
   case "$WT_STATE" in
     disabled) ok "sync.write_through is off — brain stays DB-only." ;;
     *)
-      if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
+      # The two undecided shapes need DIFFERENT remedies, and printing the
+      # enabled-arm one for a missing probe sends the operator to a command
+      # that cannot help: re-running does not conjure the probe back.
+      if [ "$WT_STATE" != "${WT_STATE#enabled}" ]; then
+        WT_REMEDY="     gbrain config set sync.write_through false   # DB-only, then re-run this
+     GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # keep the mirrors, on purpose"
+        WT_WHY="disk mirroring is ON for this brain"
+      else
+        WT_REMEDY="     restore $WT_PROBE (or put bun on PATH), then re-run
+     GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # or update without verifying"
+        WT_WHY="the posture could not be read, and an unverified posture is not a pass"
+      fi
+      if [ "$DRY_RUN" = 1 ]; then
+        warn "[dry-run] $WT_STATE — a real run would REFUSE to update ($WT_WHY).
+$WT_REMEDY"
+      elif [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
         warn "$WT_STATE — proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1."
       else
         die "$WT_STATE — refusing to update $INSTALL_DIR.
    $HTTP_SERVICE is installed, so this box serves the shared DB-authoritative
-   brain, and upstream's sync.write_through flag FAILS OPEN. Rebasing would put
-   the new code behind every gbrain process here — the HTTP server, and also
-   capture, 'brainstorm --save', cron sync and minion workers, all bun-linked to
-   this checkout — each writing a .md mirror into the registered source's tree.
-   Nothing has been changed. Decide once:
-     gbrain config set sync.write_through false   # DB-only, then re-run this
-     GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # keep the mirrors, on purpose"
+   brain, and $WT_WHY. Rebasing would put the new code behind every gbrain
+   process here — the HTTP server, and also capture, 'brainstorm --save', cron
+   sync and minion workers, all bun-linked to this checkout — each writing a
+   .md mirror into the registered source's tree. Nothing has been changed.
+   Decide once:
+$WT_REMEDY"
       fi ;;
   esac
-fi
-
-if [ "$CHECK_ONLY" = 1 ]; then
-  exit 0
 fi
 
 # ---- stash dirty working tree ----------------------------------------------
