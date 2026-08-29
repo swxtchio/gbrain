@@ -54,6 +54,8 @@ beforeAll(() => {
   writeFileSync(join(repo, 'people/pedro.raw/source.md'), 'raw sidecar\n');
 
   // Metafiles — excluded on both routes (pre-existing #345 behavior).
+  // SWX fork delta: index.md is NOT a metafile for us (folder entry page) —
+  // it must be collected on both routes; the agreement test below pins that.
   writeFileSync(join(repo, 'README.md'), '# repo\n');
   writeFileSync(join(repo, 'notes/index.md'), '# index\n');
 
@@ -77,9 +79,10 @@ describe('#2607 — git fast path excludes what incremental sync excludes', () =
     expect(files).not.toContain(join('vendor', 'pkg', 'notes.md'));
     expect(files).not.toContain(join('node_modules', 'dep', 'CHANGELOG.md'));
     expect(files).not.toContain(join('people', 'pedro.raw', 'source.md'));
-    // Metafiles stay excluded too.
+    // Metafiles stay excluded too. index.md is COLLECTED (SWX: syncable
+    // folder entry page — see SYNC_SKIP_FILES in src/core/sync.ts).
     expect(files).not.toContain('README.md');
-    expect(files).not.toContain(join('notes', 'index.md'));
+    expect(files).toContain(join('notes', 'index.md'));
   });
 
   test('full-sync enumeration agrees with incremental isSyncable for every collected file', () => {

@@ -525,19 +525,25 @@ export function sanitizePathForDisplay(path: string): string {
  * skips. Exported so the cleanup-loop guard in `commands/sync.ts` can
  * surface them in user-facing logs / docs without re-declaring the list.
  *
- * These files are append-only domain logs / index pages / boilerplate
- * READMEs / the master filing decision-tree — not typed brain pages — by
- * convention. A user who genuinely wants to index one of these basenames as
- * a page should rename it.
+ * These files are append-only domain logs / boilerplate READMEs / the master
+ * filing decision-tree — not typed brain pages — by convention. A user who
+ * genuinely wants to index one of these basenames as a page should rename it.
  *
  * `RESOLVER.md` is the brain's master routing/decision-tree config file. The
- * recommended-schema docs group it with `schema.md` / `index.md` / `log.md`
+ * recommended-schema docs group it with `schema.md` / `log.md`
  * as a structural document ("a document … plus schema.md and RESOLVER.md …
  * that tells the agent how the brain is structured"), NOT searchable content.
  * It was the lone structural sibling missing from this list, so it leaked
  * into the index as a content page (slug `resolver`).
  */
-export const SYNC_SKIP_FILES = ['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
+// SWX local patch: `index.md` removed from the skip list — our multi-domain
+// brain uses index.md as the canonical entry page for a folder (e.g.
+// docs/blox-spec/index.md is the spec's table of contents), not boilerplate
+// noise. Live pages exist at these slugs; re-adding the skip would classify
+// the files 'metafile', so full-sync reconcile would stop seeing them as
+// file-backed and soft-delete the pages (#4587 — hidden from every read for
+// the 72h recovery window, then hard-deleted by the autopilot purge phase).
+export const SYNC_SKIP_FILES = ['schema.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
 
 /**
  * Internal classifier. Returns null when the path IS syncable, or a tagged

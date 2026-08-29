@@ -4078,9 +4078,9 @@ export async function buildChecks(
     // checks themselves are cheap counts (backed by content_chunks_stale_idx
     // for embed_staleness, TABLESAMPLE on PG >50K for the coverage pair).
     progress.heartbeat('onboard_checks');
-    const { runAllOnboardChecks } = await import('../core/onboard/checks.ts');
-    const onboardResults = await runAllOnboardChecks(engine);
-    for (const r of onboardResults) checks.push(r.check);
+    // SWX: bounded in doctor/onboard-bound.ts — a hung onboard phase degrades to a WARN.
+    const { runOnboardChecksBounded } = await import('./doctor/onboard-bound.ts');
+    checks.push(...(await runOnboardChecksBounded(engine)));
   }
 
   progress.finish();

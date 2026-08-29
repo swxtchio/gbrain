@@ -179,6 +179,11 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'npm_squat',
   'oauth_client_scope_health',
   'oauth_confidential_client_health',
+  // SWX: the timeout WARN emitted when the onboard phase is bounded off
+  // (GBRAIN_DOCTOR_ONBOARD_TIMEOUT_MS) — a DB-pooler infrastructure signal,
+  // not brain data quality, so it lives here and not beside the individual
+  // onboard checks (embed_staleness & co. are 'brain').
+  'onboard_checks',
   'orphan_clones',
   'pgbouncer_prepare',
   'pglite_data_dir',

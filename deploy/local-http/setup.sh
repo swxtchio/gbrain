@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Install + (re)start the single shared gbrain HTTP MCP server as a systemd
+# user service on this VM. Idempotent — safe to re-run after editing the unit.
+#
+# This only manages the SERVER. Wiring a coding agent to it (mint a token +
+# `gbrain connect`) is a separate, per-agent step documented in README.md.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+PORT="${GBRAIN_HTTP_PORT:-8787}"
+HEALTH_URL="http://127.0.0.1:${PORT}/health"
+UNIT="gbrain-http.service"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEST_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+# The override must hold end to end: the health probe below uses ${PORT}, so
+# the installed unit must listen on it too — a knob that changes the check
+# but not the thing being checked falsely fails setup.
+[[ "${PORT}" =~ ^[0-9]+$ ]] || { echo "!! GBRAIN_HTTP_PORT must be numeric, got '${PORT}'" >&2; exit 2; }
+
+echo "==> Installing ${UNIT} -> ${DEST_DIR}/"
+mkdir -p "${DEST_DIR}"
+cp "${SRC_DIR}/${UNIT}" "${DEST_DIR}/${UNIT}"
+if [ "${PORT}" != "8787" ]; then
+  echo "==> GBRAIN_HTTP_PORT=${PORT} — templating the installed unit's --port"
+  sed -i "s/--port 8787/--port ${PORT}/" "${DEST_DIR}/${UNIT}"
+  grep -q -- "--port ${PORT}" "${DEST_DIR}/${UNIT}" \
+    || { echo "!! failed to template --port in ${DEST_DIR}/${UNIT}" >&2; exit 1; }
+fi
+
+echo "==> Reloading user systemd + (re)starting"
+systemctl --user daemon-reload
+systemctl --user enable "${UNIT}"
+# restart, not `enable --now`: on a RE-RUN against an already-enabled,
+# already-active unit, enable --now is a no-op and daemon-reload restarts
+# nothing — the old process would keep listening on the OLD port while the
+# health probe below checks the new one. restart moves the serving process
+# onto the freshly-installed unit (and starts it on first install).
+systemctl --user restart "${UNIT}"
+
+echo "==> Waiting for ${HEALTH_URL} (up to 30s)"
+for _ in $(seq 1 30); do
+  if curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1; then
+    echo "==> Healthy:"
+    curl -fsS --max-time 3 "${HEALTH_URL}"; echo
+    echo
+    echo "Next: wire a coding agent (see README.md):"
+    echo "  gbrain auth create \"claude-code-vm\"          # prints a gbrain_… bearer token"
+    echo "  gbrain connect http://127.0.0.1:${PORT}/mcp --token gbrain_… --install --force"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "!! Service did not become healthy within 30s. Recent logs:" >&2
+systemctl --user status "${UNIT}" --no-pager -l 2>&1 | tail -20 >&2 || true
+journalctl --user -u "${UNIT}" --no-pager -n 40 >&2 2>&1 || true
+exit 1
