@@ -110,12 +110,28 @@ upstream's config flag (introduced in the v0.46.23.0 roll `07f5d28d`,
 extended to the timeline lane in `055ac6c7`) — which means deploying this
 branch **re-enables** `.md` mirroring unless the flag is set.
 
-Both entrypoints now CHECK it rather than trusting this page:
-`deploy/local-http/setup.sh` reads the flag back after installing the unit, and
-`scripts/gbrain-safe-update` reads it on the run that would flip the posture
-(it rebases the new code in and restarts the serving process). Both print what
-they found and the exact fix; both are advisory, because a brain may
-legitimately want mirrors and neither command's job is to gate on it.
+Both entrypoints CHECK it rather than trusting this page, **before** the step
+that would make mirroring live, and neither proceeds past an undecided posture:
+
+- `deploy/local-http/setup.sh` checks after installing the unit file and
+  before starting it. An undetermined or mirroring posture exits 3 with the
+  unit installed and nothing started.
+- `scripts/gbrain-safe-update` checks before the restart. The upgrade still
+  completes; only the restart is skipped, so the running service stays on the
+  code it already has rather than being activated into a posture nobody chose.
+
+Either way the decision is made once and recorded:
+
+```bash
+gbrain config set sync.write_through false      # DB-only — what this unit is for
+GBRAIN_ALLOW_WRITE_THROUGH=1 <the command>      # keep the mirrors, deliberately
+```
+
+The read goes through `deploy/local-http/write-through-probe.ts`, which calls
+`isWriteThroughDisabled` — the same predicate every runtime disk sink asks.
+`gbrain config get` is deliberately NOT used: it resolves the file plane above
+the DB plane, so a stale value in `~/.gbrain/config.json` would let it report
+"off" while the brain still mirrors.
 
 The shared brain is remote-postgres and DB-authoritative; the mirrors are
 redundant and litter whatever tree the server runs from. Set the flag ONCE

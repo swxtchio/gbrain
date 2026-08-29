@@ -30,7 +30,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, chmodSync } from 'fs';
 import { execFileSync, spawnSync, type SpawnSyncOptions } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -57,7 +57,11 @@ function spawnEnv(extra: Record<string, string> = {}): Record<string, string> {
     HOME: homeDir,
     TERM: 'dumb',
     // The scripts never see the box's live brain/service coordinates.
-    GBRAIN_HOME: join(homeDir, '.gbrain'),
+    // GBRAIN_HOME is a PARENT dir — gbrain's configDir() appends '.gbrain' —
+    // so this must be the home, not the brain dir. (The fixture used to pass
+    // the brain dir, which the canonical resolution turns into
+    // <home>/.gbrain/.gbrain; caught by the round-2 backup tests.)
+    GBRAIN_HOME: homeDir,
     GBRAIN_LINK: join(sandbox, 'self-link'),
     ...extra,
   };
@@ -234,49 +238,155 @@ describe('scripts/gbrain-safe-update', () => {
     expect(String(r.stderr)).not.toContain('Cannot determine the brain engine');
   });
 
-  test('warns when sync.write_through is unset, because upstream reads that as ON', () => {
-    // Retiring the fork's engine-kind gate handed the posture to a flag that
-    // FAILS OPEN. This script is the run that flips it (new code + restart),
-    // so it is where the operator has to hear about it.
-    stubGbrainConfig({ engine: 'pglite' }); // sync.write_through → exit 1 = unset
-    const install = buildSafeUpdateFixture();
+  /** Advance the bare upstream so BEHIND != 0 and the upgrade block runs. */
+  function advanceUpstream(tag: string): void {
     const upstream = join(sandbox, 'safe-update', 'upstream.git');
-    const clone = join(sandbox, 'pusher2');
+    const clone = join(sandbox, tag);
     execFileSync('git', ['clone', '-q', upstream, clone]);
     execFileSync('git', ['-C', clone, 'config', 'user.email', 't@t.t']);
     execFileSync('git', ['-C', clone, 'config', 'user.name', 'T']);
-    writeFileSync(join(clone, 'upstream.txt'), 'new\n');
+    writeFileSync(join(clone, 'upstream.txt'), `new ${tag}\n`);
     execFileSync('git', ['-C', clone, 'add', '-A']);
-    execFileSync('git', ['-C', clone, 'commit', '-qm', 'upstream advance']);
+    execFileSync('git', ['-C', clone, 'commit', '-qm', `upstream advance ${tag}`]);
     execFileSync('git', ['-C', clone, 'push', '-q', 'origin', 'HEAD:master']);
+  }
+
+  /**
+   * Stand in for deploy/local-http/write-through-probe.ts inside the fixture
+   * checkout. The scripts locate the probe relative to their own tree, so the
+   * fixture gets its own copy printing the state under test — which is also
+   * what keeps these tests off the box's real brain.
+   */
+  function stubWriteThroughProbe(install: string, state: string): void {
+    const dir = join(install, 'deploy', 'local-http');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'write-through-probe.ts'), `console.log('${state}');\n`);
+  }
+
+  test('an unset write_through key SKIPS the restart instead of warning past it', () => {
+    // Round-2: a confirmation placed downstream of the flip is a post-mortem.
+    // The restart is what activates the new code with mirroring on, so an
+    // undecided posture must stop before it — leaving the service on the code
+    // it already has, a known state.
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'enabled:unset');
+    // A real bun must run the probe, so point the stub at the real binary.
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-wt-unset');
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
 
-    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
     const out = `${r.stdout}${r.stderr}`;
-    expect(out).toContain('sync.write_through is UNSET');
+    expect(out).toContain('NOT restarting');
     expect(out).toContain('gbrain config set sync.write_through false');
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls, 'the service was restarted despite an undecided posture')
+      .not.toContain('systemctl --user restart');
   });
 
-  test('stays quiet when sync.write_through is already off', () => {
-    stubGbrainConfig({ engine: 'pglite', 'sync.write_through': 'false' });
+  test('GBRAIN_ALLOW_WRITE_THROUGH=1 records the decision and lets the restart run', () => {
+    stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
-    const upstream = join(sandbox, 'safe-update', 'upstream.git');
-    const clone = join(sandbox, 'pusher3');
-    execFileSync('git', ['clone', '-q', upstream, clone]);
-    execFileSync('git', ['-C', clone, 'config', 'user.email', 't@t.t']);
-    execFileSync('git', ['-C', clone, 'config', 'user.name', 'T']);
-    writeFileSync(join(clone, 'upstream.txt'), 'new\n');
-    execFileSync('git', ['-C', clone, 'add', '-A']);
-    execFileSync('git', ['-C', clone, 'commit', '-qm', 'upstream advance']);
-    execFileSync('git', ['-C', clone, 'push', '-q', 'origin', 'HEAD:master']);
+    stubWriteThroughProbe(install, 'enabled:unset');
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-wt-allow');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_ALLOW_WRITE_THROUGH: '1' });
+
+    expect(`${r.stdout}${r.stderr}`).toContain('GBRAIN_ALLOW_WRITE_THROUGH=1');
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).toContain('systemctl --user restart');
+  });
+
+  test('a disabled posture restarts without comment', () => {
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'disabled');
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-wt-off');
 
     const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
 
-    expect(r.status).toBe(0);
     const out = `${r.stdout}${r.stderr}`;
-    expect(out).not.toContain('sync.write_through is UNSET');
     expect(out).toContain('brain stays DB-only');
+    expect(out).not.toContain('NOT restarting');
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).toContain('systemctl --user restart');
+  });
+
+  test('an unresolvable posture also stops — an unverified state is not a pass', () => {
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();
+    // No probe file in the fixture checkout at all.
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-wt-unknown');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    expect(`${r.stdout}${r.stderr}`).toContain('NOT restarting');
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls).not.toContain('systemctl --user restart');
+  });
+
+  test('a custom database_path PGLite store is the one backed up', () => {
+    // Round-2: the elif copied the literal <brain>/brain.pglite, so a
+    // custom-path brain matched no arm, wrote no snapshot, printed nothing,
+    // and reached post-upgrade with no net.
+    const brainHome = join(sandbox, 'bh-custom');
+    const customStore = join(sandbox, 'elsewhere', 'my-brain.pglite');
+    mkdirSync(join(brainHome, '.gbrain'), { recursive: true });
+    mkdirSync(customStore, { recursive: true });
+    writeFileSync(join(customStore, 'marker'), 'store contents\n');
+    writeFileSync(
+      join(brainHome, '.gbrain', 'config.json'),
+      JSON.stringify({ engine: 'pglite', database_path: customStore }),
+    );
+    stubGbrainConfig({}); // force the config.json fallback for BOTH reads
+    const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'disabled');
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-pg-custom');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_HOME: brainHome });
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    const backups = join(brainHome, '.gbrain', 'backups');
+    const made = existsSync(backups) ? readdirSync(backups) : [];
+    expect(made.some((f) => f.startsWith('my-brain.pglite.bak-')), `backups: ${made.join(',')}`).toBe(true);
+    // And the copy is the real store, not an empty placeholder.
+    const copied = made.find((f) => f.startsWith('my-brain.pglite.bak-'))!;
+    expect(existsSync(join(backups, copied, 'marker'))).toBe(true);
+  });
+
+  test('an unresolvable PGLite store ABORTS rather than skipping the snapshot', () => {
+    const brainHome = join(sandbox, 'bh-missing');
+    mkdirSync(join(brainHome, '.gbrain'), { recursive: true });
+    writeFileSync(
+      join(brainHome, '.gbrain', 'config.json'),
+      JSON.stringify({ engine: 'pglite', database_path: join(sandbox, 'no', 'such', 'store') }),
+    );
+    stubGbrainConfig({});
+    const install = buildSafeUpdateFixture();
+    stubWriteThroughProbe(install, 'disabled');
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-pg-missing');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_HOME: brainHome });
+
+    expect(r.status).not.toBe(0);
+    expect(String(r.stderr)).toContain('PGLite store not found');
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls, 'migrations ran without a backup').not.toContain('post-upgrade');
   });
 
   test('the health probe follows the port in the INSTALLED unit, not a literal', () => {
@@ -293,12 +403,11 @@ if [ "$2" = "cat" ]; then
   exit 0
 fi
 exit 0`);
-    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexit 0`);
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
     writeStub('gbrain', `echo "gbrain $*" >> "${stubLog}"
 if [ "$1" = "config" ] && [ "$2" = "get" ]; then
   case "$3" in
     engine) echo "pglite" ;;
-    sync.write_through) echo "false" ;;
     *) exit 1 ;;
   esac
   exit 0
@@ -310,6 +419,9 @@ exit 0`);
     writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
 
     const install = buildSafeUpdateFixture();
+    // This test is about the port contract, not the write-through posture —
+    // give it a decided one so the gate above the restart lets it through.
+    stubWriteThroughProbe(install, 'disabled');
     const upstream = join(sandbox, 'safe-update', 'upstream.git');
     const clone = join(sandbox, 'pusher4');
     execFileSync('git', ['clone', '-q', upstream, clone]);
@@ -389,6 +501,29 @@ exit 0`;
     return p;
   }
 
+  test('an undecided write_through posture stops BEFORE the service is started', () => {
+    // Round-2 cluster 1: round-1 put this check after `systemctl --user
+    // restart`, so the serving process was already live with mirroring on
+    // when it printed. The assertion is ordering, observed through the
+    // systemctl stub log: nothing may be enabled or started.
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    // The real probe runs here (setup.sh finds it beside itself in the repo)
+    // and reports unknown:no-brain-configured against the empty sandbox HOME.
+    const unitsRoot = join(sandbox, 'units-gate');
+
+    const r = runScript(SETUP_SH, [], { XDG_CONFIG_HOME: unitsRoot });
+
+    expect(r.status).toBe(3);
+    expect(String(r.stderr)).toContain(`Refusing to start`);
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls, 'the unit was started despite an unverified posture')
+      .not.toContain('systemctl --user restart');
+    expect(calls).not.toContain('systemctl --user enable');
+    // The unit file IS installed — the message says so, and a re-run after the
+    // decision must not have to redo it.
+    expect(existsSync(join(unitsRoot, 'systemd', 'user', 'gbrain-http.service'))).toBe(true);
+  });
+
   test('after a port-change re-run, the SERVING process answers on the selected port', async () => {
     writeStub('systemctl', SYSTEMCTL_STUB);
     const unitsRoot = join(sandbox, 'units');
@@ -398,14 +533,14 @@ exit 0`;
 
     // First install on a non-default port: the unit file alone passing is not
     // enough — the probe must reach a process on port1.
-    const first = runScript(SETUP_SH, [], { ...env, GBRAIN_HTTP_PORT: String(port1) });
+    const first = runScript(SETUP_SH, [], { ...env, GBRAIN_HTTP_PORT: String(port1), GBRAIN_ALLOW_WRITE_THROUGH: '1' });
     expect({ status: first.status, stderr: first.stderr }).toEqual(expect.objectContaining({ status: 0 }));
 
     // Re-run with a different port (the upgrade/retemplate path). Pre-fix,
     // enable --now is a no-op on the active unit, the old process keeps
     // port1, and the probe of port2 times out -> exit 1. Post-fix, restart
     // moves the process; the probe reaches it.
-    const second = runScript(SETUP_SH, [], { ...env, GBRAIN_HTTP_PORT: String(port2) });
+    const second = runScript(SETUP_SH, [], { ...env, GBRAIN_HTTP_PORT: String(port2), GBRAIN_ALLOW_WRITE_THROUGH: '1' });
     expect({ status: second.status, stderr: second.stderr, stdout: second.stdout }).toEqual(
       expect.objectContaining({ status: 0 }),
     );

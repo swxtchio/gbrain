@@ -320,10 +320,42 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
           warn "pg_dump snapshot failed — relying on Supabase PITR/WAL-G. (--no-backup to skip)"
         fi
       fi
-    elif [ -e "$BRAIN_DIR/brain.pglite" ]; then
-      BK="$BRAIN_DIR/backups/brain.pglite.bak-$TS"
-      say "Backing up PGLite brain → $BK"
-      run cp -a "$BRAIN_DIR/brain.pglite" "$BK"
+    else
+      # The PGLite store is `config.database_path` (pglite-engine.ts reads
+      # `config.database_path || undefined`), which `gbrain init --path`
+      # customises; only its DEFAULT is <brain dir>/brain.pglite. Copying the
+      # literal default meant a custom-path brain matched no arm at all, wrote
+      # nothing, printed nothing, and fell through to `gbrain post-upgrade` —
+      # live migrations with no net. Same "config value the script cannot
+      # resolve → silently no snapshot" shape as the database_url arm above,
+      # so it is resolved the same way and, like every other arm here, always
+      # reports.
+      PGPATH=""
+      if command -v gbrain >/dev/null 2>&1; then
+        PGPATH="$(gbrain config get database_path --raw 2>/dev/null | tail -1 || true)"
+      fi
+      if [ -z "$PGPATH" ] && command -v bun >/dev/null 2>&1 && [ -r "$BRAIN_DIR/config.json" ]; then
+        PGPATH="$(bun -e 'const f=process.argv[1];const j=JSON.parse(require("fs").readFileSync(f,"utf8"));process.stdout.write(String(j.database_path??""))' "$BRAIN_DIR/config.json" 2>/dev/null || true)"
+      fi
+      # Whether the path was CONFIGURED decides how a missing store is read.
+      PGPATH_EXPLICIT=1
+      if [ -z "$PGPATH" ]; then PGPATH="$BRAIN_DIR/brain.pglite"; PGPATH_EXPLICIT=0; fi
+      if [ -e "$PGPATH" ]; then
+        BK="$BRAIN_DIR/backups/$(basename "$PGPATH").bak-$TS"
+        say "Backing up PGLite brain ($PGPATH) → $BK"
+        run cp -a "$PGPATH" "$BK"
+      elif [ "$PGPATH_EXPLICIT" = 1 ]; then
+        # database_path names a store that is not there. That is a broken
+        # config, not an empty machine, and migrations are about to run.
+        die "PGLite store not found at '$PGPATH' (from the configured database_path).
+   Refusing to run migrations against a live brain with no backup.
+   Fix database_path, or re-run with --no-backup to accept that risk deliberately."
+      else
+        # No configured path and nothing at the default: there is no PGLite
+        # brain on this machine to snapshot. Say so — every other arm of this
+        # block reports, and silence is what let the original defect hide.
+        warn "no PGLite store at the default $PGPATH and no database_path configured — nothing to back up."
+      fi
     fi
   fi
 
@@ -334,25 +366,53 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
     warn "gbrain not on PATH — run 'gbrain post-upgrade' manually after this"
   fi
 
-  # The moment the write-through posture can flip. The fork used to disable
-  # disk write-through automatically on postgres engines; that is retired in
-  # favour of upstream's `sync.write_through` flag, which FAILS OPEN (unset
-  # reads as ON). This script rebases the new code in and restarts the serving
-  # process, so a brain whose key was never set starts mirroring every
-  # put_page / capture / brainstorm --save into its source tree from here on.
-  # Positive confirmation, on the run that would cause it; advisory, because
-  # a brain may legitimately want mirrors and this is an upgrade, not a gate.
-  if command -v gbrain >/dev/null 2>&1; then
-    WT="$(gbrain config get sync.write_through --raw 2>/dev/null | tail -1 || true)"
-    case "$(printf '%s' "$WT" | tr '[:upper:]' '[:lower:]')" in
-      false|0|off|no) ok "sync.write_through=$WT — brain stays DB-only." ;;
-      "") warn "sync.write_through is UNSET, which upstream reads as ON: this brain will now
-   write a .md mirror for every put_page / capture / brainstorm --save.
-   DB-authoritative brain?  gbrain config set sync.write_through false" ;;
-      *)  warn "sync.write_through=$WT — disk mirroring is ON for this brain.
-   Turn it off with:  gbrain config set sync.write_through false" ;;
-    esac
+  # The moment the write-through posture can flip, checked BEFORE the restart
+  # that would flip it.
+  #
+  # The fork used to disable disk write-through automatically on postgres
+  # engines; that is retired in favour of upstream's `sync.write_through`
+  # flag, which FAILS OPEN (unset reads as ON). This script rebases the new
+  # code in and restarts the serving process, so a brain whose key was never
+  # set starts mirroring every put_page / capture / brainstorm --save into its
+  # source tree from the restart onward.
+  #
+  # An UNSET key SKIPS the restart rather than warning past it: the upgrade
+  # itself is complete and the running service stays on the code it already
+  # has, which is a known state, instead of being activated into a posture
+  # nobody chose. GBRAIN_ALLOW_WRITE_THROUGH=1 records the "yes, mirror"
+  # answer and proceeds.
+  #
+  # Read through write-through-probe.ts, not `gbrain config get`: `config get`
+  # resolves the FILE plane above the DB plane, while every runtime disk sink
+  # asks `isWriteThroughDisabled`, which reads only the DB plane. The probe
+  # calls that predicate, so it cannot report off while the brain mirrors.
+  WT_STATE="unknown:probe-not-run"
+  WT_PROBE="$INSTALL_DIR/deploy/local-http/write-through-probe.ts"
+  if command -v bun >/dev/null 2>&1 && [ -r "$WT_PROBE" ]; then
+    WT_STATE="$(bun "$WT_PROBE" 2>/dev/null | tail -1 || true)"
+    [ -n "$WT_STATE" ] || WT_STATE="unknown:probe-no-output"
+  elif ! command -v bun >/dev/null 2>&1; then
+    WT_STATE="unknown:bun-not-on-path"
+  else
+    WT_STATE="unknown:probe-missing"
   fi
+  WT_BLOCKS_RESTART=0
+  case "$WT_STATE" in
+    disabled) ok "sync.write_through is off — brain stays DB-only." ;;
+    *)
+      if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
+        warn "$WT_STATE — proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1."
+      else
+        WT_BLOCKS_RESTART=1
+        warn "$WT_STATE — NOT restarting the HTTP MCP server.
+   Restarting would activate the new code with disk mirroring ON: every
+   put_page / capture / brainstorm --save would also write a .md mirror into
+   the registered source's tree. The upgrade is complete; the running service
+   stays on its current code until you decide:
+     gbrain config set sync.write_through false   # DB-only, then re-run this
+     GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # keep the mirrors, on purpose"
+      fi ;;
+  esac
 
   # Restart the shared HTTP MCP server so it loads the freshly-rebased code.
   # The `gbrain` CLI is bun-linked to this checkout, so a long-running
@@ -379,7 +439,9 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
       | sed -n 's/.*--port[= ]\([0-9][0-9]*\).*/\1/p' | tail -1 || true)"
   fi
   HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:${HTTP_PORT:-8787}/health}"
-  if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
+  if [ "$WT_BLOCKS_RESTART" = 1 ]; then
+    : # the write-through gate above owns this decision; message already printed
+  elif command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
     say "Restarting $HTTP_SERVICE to load the updated code…"
     run systemctl --user restart "$HTTP_SERVICE"
     if [ "$DRY_RUN" != 1 ]; then

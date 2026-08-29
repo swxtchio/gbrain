@@ -29,6 +29,65 @@ if [ "${PORT}" != "8787" ]; then
     || { echo "!! failed to template --port in ${DEST_DIR}/${UNIT}" >&2; exit 1; }
 fi
 
+# REQUIRED at deploy, and BEFORE the restart that would make it true.
+#
+# The fork used to disable disk write-through automatically on postgres
+# engines; that is retired in favour of upstream's `sync.write_through` flag,
+# which FAILS OPEN — isWriteThroughDisabled() reports "enabled" when the key
+# is unset. Starting this service on a brain whose key was never set turns on
+# a .md mirror for every put_page / capture / brainstorm --save.
+#
+# Round-1 put this check AFTER `systemctl --user restart`, which round-2
+# review correctly called a post-mortem rather than a confirmation: by the
+# time it printed, the serving process was already live with mirroring on.
+# It now runs before the unit is started, and an UNSET key is a hard stop
+# rather than a silent default-on — the operator makes the decision once,
+# either way, and GBRAIN_ALLOW_WRITE_THROUGH=1 records the "yes, mirror"
+# answer so a re-run is not blocked.
+#
+# The read goes through write-through-probe.ts, not `gbrain config get`:
+# `config get` resolves the FILE plane above the DB plane, while every runtime
+# disk sink asks `isWriteThroughDisabled`, which reads only the DB plane. The
+# probe calls that predicate, so it cannot print "off" while the brain mirrors.
+echo "==> Checking sync.write_through (DB plane, the one the runtime reads)"
+WT_STATE="unknown:probe-not-run"
+if command -v bun >/dev/null 2>&1; then
+  WT_STATE="$(bun "${SRC_DIR}/write-through-probe.ts" 2>/dev/null | tail -1 || true)"
+  [ -n "${WT_STATE}" ] || WT_STATE="unknown:probe-no-output"
+else
+  WT_STATE="unknown:bun-not-on-path"
+fi
+case "${WT_STATE}" in
+  disabled)
+    echo "    sync.write_through is off — brain stays DB-only." ;;
+  enabled:unset|enabled:*)
+    if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
+      echo "!!  ${WT_STATE} — disk mirroring is ON, allowed by GBRAIN_ALLOW_WRITE_THROUGH=1." >&2
+    else
+      echo "!! Refusing to start ${UNIT}: disk mirroring would be ON for this brain (${WT_STATE})." >&2
+      echo "!! Every put_page / capture / brainstorm --save would also write a .md mirror" >&2
+      echo "!! into the registered source's tree. This unit is for a DB-authoritative brain," >&2
+      echo "!! so decide once:" >&2
+      echo "!!   gbrain config set sync.write_through false   # DB-only (what this deploy wants)" >&2
+      echo "!!   GBRAIN_ALLOW_WRITE_THROUGH=1 $0              # keep the mirrors, on purpose" >&2
+      echo "!! The unit file is installed; nothing has been started." >&2
+      exit 3
+    fi ;;
+  *)
+    # Could not determine. Fail closed for the same reason the flag itself
+    # should not have: an unverified posture is exactly the state that let
+    # this ship silently the first time.
+    if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
+      echo "!!  could not verify sync.write_through (${WT_STATE}); continuing on GBRAIN_ALLOW_WRITE_THROUGH=1." >&2
+    else
+      echo "!! Refusing to start ${UNIT}: could not verify sync.write_through (${WT_STATE})." >&2
+      echo "!! Check by hand, then re-run:" >&2
+      echo "!!   gbrain config set sync.write_through false" >&2
+      echo "!!   GBRAIN_ALLOW_WRITE_THROUGH=1 $0   # or proceed without verifying" >&2
+      exit 3
+    fi ;;
+esac
+
 echo "==> Reloading user systemd + (re)starting"
 systemctl --user daemon-reload
 systemctl --user enable "${UNIT}"
@@ -38,39 +97,6 @@ systemctl --user enable "${UNIT}"
 # health probe below checks the new one. restart moves the serving process
 # onto the freshly-installed unit (and starts it on first install).
 systemctl --user restart "${UNIT}"
-
-# REQUIRED at deploy: the brain must stay DB-only.
-#
-# The fork used to disable disk write-through automatically on postgres
-# engines; that is retired in favour of upstream's `sync.write_through` flag,
-# which FAILS OPEN — isWriteThroughDisabled() reports "enabled" when the key
-# is unset. So installing this service on a brain whose key was never set
-# silently starts mirroring every put_page / capture / brainstorm --save into
-# the source tree. Round-1 review was right that README prose is not a
-# control: this is the deploy entrypoint, so the check belongs here.
-#
-# Positive confirmation, not an assumption — read the value back and say what
-# was found. Advisory (never blocks the install): the operator may be running
-# a brain that genuinely wants mirrors, and setup's job is the SERVER.
-echo "==> Checking sync.write_through (this deployment wants it OFF)"
-if command -v gbrain >/dev/null 2>&1; then
-  WT="$(gbrain config get sync.write_through --raw 2>/dev/null | tail -1 || true)"
-  case "$(printf '%s' "${WT}" | tr '[:upper:]' '[:lower:]')" in
-    false|0|off|no)
-      echo "    sync.write_through=${WT} — brain stays DB-only." ;;
-    "")
-      echo "!!  sync.write_through is UNSET, which upstream reads as ON: this brain will" >&2
-      echo "!!  write a .md mirror for every put_page / capture / brainstorm --save." >&2
-      echo "!!  If this brain is DB-authoritative (the shared-server case this unit is" >&2
-      echo "!!  for), run:  gbrain config set sync.write_through false" >&2 ;;
-    *)
-      echo "!!  sync.write_through=${WT} — disk mirroring is ON for this brain." >&2
-      echo "!!  Turn it off with:  gbrain config set sync.write_through false" >&2 ;;
-  esac
-else
-  echo "!!  gbrain not on PATH — could not verify sync.write_through. Check it by hand:" >&2
-  echo "!!    gbrain config get sync.write_through   # want: false" >&2
-fi
 
 echo "==> Waiting for ${HEALTH_URL} (up to 30s)"
 for _ in $(seq 1 30); do
