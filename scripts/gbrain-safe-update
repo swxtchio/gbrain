@@ -143,6 +143,13 @@ git show-ref --verify --quiet "refs/heads/$TRACK_BRANCH" \
 ORIG_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 OLD_VERSION="$(read_version)"
 
+# The one fact the posture gate and the upgrade block are BOTH about: does this
+# run change the code the box executes? The `gbrain` CLI is bun-linked to this
+# checkout, so "the served code" is literally whatever HEAD resolves to here.
+# Captured before anything mutates, so the answer can be confirmed later rather
+# than inferred from a proxy.
+SERVED_HEAD_BEFORE="$(git rev-parse HEAD)"
+
 say "Install:   $INSTALL_DIR"
 say "Version:   $OLD_VERSION"
 say "Branches:  track=$TRACK_BRANCH  custom=$CUSTOM_BRANCH  (currently on $ORIG_BRANCH)"
@@ -200,11 +207,9 @@ fi
 # in all three. `--check` exits above; `--dry-run` reports instead of dying;
 # and `gate_lands_code` answers whether anything would land at all.
 #
-# That predicate is NOT `BEHIND=0`. With the mirror already current the rebase
-# block below still replays the custom branch whenever it does not yet sit on
-# the mirror — a prior aborted run, or a hand-fast-forwarded mirror — and that
-# replay lands new code. So: the mirror advances, OR the custom branch is not
-# already on it.
+# That predicate is not about the mirror at all — see `gate_lands_code` below.
+# It asks whether the SERVED ref will move, because that is what puts new code
+# in front of every gbrain process on the box.
 #
 # SCOPED to the deployment it was written for. `gbrain-http.service` being
 # installed is what makes "shared, DB-authoritative brain" true. On a box with
@@ -217,11 +222,29 @@ fi
 # moment the DB-plane posture is decided, and refuses to put new code on the
 # box while it is not. It cannot establish that the posture stays decided —
 # the flag is DB-backed and any client can change it later.
+# PREDICTION half of that one fact, for the pre-mutation gate.
+#
+# The question is whether the SERVED ref will move, not whether the mirror
+# will. Those come apart in both directions, and each direction was a defect:
+#
+#   * mirror behind, custom already rebased onto $UPSTREAM — `BEHIND != 0` said
+#     "lands code" and the gate refused a run whose rebase is a no-op on code
+#     the box is ALREADY executing;
+#   * mirror current, custom not yet on it — `BEHIND = 0` said "lands nothing"
+#     while the rebase below replays the custom branch and moves HEAD.
+#
+# So ask the ancestry question against $UPSTREAM, which is the ref the rebase
+# actually lands on (the mirror is fast-forwarded to it first). $TRACK_BRANCH
+# is the PRE-fast-forward local mirror and is the wrong ref to ask about.
+#
+# No custom branch: the checkout follows the mirror, so the mirror question is
+# the served question.
 gate_lands_code() {
-  [ "$BEHIND" != 0 ] && return 0
-  git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" || return 1
-  git merge-base --is-ancestor "$TRACK_BRANCH" "$CUSTOM_BRANCH" && return 1
-  return 0
+  if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
+    git merge-base --is-ancestor "$UPSTREAM" "$CUSTOM_BRANCH" && return 1
+    return 0
+  fi
+  [ "$BEHIND" != 0 ]
 }
 
 HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
@@ -256,11 +279,21 @@ if gate_lands_code \
      GBRAIN_ALLOW_WRITE_THROUGH=1 <this script>   # or update without verifying"
         WT_WHY="the posture could not be read, and an unverified posture is not a pass"
       fi
-      if [ "$DRY_RUN" = 1 ]; then
+      # The opt-in is tested FIRST, and the dry-run prefix rides on whichever
+      # arm wins. Ordering dry-run outermost made an opted-in `--dry-run`
+      # predict the INVERSE of its own real run: it announced a refusal that
+      # would not happen and told the operator to set a flag they had already
+      # set. A prediction that contradicts the thing predicted is worse than no
+      # prediction, and --dry-run's only contract is to be that prediction.
+      # `DRY_RUN` is 0/1, never empty, so `${DRY_RUN:+…}` would expand on a
+      # REAL run too. Build the prefix from the value, not from set-ness.
+      WT_PREFIX=""
+      [ "$DRY_RUN" = 1 ] && WT_PREFIX="[dry-run] "
+      if [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
+        warn "${WT_PREFIX}$WT_STATE — proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1."
+      elif [ "$DRY_RUN" = 1 ]; then
         warn "[dry-run] $WT_STATE — a real run would REFUSE to update ($WT_WHY).
 $WT_REMEDY"
-      elif [ "${GBRAIN_ALLOW_WRITE_THROUGH:-}" = "1" ]; then
-        warn "$WT_STATE — proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1."
       else
         die "$WT_STATE — refusing to update $INSTALL_DIR.
    $HTTP_SERVICE is installed, so this box serves the shared DB-authoritative
@@ -342,7 +375,15 @@ fi
 # (bun install only touches gitignored node_modules; gbrain post-upgrade runs DB
 #  migrations against the brain in $BRAIN_DIR. Both run here so they match the
 #  rebased source — and so the mirror branch is never left dirty.)
-if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
+# CONFIRMATION half. `BEHIND != 0 || REBASED = 1` was the same wrong proxy as
+# the gate's, and it armed the expensive, destructive half of this script: a
+# mirror that moved while the served ref did not still ran `bun install`, a
+# pg_dump of the LIVE brain, migrations against it, and a service restart that
+# drops every connected session — for code the box was already executing. It
+# also MISSED the fast-forward branch above, which moves HEAD without setting
+# REBASED. Compare the served ref to what it was before anything mutated: that
+# is the property, directly observed rather than inferred.
+if [ "$(git rev-parse HEAD)" != "$SERVED_HEAD_BEFORE" ]; then
   if command -v bun >/dev/null 2>&1; then
     say "Installing dependencies (bun install)…"
     run bun install

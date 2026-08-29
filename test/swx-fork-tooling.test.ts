@@ -340,14 +340,13 @@ describe('scripts/gbrain-safe-update', () => {
   });
 
   /** Unit present + undecided posture: the shape the gate is written for. */
-  function gatedFixture(tag: string): string {
+  function gatedFixture(): string {
     stubGbrainConfig({ engine: 'pglite' });
     const install = buildSafeUpdateFixture();
     stubWriteThroughProbe(install, 'enabled:unset');
     writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
     writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);  // unit IS installed
     writeStub('curl', `echo "curl $*" >> "${stubLog}"\nexit 0`);
-    void tag;
     return install;
   }
 
@@ -357,7 +356,7 @@ describe('scripts/gbrain-safe-update', () => {
     // recorded posture decision as the price of a read also inverts the gate's
     // own principle — the only ways to make the read succeed were to change
     // the brain's config or to declare "keep the mirrors, on purpose".
-    const install = gatedFixture('check');
+    const install = gatedFixture();
     advanceUpstream('pusher-check');
 
     const r = runScript(SAFE_UPDATE, ['--check'], { GBRAIN_DIR: install });
@@ -369,7 +368,7 @@ describe('scripts/gbrain-safe-update', () => {
   test('--dry-run REPORTS what a real run would refuse, and exits 0', () => {
     // Dry-run's job is to say what would happen — so the gate speaks, but as a
     // prediction rather than a refusal, and nothing on disk moves.
-    const install = gatedFixture('dryrun');
+    const install = gatedFixture();
     advanceUpstream('pusher-dryrun');
     const headBefore = execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
 
@@ -386,7 +385,7 @@ describe('scripts/gbrain-safe-update', () => {
   test('a run that would land no code does not fire the gate', () => {
     // Mirror current AND the custom branch already sitting on it: the rebase
     // below would be a no-op, so there is no posture decision to force.
-    const install = gatedFixture('noop');
+    const install = gatedFixture();
     // No advanceUpstream, and put swxtch onto master so nothing replays.
     execFileSync('git', ['-C', install, 'checkout', '-q', 'swxtch']);
     execFileSync('git', ['-C', install, 'reset', '--hard', '-q', 'master']);
@@ -402,7 +401,7 @@ describe('scripts/gbrain-safe-update', () => {
     // mirror already current, the rebase block STILL replays the custom branch
     // when it does not yet sit on the mirror (a prior aborted run, or a
     // hand-fast-forwarded mirror), and that replay lands new code.
-    const install = gatedFixture('hole');
+    const install = gatedFixture();
     // Advance the mirror locally WITHOUT advancing origin: BEHIND stays 0
     // while swxtch is left behind master.
     execFileSync('git', ['-C', install, 'checkout', '-q', 'master']);
@@ -419,6 +418,105 @@ describe('scripts/gbrain-safe-update', () => {
     expect(String(r.stderr)).toContain('refusing to update');
     expect(execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim())
       .toBe(headBefore);
+  });
+
+  test('CROSSED: --dry-run WITH the opt-in predicts proceeding, not refusing', () => {
+    // The mode axis and the opt-in axis were each covered, and never crossed —
+    // which is exactly how an inverted prediction shipped under twelve green
+    // cases. --dry-run's only contract is to predict its own real run; under
+    // the opt-in that run proceeds, so the prediction must say so.
+    const install = gatedFixture();
+    advanceUpstream('pusher-cross-enabled');
+
+    const r = runScript(SAFE_UPDATE, ['--dry-run', '--no-backup'],
+      { GBRAIN_DIR: install, GBRAIN_ALLOW_WRITE_THROUGH: '1' });
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(out).toContain('[dry-run]');
+    expect(out).toContain('proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1');
+    expect(out, 'the dry-run predicted a refusal its own real run would not make')
+      .not.toContain('would REFUSE');
+  });
+
+  test('CROSSED: the same holds for an unknown posture', () => {
+    // Same crossing on the other posture family — the arm order is shared, so
+    // a fix that only special-cased `enabled:*` would pass the case above and
+    // fail here.
+    stubGbrainConfig({ engine: 'pglite' });
+    const install = buildSafeUpdateFixture();  // no probe -> unknown:probe-missing
+    writeStub('bun', `echo "bun $*" >> "${stubLog}"\nexec ${process.execPath} "$@"`);
+    writeStub('systemctl', `echo "systemctl $*" >> "${stubLog}"\nexit 0`);
+    advanceUpstream('pusher-cross-unknown');
+
+    const r = runScript(SAFE_UPDATE, ['--dry-run', '--no-backup'],
+      { GBRAIN_DIR: install, GBRAIN_ALLOW_WRITE_THROUGH: '1' });
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(out).toContain('proceeding on GBRAIN_ALLOW_WRITE_THROUGH=1');
+    expect(out).not.toContain('would REFUSE');
+  });
+
+  test('a real run never wears the dry-run prefix', () => {
+    // DRY_RUN is 0/1 and never empty, so a `${DRY_RUN:+…}` prefix would expand
+    // on real runs too. Cheap cell, because that is invisible by inspection.
+    const install = gatedFixture();
+    advanceUpstream('pusher-noprefix');
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install, GBRAIN_ALLOW_WRITE_THROUGH: '1' });
+
+    expect(`${r.stdout}${r.stderr}`).not.toContain('[dry-run]');
+  });
+
+  test('LAGGING MIRROR: custom already on origin/master → the gate stays silent', () => {
+    // The other direction of the wrong proxy. `BEHIND != 0` called this
+    // "lands code" and refused — but the custom branch already contains
+    // origin/master, so the rebase is a no-op on code the box is ALREADY
+    // executing. The question is whether the SERVED ref moves, not the mirror.
+    const install = gatedFixture();
+    advanceUpstream('pusher-lagging');
+    // Rebase swxtch onto the new origin/master by hand, leaving the local
+    // master mirror behind: BEHIND != 0, yet nothing will land.
+    // The fetch is load-bearing — without it `origin/master` is the STALE
+    // remote-tracking ref and the hand-rebase is a no-op onto the old tip,
+    // which leaves swxtch genuinely behind and makes the script's rebase real.
+    execFileSync('git', ['-C', install, 'fetch', '-q', 'origin']);
+    execFileSync('git', ['-C', install, 'checkout', '-q', 'swxtch']);
+    execFileSync('git', ['-C', install, 'rebase', '-q', 'origin/master'], { stdio: 'pipe' });
+    const headBefore = execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(out).not.toContain('refusing to update');
+    expect(execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim())
+      .toBe(headBefore);
+  });
+
+  test('LAGGING MIRROR: and the upgrade block does not arm either', () => {
+    // The same proxy armed the expensive half — bun install, a pg_dump of the
+    // LIVE brain, migrations against it, and a session-dropping restart — for
+    // code the box already runs. No unit here, so the posture gate is out of
+    // scope and cannot mask the result.
+    stubSafeUpdateExternals();  // systemctl exits 1 = no unit
+    const install = buildSafeUpdateFixture();
+    advanceUpstream('pusher-lagging-upgrade');
+    execFileSync('git', ['-C', install, 'fetch', '-q', 'origin']);   // see the note above
+    execFileSync('git', ['-C', install, 'checkout', '-q', 'swxtch']);
+    execFileSync('git', ['-C', install, 'rebase', '-q', 'origin/master'], { stdio: 'pipe' });
+    const headBefore = execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+
+    const r = runScript(SAFE_UPDATE, [], { GBRAIN_DIR: install });
+
+    expect({ status: r.status, stderr: r.stderr }).toEqual(expect.objectContaining({ status: 0 }));
+    expect(execFileSync('git', ['-C', install, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim())
+      .toBe(headBefore);
+    const calls = existsSync(stubLog) ? readFileSync(stubLog, 'utf-8') : '';
+    expect(calls, 'ran bun install for code the box already executes').not.toContain('bun install');
+    expect(calls, 'ran migrations against the live brain for no code change').not.toContain('post-upgrade');
+    expect(calls).not.toContain('systemctl --user restart');
   });
 
   test('an unresolvable posture names a remedy a re-run can actually reach', () => {
