@@ -240,6 +240,37 @@ name — not a trade-off in either direction. Pinned by the two coverage cases
 in `test/chunkers/code-c-cpp.test.ts`; fail-without (gap emission disabled,
 everything else intact): 7 pass / 2 fail.
 
+### CHUNKER_VERSION 6 → 1006 (round-1 cluster 2)
+
+The round-1 branch changed C/C++ chunk shape and symbol metadata while leaving
+`CHUNKER_VERSION` at upstream's 6, which means none of the carry reaches a
+brain that has already synced. Two mechanisms, both keyed on the constant:
+`importCodeFile` folds it into the code page's `content_hash` and returns
+`skipped` on a match, and `performSyncInner` bypasses the git-HEAD
+`up_to_date` short-circuit ONLY when `sources.chunker_version` differs. The
+same forced full walk re-enumerates through `collectSyncableFiles`, which is
+also how the **1a index.md carry** reaches an existing brain — one bump
+delivers two carries.
+
+Correcting the round-1 report: "inert on the live brain" was wrong for the
+fleet path. `~/gbrain` and `~/tools/gbrain` sit on `swxtch` at
+`CHUNKER_VERSION = 4`, so those brains would re-walk anyway; the brains that
+would silently keep stale chunks are any first synced at upstream 6. The bump
+makes the outcome the same either way instead of depending on which it is.
+
+**Numbered from 1000, not 7.** The gate is a string `!==`
+(`commands/sync.ts`), so any distinct value forces the re-walk — but a fork
+`7` would collide with upstream's next `7`, and a brain stamped by the fork
+would then SKIP upstream's own re-chunk when that lands. `1000 + the upstream
+version this fork sits on` keeps every future upstream bump effective.
+
+Pinned by the two numeric assertions in `test/chunker-version-gate.test.ts`
+and by a new case in `test/sync-cost-gate.serial.test.ts`: the R-3 control
+already asserts an unchanged tree at the CURRENT version reports
+`estimateKind: "unchanged"`; the new case changes only the stored version and
+requires `"ceiling"` instead. Fail-without (drift rung neutralised, everything
+else intact): 0 pass / 1 fail.
+
 ### 1e — reduced from four DEF_TYPES entries to two, in a new file
 
 p2 added `'declaration', 'type definition', 'union specifier', 'preproc def'`.

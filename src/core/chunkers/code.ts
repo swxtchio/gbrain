@@ -140,7 +140,25 @@ import G_ZIG from '../../assets/wasm/grammars/tree-sitter-zig.wasm' with { type:
 // top-level defs indexed to ZERO symbols). Chunk boundaries change for every
 // previously-merged file, so the bump forces a re-chunk that recovers the
 // erased symbols.
-export const CHUNKER_VERSION = 6;
+//
+// SWX v1006 (fork): the C/C++ carry changes chunk shape AND symbol metadata —
+// PASSTHROUGH recursion into header guards / extern "C" / namespaces /
+// templates, `type_definition`/`enum_specifier`/`union_specifier`/`preproc_*`
+// as top-level types, the declarator name chain, the C/C++ preserve-all merge
+// arm, and symbol-less gap chunks for file-level prose. `importCodeFile` folds
+// this constant into the code page's `content_hash` and `performSyncInner`
+// bypasses the git-HEAD `up_to_date` short-circuit ONLY on a
+// `sources.chunker_version` mismatch, so without a bump an already-synced
+// brain keeps its old chunks and never receives any of it. The same forced
+// full walk re-enumerates through `collectSyncableFiles`, which is also how
+// the 1a index.md carry reaches an existing brain — one bump, two carries.
+//
+// The fork numbers from 1000, NOT the next upstream integer. The gate compares
+// `storedVersion !== currentVersion` as strings (commands/sync.ts), so any
+// distinct value forces the re-walk — while a fork `7` would collide with
+// upstream's next `7` and a brain stamped by the fork would then SKIP
+// upstream's own re-chunk. 1000 + the upstream version this fork sits on.
+export const CHUNKER_VERSION = 1006;
 
 // Lazy-loaded tree-sitter module (v0.22.x API: Parser is default export)
 let Parser: typeof import('web-tree-sitter') | null = null;

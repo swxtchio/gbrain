@@ -15,7 +15,7 @@ import { describe, test, expect } from 'bun:test';
 import { CHUNKER_VERSION } from '../src/core/chunkers/code.ts';
 
 describe('Layer 12 — CHUNKER_VERSION constant', () => {
-  test('bumped to 6 for the definition-preserving merge guard (#4511)', () => {
+  test('bumped to the fork value 1006 for the C/C++ carry', () => {
     // v3: v0.19.0 Chonkie parity (tokenizer + small-sibling merge).
     // v4: v0.20.0 Cathedral II (qualified names + parent scope + doc_comment
     //     + fence extraction + chunk-grain FTS). Folded into content_hash
@@ -25,14 +25,20 @@ describe('Layer 12 — CHUNKER_VERSION constant', () => {
     // v6: #4511 mergeSmallSiblings stopped erasing symbol_name on short
     //     definitions; the bump re-chunks previously-merged files so the
     //     lost symbols come back.
-    expect(CHUNKER_VERSION).toBe(6);
+    // SWX 1006: the fork's C/C++ carry changes chunk shape and symbol
+    //     metadata, so already-synced brains need the forced full walk.
+    //     Numbered from 1000 on purpose — the gate is a string !==, so any
+    //     distinct value re-walks, while a fork `7` would collide with
+    //     upstream's next 7 and make a fork-stamped brain skip upstream's
+    //     own re-chunk.
+    expect(CHUNKER_VERSION).toBe(1006);
   });
 
   test('is stable across imports (not recomputed at call time)', async () => {
     const a = (await import('../src/core/chunkers/code.ts')).CHUNKER_VERSION;
     const b = (await import('../src/core/chunkers/code.ts')).CHUNKER_VERSION;
     expect(a).toBe(b);
-    expect(a).toBe(6);
+    expect(a).toBe(1006);
   });
 });
 

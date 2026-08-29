@@ -487,6 +487,29 @@ describe('v0.41.31 — sync --all cost gate wiring', () => {
     expect(stdout).toContain('"estimateKind":"unchanged"');
   }, 60_000);
 
+  test('SWX: a source stamped with a STALE chunker_version re-walks despite unchanged HEAD', async () => {
+    // The mechanism the fork's CHUNKER_VERSION bump depends on. The C/C++
+    // carry only reaches an already-synced brain because a stored version
+    // that differs from the current one bypasses the git-HEAD up_to_date
+    // short-circuit (commands/sync.ts) and prices a full re-chunk here
+    // (sync-cost-gate.ts rung 2). Same fixture as the R-3 control above, with
+    // only the stored version changed — so the assertion isolates the gate.
+    await runSources(engine, ['add', 'vault', '--path', repoPath, '--no-federated']);
+    await engine.executeRaw(
+      `UPDATE sources SET last_commit = $1, chunker_version = $2 WHERE id = 'vault'`,
+      [headSha, String(CHUNKER_VERSION - 1)],
+    );
+    await engine.setConfig('sync.cost_gate_min_usd', '0');
+
+    const { exitCode, stdout } = await runSyncCaptured(['--all', '--serial', '--json', '--no-pull']);
+
+    expect(exitCode).not.toBe(2);
+    // R-3's control asserts 'unchanged' on the SAME tree with a current
+    // version — a stale one must price the full re-chunk instead.
+    expect(stdout).not.toContain('"estimateKind":"unchanged"');
+    expect(stdout).toContain('"estimateKind":"ceiling"');
+  }, 60_000);
+
   test('headline regression: HEAD==last_commit + DIRTY untracked file → $0, no gate (the false-fire)', async () => {
     // The exact pre-fix false-fire: a busy brain's working tree is never
     // git-clean, but the commits are caught up. The OLD estimator priced the
