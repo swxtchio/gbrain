@@ -10,8 +10,13 @@ import { describe, test, expect } from 'bun:test';
 import { chunkCodeText, detectCodeLanguage, CHUNKER_VERSION } from '../../src/core/chunkers/code.ts';
 
 describe('CHUNKER_VERSION', () => {
-  test('#4511 definition-preserving merge guard bumped to 6', () => {
-    expect(CHUNKER_VERSION).toBe(6);
+  test('carries the swxtch fork value so existing brains re-chunk', () => {
+    // Upstream's ladder ends at 6 (#4511). The fork numbers from 1000 — the
+    // re-walk gate compares stored vs current as strings, so any distinct
+    // value forces the walk, while a fork `7` would collide with upstream's
+    // next 7 and make a fork-stamped brain skip upstream's own re-chunk.
+    // Ladder + rationale live on the constant in src/core/chunkers/code.ts.
+    expect(CHUNKER_VERSION).toBe(1006);
   });
 });
 

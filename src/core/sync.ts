@@ -332,8 +332,15 @@ function globToRegex(pattern: string): RegExp {
  * in the shared classifier is what makes all three agree by construction, the
  * same way `SYNC_SKIP_FILES` does.
  *
- * `--exclude` / `sync.exclude` cannot express this: `matchesAnyGlob` has no
- * negation operator, so exclusion cannot say deny-all-except.
+ * Exclusion cannot express this: the `sync.exclude` glob list (and the sync
+ * flag that feeds it) runs through `matchesAnyGlob`, which has no negation
+ * operator, so it can never say deny-all-except.
+ *
+ * Deliberately no bare `-`-prefixed flag token in this comment: the
+ * flag-registry generator scans each command's import graph as TEXT, and this
+ * module is imported by nearly every command, so naming one here would make
+ * them all ACCEPT and silently ignore it — the same bleed round-1 review found
+ * on `sync`/`status` from an upstream comment in core/cli-options.ts.
  *
  * Read from the environment on every call rather than cached, so a long-lived
  * process (the HTTP MCP server, the minion supervisor) picks up an operator's

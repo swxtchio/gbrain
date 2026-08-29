@@ -429,8 +429,12 @@ makes the outcome the same either way instead of depending on which it is.
 would then SKIP upstream's own re-chunk when that lands. `1000 + the upstream
 version this fork sits on` keeps every future upstream bump effective.
 
-Pinned by the two numeric assertions in `test/chunker-version-gate.test.ts`
-and by a new case in `test/sync-cost-gate.serial.test.ts`: the R-3 control
+Pinned by **three** numeric assertions — two in
+`test/chunker-version-gate.test.ts` and one in `test/chunkers/code.test.ts`.
+(The round-1 verdict said there were two and that every other reference was
+symbolic; the third turned up in the full-suite run. `test/chunkers/
+code-merge-defs.test.ts` uses `>= 6`, which the fork value satisfies.) Also
+pinned by a new case in `test/sync-cost-gate.serial.test.ts`: the R-3 control
 already asserts an unchanged tree at the CURRENT version reports
 `estimateKind: "unchanged"`; the new case changes only the stored version and
 requires `"ceiling"` instead. Fail-without (drift rung neutralised, everything
