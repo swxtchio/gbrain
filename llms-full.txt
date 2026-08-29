@@ -5778,7 +5778,8 @@ gbrain search "<text from the correction>"
 
 The three swxtch carries that change what gets INDEXED all deliver only after a
 re-walk, so an install can look healthy while none of them has taken effect.
-These four commands are how you tell.
+These four commands are how you tell — check 2 is the one that answers it on
+any brain; 3 and 4 need a symbol or a phrase you already know.
 
 **Say to your agent:** *"check the swxtch fork carries landed"* — your agent
 runs the commands below.
@@ -5789,27 +5790,31 @@ gbrain search 'index' --json | head -20
 #    Expect at least one hit whose slug ends in `/index`. Zero hits on a brain
 #    whose repo has index.md files means the carry is not active.
 
-# 2. C/C++ symbols are findable. Substitute a symbol from your own headers —
-#    a function-like macro and a bare prototype are the interesting cases,
-#    because upstream merges runs of those into anonymous chunks.
+# 2. THE ONE THAT ANSWERS THE QUESTION. `type definition` is a symbol_type
+#    ONLY the carried chunker produces: upstream has no `type_definition` in
+#    any TOP_LEVEL_TYPES set and normalizeSymbolType has no rule for it, so
+#    nothing else in gbrain can put that string in content_chunks.symbol_type.
+#    Any hit means the carried chunker walked this brain. Needs no symbol name
+#    and no version number — it observes the carried behaviour itself.
+gbrain query 'typedef' --lang c --symbol-kind 'type definition' --json
+gbrain query 'typedef' --lang cpp --symbol-kind 'type definition' --json
+#    Expect at least one hit on any brain holding C/C++ headers with typedefs.
+#    (`--symbol-kind` is an exact match on symbol_type — search/cjk-keyword-sql.ts.)
+
+# 3. Named symbols, for a brain you know. Substitute your own: a function-like
+#    macro and a bare prototype are the interesting cases, because upstream
+#    merges runs of those into anonymous chunks.
 gbrain code-def SPP_MAX_PACKET_SIZE
 gbrain code-def spp_encode_packet
-#    Expect a file + line for each. "No definition found" for a symbol you can
-#    grep in the repo means the C/C++ chunker carry has not re-walked yet.
 
-# 3. File-level prose from a C/C++ header is still searchable (licence blocks,
+# 4. File-level prose from a C/C++ header is still searchable (licence blocks,
 #    threading contracts, frame-layout tables live OUTSIDE every semantic node).
 gbrain search 'threading contract' --json | head -20
-
-# 4. The re-walk gate itself. A source whose stored chunker_version differs
-#    from this binary's is NOT counted "unchanged" by doctor's sync_freshness
-#    check — that mismatch is exactly what forces the full walk. No CLI
-#    surface prints the stored version itself, so this is the observable.
-gbrain doctor --json | grep -A3 '"name": "sync_freshness"'
 ```
 
-**If 2 or 3 come back empty**, the source is still stamped with an older
-chunker version and has not re-chunked. Two recovery paths:
+**If 2 comes back empty on a brain that does hold C/C++ typedefs**, the source
+is still stamped with an older chunker version and has not re-chunked. Two
+recovery paths:
 
 ```bash
 gbrain sync --full                       # forces the walk on the next sync
@@ -5821,6 +5826,19 @@ Two notes on that second path: `reindex-code` is its own command (`gbrain
 reindex` requires `--markdown` and refuses anything else), and it re-embeds, so
 it refuses to run non-interactively without `--yes` — take the `--dry-run`
 preview first.
+
+**On the re-walk gate itself:** no CLI surface prints
+`sources.chunker_version`, and the nearest proxy does not discriminate —
+doctor's `sync_freshness` uses the version only to keep a source out of
+`unchanged_count`, after which a stale-stamped source falls into the age
+buckets and reads "synced recently", exactly like a healthy one, a dirty tree,
+or an unavailable clone (`doctor/checks/extraction-sync.ts`). Two earlier
+revisions of this section pointed at that check, once with a `grep -A3` that
+cannot match at all because `doctor --json` emits one minified line. Check 2
+above replaces it: it observes the carried behaviour rather than the stamp that
+should have caused it, which is the question an operator actually has. A
+surface that prints stored-vs-current version is recorded as an unfiled
+follow-up in `PORT-SWXTCH-PLAN.md`.
 
 **If 1 comes back empty** but the repo has `index.md` files, check that this
 binary is the fork build — upstream skips `index.md` (`SYNC_SKIP_FILES` in
@@ -5977,9 +5995,9 @@ gbrain stats | grep -E 'links|timeline'
 # 8. JSONB integrity (v0.12.2 — Postgres only, PGLite always 0)
 gbrain repair-jsonb --dry-run --json
 
-# 9. swxtch carries landed (see 4d). Substitute a symbol from your own
-#    headers — the placeholder below is not a real one.
-gbrain code-def spp_encode_packet
+# 9. swxtch carries landed (see 4d). No substitution needed: only the carried
+#    chunker emits the `type definition` symbol_type.
+gbrain query 'typedef' --lang c --symbol-kind 'type definition' --json
 ```
 
 If all nine return successfully, the installation is healthy. For the full

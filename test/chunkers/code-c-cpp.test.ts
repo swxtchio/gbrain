@@ -234,6 +234,30 @@ describe('swxtch: C header symbol extraction (header guards + extern "C")', () =
     }
   });
 
+  test("'type definition' is emitted, and is a string ONLY this carry can produce", async () => {
+    // docs/GBRAIN_VERIFY.md 4d check 2 is
+    //   gbrain query 'typedef' --lang c --symbol-kind 'type definition'
+    // and its whole claim is that a hit means the carried chunker walked the
+    // brain. `--symbol-kind` is an exact match on content_chunks.symbol_type
+    // (search/cjk-keyword-sql.ts), so the claim rests on two facts, pinned
+    // here so the runbook cannot silently rot:
+    const { typeOf } = await symbolsFor(C_HEADER, 'spp_wire.h');
+
+    // 1. the carry emits exactly that string;
+    expect(typeOf('packet_header_t')).toBe('type definition');
+
+    // 2. and nothing else can. `type_definition` appears in no upstream
+    //    TOP_LEVEL_TYPES set, and normalizeSymbolType has no rule for it, so
+    //    the only route to that symbol_type is the c/cpp entries this carry
+    //    adds. Read from the source rather than asserted from memory.
+    const src = await Bun.file(new URL('../../src/core/chunkers/code.ts', import.meta.url)).text();
+    const topLevel = src.slice(src.indexOf('const TOP_LEVEL_TYPES'), src.indexOf('const PASSTHROUGH_TYPES'));
+    const owners = [...topLevel.matchAll(/^ {2}(\w+): new Set\(\[([\s\S]*?)\]\)/gm)]
+      .filter(([, , body]) => body.includes("'type_definition'"))
+      .map(([, lang]) => lang);
+    expect(owners.sort()).toEqual(['c', 'cpp']);
+  });
+
   test('every emitted C symbol_type is accepted by code-def DEF_TYPES', async () => {
     const { named } = await symbolsFor(C_HEADER, 'spp_wire.h');
     const defTypes = new Set<string>(DEF_TYPES);
