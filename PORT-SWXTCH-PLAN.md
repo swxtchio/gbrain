@@ -631,6 +631,23 @@ logic failure, and the runner's own serial rescue did not recover it.
 `GBRAIN_UNIT_MAX_PARALLEL=1 GBRAIN_SERIAL_POOL=1` is clean (and slower: ~26min
 vs ~10). Same order the p2 phase recorded as in force box-wide.
 
+**Round 7 added a THIRD environmental shape: shard collapse.** With other
+sessions holding the box, the runner's own memory adaptation logged
+`N=2 shards | mem-adapted 4x4→2x4 (avail=18519MB, 1536MB/file)` — four shards
+folded into two, which changes the file grouping. In that denser shard a single
+file (`test/extract-conversation-facts.test.ts`) failed all 20 of its cases in
+30-56ms each on a PGLite `code: "22000"` from `@electric-sql/pglite`, the
+shared-in-process-engine class. The same file passes 74/0 in isolation on this
+branch, and passed inside the 3- and 4-shard splits of every earlier round.
+Not a timeout, not port-caused, and not fixable from the branch: the shard
+count is chosen by the runner from available memory.
+
+So the box produces three distinct false signals, each with its own tell:
+wall-clock kills (exit 124 / multi-second elapsed), PGLite WASM OOM at
+`connect`, and now shard collapse (check the `mem-adapted` line at the top of
+the run). Before believing any suite failure on this machine, check `uptime`
+and that line.
+
 **Round-4 ran on a saturated box, and that produced timeouts — not signals.**
 This round's runs happened at load average 10-57 (nine users; other sessions),
 and every extra failure it produced was a wall-clock kill of a subprocess- or
