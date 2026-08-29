@@ -141,10 +141,16 @@ and MCP callers all honor it):
 ```bash
 set -a; . ~/.gbrain/http.env; set +a   # session-pooler URL for CLI use
 gbrain config set sync.write_through false
-gbrain config get sync.write_through    # verify: false
+bun deploy/local-http/write-through-probe.ts   # verify: prints `disabled`
 ```
 
-Verify after deploy: `gbrain config get sync.write_through` prints `false`.
+Verify with the probe, NOT with `gbrain config get sync.write_through`: `config
+get` resolves the file plane above the DB plane, so a stale value in
+`~/.gbrain/config.json` makes it print an off value while the brain still
+mirrors. The probe calls `isWriteThroughDisabled`, the predicate every runtime
+disk sink asks, and exits 0/1/2 for disabled/enabled/unknown. (The `config set`
+above writes the DB plane, which is the right one — `sync.write_through` is not
+a file-plane key.)
 
 ## Upgrade gotcha: forward-reference bootstrap gap (long-lived brains)
 
