@@ -574,10 +574,17 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 1: 22540 pass / 1 fail / 10 skip**
-(`bun run test`, 630s, 4 shards + the serial pass; all four shards clean). The
+**Final gate run after review round 2: 22545 pass / 1 fail / 10 skip**
+(`bun run test`, 1398s, 4 shards + the serial pass; all four shards clean). The
 single failure is pre-existing — see below. `bun run verify` 55/55 green;
 `shellcheck` clean on both fork shell scripts.
+
+**Run it serially on this box.** An earlier round-2 attempt at
+`GBRAIN_UNIT_MAX_PARALLEL=2` produced 117 failures in one shard, every one a
+PGLite `Out of memory` at `connect` — the box's known WASM-OOM class, not a
+logic failure, and the runner's own serial rescue did not recover it.
+`GBRAIN_UNIT_MAX_PARALLEL=1 GBRAIN_SERIAL_POOL=1` is clean (and slower: ~23min
+vs ~10). Same order the p2 phase recorded as in force box-wide.
 
 Two failures the round-1 fix work introduced were caught by running the WHOLE
 suite rather than the touched files, and are fixed: a third numeric
