@@ -601,10 +601,25 @@ An earlier run of the same suite, before the fixes below, reported 22526 pass
   gate is "no new failures versus master", with the pristine-master proof
   recorded here and the cell named as an unfiled upstream follow-up. The brief
   scaffold's absolute green-gate lacking that carve-out is a brief defect owned
-  by firstmate and tracked elsewhere. Claude's round-1 isolation experiment
-  narrowed it further: reverting ONLY this branch's two sync files to
-  `origin/master` and re-running still gives 57 pass / 1 fail, and the test
-  references none of the fork's surfaces — so no branch change is available.
+  by firstmate and tracked elsewhere.
+
+  **Reproduction recipe (replaced in round 2 — the round-1 one no longer
+  works).** Round 1 said "revert only this branch's two sync files to
+  `origin/master` and re-run". That stopped isolating anything: round 2 moved
+  `topDirsAllowlist`/`isAllowedTopDir` into `src/core/sync.ts`, which
+  `src/commands/import.ts` imports, so the revert breaks the module graph and
+  produces a mass failure instead of a comparison. Use a whole pristine tree:
+
+  ```bash
+  mkdir /tmp/pristine && git archive origin/master | tar -x -C /tmp/pristine
+  ln -s "$PWD/node_modules" /tmp/pristine/node_modules   # or bun install there
+  cd /tmp/pristine && bun test test/sync-rename-reconcile.serial.test.ts
+  ```
+
+  Run at this pin: **57 pass / 1 fail on pristine `origin/master`, 57 pass /
+  1 fail on the branch — the identical cell.** So no branch change is
+  available; the fix lives in an upstream file unrelated to all 7
+  customizations.
 - **2 were this branch's own tests asserting something false.** p2's
   `sync/status/maintain --check` rejection trio. On this base `--check` IS in
   the generated registry for `sync` and `status` — and on pristine master too:
@@ -668,6 +683,24 @@ next porter does not redo the check.
 
 ## Follow-ups deliberately NOT filed
 
+`swxtchio/gbrain` is public, has issues disabled, and is absent from
+`config/gh-repo-allowlist`, so the repository-artifact contract forbids opening
+an issue and the task objective forbids GitHub artifacts outright. This section
+is therefore the only permitted home for deferred work — and, unlike a PR body
+or a review record, it is committed to the branch and survives the merge.
+Round-2 review made that explicit: naming a finding in a verdict is not filing
+it. Everything below was either raised in review and adjudicated non-blocking,
+or found while doing the work and judged out of scope.
+
+**Round-2 non-blocking findings, resolved rather than deferred** (recorded here
+so the trail is complete, not because they are outstanding): the
+`import.ts` false-invariant comment and its copy in this plan were CORRECTED in
+place, not appended to; the `config get` plane mismatch became the
+`write-through-probe.ts` fix; the `checks.ts` indentation was fixed in passing;
+the three fixture overstatements were rewritten to prove their names; and the
+isolation recipe above was replaced. The genuinely deferred items follow.
+
+
 `swxtchio/gbrain` is public, has issues disabled, and is not in
 `config/gh-repo-allowlist`, so no issue is opened for these. They are recorded
 here instead:
@@ -691,6 +724,26 @@ here instead:
   on a pristine `origin/master` worktree. Belongs in a PR to
   `garrytan/gbrain`, not in this fork port — the fix is either rewording the
   comment or teaching the generator to ignore tokens inside comments.
+- **Gap emission has no minimum size**, so every inter-node region becomes its
+  own symbol-less chunk however small, and the fork's `preserveAllSymbols` arm
+  means a gap chunk can never merge forward into a symbol-bearing neighbour.
+  Measured with this branch's chunker on real corpus (reproduced independently
+  of the reviewer who raised it, same numbers):
+  `dpdk-wrapper/dependencies/libpcap/ieee80211.h` — 147 lines → 71 chunks, 7
+  symbol-less, **6 under 40 bytes** (`/* for TYPE_MGT */`, `/* for TYPE_CTL */`);
+  `pflog.h` — 158 lines → 46 chunks, 10 symbol-less, **7 tiny**
+  (`#if defined(__OpenBSD__)`, `#endif`). Byte coverage stays complete (5355
+  indexed of 5439 source bytes on ieee80211.h), so this is embedding and
+  retrieval NOISE, not loss — and it is the direct price of the coverage fix.
+  A minimum-size threshold (fold a sub-N-byte gap into the next one, or drop
+  comment-only fragments) is the obvious follow-up; not taken here because
+  choosing N is a retrieval-quality question that wants an eval, not a guess.
+- **No test anywhere observes PG cancellation actually landing** — postgres.js
+  `.cancel()` reaching a live server, or the pool slot returning. The fork
+  proves the signal arrives at `engine.executeRaw`; upstream pins its own
+  `runUnsafe` cancellation by source-text guard only
+  (`test/connection-resilience.test.ts`). A live-Postgres e2e with a
+  long-running statement would close it, in upstream's lane.
 - **`extractSymbolName`'s declarator arm drops the outermost namespace** on an
   out-of-line C++ definition: `int swx::pipeline::Engine::run(int)` is named
   `pipeline::Engine::run`, because the `qualified_identifier` `name`-field dive

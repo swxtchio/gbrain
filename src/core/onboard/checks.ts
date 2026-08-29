@@ -399,10 +399,9 @@ export async function checkTimelineCoverage(
       engine,
       `SELECT COUNT(*) AS count FROM pages
          WHERE type = 'meeting' AND effective_date IS NOT NULL AND deleted_at IS NULL`,
-    
-    undefined,
-    opts,
-  );
+      undefined,
+      opts,
+    );
     if (datableMeetings > 0) {
       remediations.push(makeRemediationStep({
         id: 'onboard.extract_timeline_from_meetings',
