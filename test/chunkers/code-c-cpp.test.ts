@@ -138,9 +138,16 @@ typedef struct {
   uint8_t flags;
 } packet_header_t;
 
+/*
+ * Retry policy (INTER-NODE prose): callers must not retry spp_encode_packet
+ * on SPP_EAGAIN more than three times; the sequence window is advisory.
+ */
+
 int spp_encode_packet(const uint8_t *src, int len, uint8_t *dst);
 
 #endif /* SPP_WIRE_H */
+
+/* Deprecated (TRAILING prose): spp_encode_v1 was removed in wire format 3. */
 `;
 
 const CPP_SOURCE = `
@@ -277,12 +284,17 @@ describe('swxtch: C/C++ file-level prose stays indexed', () => {
     const { chunks, names } = await symbolsFor(C_PROSE_HEADER, 'spp_wire.h');
     const indexed = chunks.map((c) => c.text.replace(CHUNK_HEADER, '')).join('\n');
 
-    // The three prose regions master reached via the whole-file fallback.
-    // Without gap emission all three vanish: they sit outside every semantic
-    // node, and the semantic path emits only node ranges.
+    // All THREE gap positions, not just the preamble — round-2 review found
+    // the earlier fixture asserted only strings from the leading comment
+    // block, so the inter-node and trailing arms were unexercised.
+    // Preamble (before the first semantic node):
     expect(indexed).toContain('Copyright (c) 2026 swxtch.io');
     expect(indexed).toContain('Threading: spp_encode_packet is re-entrant');
     expect(indexed).toContain('payload(0..N)');
+    // Inter-node (between the typedef and the prototype):
+    expect(indexed).toContain('Retry policy (INTER-NODE prose)');
+    // Trailing (after the last semantic node):
+    expect(indexed).toContain('Deprecated (TRAILING prose)');
 
     // And the symbols the carry exists for are still there — the point is
     // that the two are not a trade-off.

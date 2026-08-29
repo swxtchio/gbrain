@@ -14,6 +14,14 @@
  * postgres.js `.cancel()` plus an already-aborted short-circuit — the signal
  * just never reached it.
  *
+ * SCOPE of this file, stated so its name is not read as more: it proves the
+ * signal ARRIVES at `engine.executeRaw`, which is the seam the fork's change
+ * owns. It does not observe `.cancel()` landing on a live server or a pool
+ * slot being released — that is upstream's code, needs a live Postgres and a
+ * long-running statement, and upstream itself pins it only by source-text
+ * guard (test/connection-resilience.test.ts). PG protocol cancellation is
+ * best-effort in any case.
+ *
  * MUST stay a plain (non-`.serial`) test file with no `mock.module` of its
  * own, and MUST NOT be merged into `doctor-onboard-timeout.serial.test.ts`.
  * That sibling mocks this exact module path to simulate the hang, and
@@ -65,11 +73,22 @@ describe('SWX: onboard checks thread cancellation to the engine', () => {
     expect(seen.every((sig) => sig === undefined)).toBe(true);
   });
 
-  test('an already-aborted signal still returns a full result set', async () => {
-    // safeCount catches everything, including AbortError, and reads as 0 — so
-    // a bounded caller gets checks back rather than an exception, which is
-    // what lets the doctor WARN path render.
-    const { engine } = recordingEngine();
+  test('an engine that REJECTS on an aborted signal still yields a full result set', async () => {
+    // Round-2 review: the earlier version of this case used an engine that
+    // resolved unconditionally and never looked at the signal, so it passed
+    // verbatim with safeCount's catch deleted — it proved nothing. This engine
+    // behaves the way a real one does under cancellation: PostgresEngine's
+    // runUnsafe throws DOMException('aborted','AbortError') when the signal is
+    // already aborted, before any round-trip. What is asserted is that the
+    // bounded caller still gets a renderable check list rather than an
+    // exception, which is what lets doctor's WARN path exist at all.
+    const engine = {
+      executeRaw: async (_sql: string, _params?: unknown[], opts?: { signal?: AbortSignal }) => {
+        if (opts?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+        return { rows: [{ count: 0, sample_size: 0, matched: 0 }] };
+      },
+      getConfig: async () => null,
+    };
     const controller = new AbortController();
     controller.abort();
 

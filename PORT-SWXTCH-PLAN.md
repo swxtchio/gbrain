@@ -334,6 +334,17 @@ Fail-without: dropping the forwarding in `safeCount` reddens the engine test
 (2 pass / 1 fail); removing the `controller.abort()` calls reddens the bound
 test (0 pass / 1 fail).
 
+**What those tests do NOT prove** (round-2 review, fixture honesty): they cover
+the wrapper handing down a signal and firing it, and the signal arriving at
+`engine.executeRaw`. Nothing here observes postgres.js `.cancel()` landing on a
+live server or the pool slot coming back — that needs a live Postgres and a
+long-running statement, and upstream pins its own `runUnsafe` cancellation only
+by source-text guard (`test/connection-resilience.test.ts`), so there is no
+such observation anywhere in the repo to match. PG-protocol cancellation is
+best-effort regardless, which is why the WARN says "did not complete" rather
+than "was cancelled". The claim in the code comment and the test header is
+narrowed to match.
+
 **Why two files.** `mock.module` leaks for the life of the process and
 `mock.restore()` does not undo it (verified on bun 1.3.11 in both file orders,
 with both a static binding and a re-`import()`), so a test of the REAL

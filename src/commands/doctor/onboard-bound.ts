@@ -35,10 +35,20 @@ export async function runOnboardChecksBounded(engine: BrainEngine): Promise<Chec
   // a slow leak. The abandoned query keeps its pooler slot, and the whole
   // deploy/local-http design exists because the session pooler caps at 15
   // clients — so a doctor run that "completes" by walking away from its own
-  // queries eats the exact resource being rationed. The controller aborts the
-  // in-flight statements when the timer wins; `runAllOnboardChecks` forwards
-  // it to every counting query (see its doc comment for the two steps that
-  // take no signal).
+  // queries eats the exact resource being rationed. The controller aborts when
+  // the timer wins and `runAllOnboardChecks` forwards the signal to every
+  // counting query (see its doc comment for the two steps that take no signal).
+  //
+  // What is proven by tests, and what is not: the fork's tests cover this
+  // wrapper handing down a signal and firing it, and the signal arriving at
+  // `engine.executeRaw`. What happens THEN is upstream's
+  // `PostgresEngine#runUnsafe` — an already-aborted short-circuit plus
+  // postgres.js `.cancel()` on the pending query — and no test in this repo,
+  // upstream's included, observes that cancel landing on a live server or the
+  // pool slot coming back; upstream pins it by source-text guard
+  // (test/connection-resilience.test.ts). Cancellation is best-effort by the
+  // PG protocol regardless, which is why the WARN is worded as "did not
+  // complete", not "was cancelled".
   const controller = new AbortController();
   const onboardPromise = runAllOnboardChecks(engine, { signal: controller.signal });
   onboardPromise.catch(() => {}); // swallow a late rejection if the timeout already won the race
