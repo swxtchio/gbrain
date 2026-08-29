@@ -285,6 +285,48 @@ box). `afterEach` now reaps the banked pid first; verified against a
 deliberately-failing case.
 
 
+## Fail-without proofs for every CARRIED behaviour
+
+The B1 section above covers the three shell guards. The remaining carried
+items were proved the same way on this base — revert only that item's source
+change, keep its test, run it:
+
+| Carried item | Reverted | Result |
+|---|---|---|
+| 1a index.md syncable | `index.md` put back in `SYNC_SKIP_FILES` | 111 pass / **7 fail** across the four index.md suites (isSyncable shape ×3, metafile-skip ×2, git-fast-path ×1, sync ×1) |
+| 1b GBRAIN_TOP_DIRS | the parse block + both route filters | 1 pass / **3 fail**. The 1 pass is the "unset env collects everything" case, which is upstream's default and correctly passes either way. |
+| 1d+1e C/C++ chunker + DEF_TYPES | `src/core/chunkers/{code,def-types}.ts` checked out from `origin/master` | 0 pass / **5 fail** |
+| 5 bounded onboard phase | the bare `await runAllOnboardChecks(engine)` restored | 1 pass / **1 fail** (the hang case times out). The 1 pass is the happy-path case, which guards the wrapper against emitting a spurious warn or dropping results — a real risk in the ADDED code, not a vacuous assertion. |
+
+Every one green again after restore.
+
+Item 2's retirement needs no new test: upstream's own `disabled_by_config`
+cases in `test/write-through.test.ts` pin the replacement behaviour, and the
+ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
+
+## Full-suite result and the two failures it exposed
+
+`bun run test` on this branch: **22526 pass / 3 fail / 10 skip** (722s, 4
+shards + the serial pass).
+
+- **1 pre-existing.** `test/sync-rename-reconcile.serial.test.ts` — "a
+  frontmatter slug-authority rejection at the destination is retried, never
+  falsely checkpointed". Fails identically on a pristine `origin/master`
+  worktree at `7b7921d8` (57 pass / 1 fail there), so it is not port-caused.
+- **2 were this branch's own tests asserting something false.** p2's
+  `sync/status/maintain --check` rejection trio. On this base `--check` IS in
+  the generated registry for `sync` and `status` — and on pristine master too:
+  `bun src/cli.ts sync --check` runs a real sync there. The source is an
+  upstream comment in `src/core/cli-options.ts` (`onboard --check --explain`),
+  which nearly every command imports, so the generator's text scan bleeds the
+  token. That is upstream's defect, not the fork's, and this branch ships the
+  generated registry byte-identical to master on purpose. Only the `maintain`
+  case is kept — verified live as a real guard for the fork's OWN regression:
+  putting `--check` back into the onboard-timeout message and regenerating puts
+  the token into maintain's entry and reddens the test (0 pass / 1 fail),
+  restored green after.
+
+
 ## Follow-ups deliberately NOT filed
 
 `swxtchio/gbrain` is public, has issues disabled, and is not in
@@ -307,6 +349,14 @@ here instead:
   This is an accepted upstream design decision, recorded here so a future
   operator who finds `gbrain code-def SOME_MACRO` empty on a macro block knows
   it is known, not a port regression.
+- **Upstream accepts `gbrain sync --check` and `gbrain status --check`** and
+  silently ignores them, so a user typing `sync --check` expecting a dry
+  inspection runs a real sync. Cause: the bare `--check` token in the
+  `src/core/cli-options.ts` comment at the `onboard --check --explain` example,
+  reached by the flag-registry generator's import-graph text scan. Reproduced
+  on a pristine `origin/master` worktree. Belongs in a PR to
+  `garrytan/gbrain`, not in this fork port — the fix is either rewording the
+  comment or teaching the generator to ignore tokens inside comments.
 - **R8 (the argv `run()` refactor in `scripts/gbrain-safe-update`) has no
   reachable failure** on the non-dry-run path — see the B1 section. It is kept
   as hardening. If it is ever revisited, the honest framing is "class-level
