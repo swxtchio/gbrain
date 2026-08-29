@@ -196,7 +196,8 @@ derived from `DEF_TYPES`.
 
 p2 added `'declaration', 'type definition', 'union specifier', 'preproc def'`.
 Two of those were **already upstream** and shipped as literal duplicates in the
-p2 tree: old master's `#3789` residual-audit block already carried
+p2 tree: upstream `67e7e8a9` (v0.46.28.0, 2026-08-21 — post-dates the
+2026-06-09 fork patch ✓) added the `#3789` residual-audit block carrying
 `'namespace definition', 'template declaration', 'declaration', 'preproc def'
 // C/C++`. (Proof: stripping comments from the p2 tree's `DEF_TYPES` and
 `uniq -d` reports exactly `'declaration'` and `'preproc def'`; the same check
@@ -232,7 +233,59 @@ Adopt p2's suites, re-pointed at the new base, plus one change:
    `deploy/local-http/setup.sh` and `scripts/gbrain-safe-update` (3/1f/4). p2
    left the fail-without proofs unrun; p3 runs them and reports the result.
 
-### Follow-ups deliberately NOT filed
+### Ordering receipts
+
+A retire is only honest if the upstream change POST-DATES the fork patch it
+supersedes, and is actually in this branch's history. Both checked for every
+retire verdict on this base:
+
+| Retired item | Fork patch (date) | Retiring upstream commit (date) | Ancestor of this branch |
+|---|---|---|---|
+| 1c N-segment slug resolver | `88a02775` 2026-06-09 | `5e8816e7` 2026-07-23 | yes |
+| 1d merge guard | `88a02775` 2026-06-09 | `c860a411` 2026-08-28 (#4511) | yes |
+| 1e `declaration` + `preproc def` | `88a02775` 2026-06-09 | `67e7e8a9` 2026-08-21 (#3789 audit) | yes |
+| 2 write-through engine gate | `425a06fb` 2026-06-10 | `07f5d28d` 2026-08-19 + `055ac6c7` 2026-08-21 | yes |
+| 6 bootstrap v121/v122 | `d74d45be` 2026-07-12 | `2fca1244` 2026-07-13, extended by `d9909cdd` 2026-08-28 | yes |
+| 7 CLAUDE.md MUST-DO prose | `63c50bb2` 2026-07-12 | same as 6 (the invariant is documented + gated upstream) | yes |
+
+## The B1 fail-without proofs (p2 wrote the tests, never ran the proofs)
+
+Run on this base, each with ONLY the fix under test reverted. **Two held; one
+did not, and the test it belonged to was rewritten rather than kept.**
+
+| Guard | Fix reverted | Result |
+|---|---|---|
+| argv `run()` | the `%q` runner → `eval "$@"` / `"$*"` | **PROOF FAILED** — the test passed against the unfixed script. See below. |
+| no-op-rebase gate | the `PRE_REBASE_HEAD` comparison | held: 0 pass / 1 fail. Output shows the run reaching "Rebase clean" and the stub log recording `bun install` + `gbrain post-upgrade` — the migrations-against-the-live-brain the gate prevents. |
+| setup.sh port re-run (B2) | `enable`+`restart` → `enable --now` | held: 0 pass / 1 fail. The re-run's probe loops 30s and exits 1 with the old process still on the old port. |
+| setup.sh port templating (R9) | the `sed -i --port` block | held: 0 pass / 1 fail, same shape on the first install. |
+
+All three green again after restore.
+
+**Why the argv proof failed.** p2's claim was that the pre-fix
+`run "git stash push -u -m 'gbrain-safe-update auto-stash'"` re-parses under
+`eval` into pathspecs and exits non-zero. It does not — the single quotes
+survive eval's re-parse, which was reproduced standalone in a scratch repo.
+Every other call site the R8 refactor touched was checked too: git refnames
+cannot contain spaces and the remaining interpolations are already
+single-quoted, so **R8 has no reachable failure on the non-dry-run path**. It
+stands as a class-level hardening, not a bug fix.
+
+R8 does have one reachable behavioural difference, and the test now asserts
+that instead: `--dry-run` rendering. `echo "  [dry-run] $*"` flattens argv into
+a space-joined string, so the printed command does not re-parse into what would
+actually run; `printf ' %q'` does. The test extracts the rendered stash line,
+re-parses it the way a shell would, and requires the original argv back. Red
+against the pre-fix runner, green against the fix.
+
+The proofs also exposed a leak: the systemctl stub launches a real loopback
+listener that only its own next `restart` reaps, so a run ending early left the
+process listening after the sandbox was deleted (one was found alive on the
+box). `afterEach` now reaps the banked pid first; verified against a
+deliberately-failing case.
+
+
+## Follow-ups deliberately NOT filed
 
 `swxtchio/gbrain` is public, has issues disabled, and is not in
 `config/gh-repo-allowlist`, so no issue is opened for these. They are recorded
@@ -245,4 +298,16 @@ here instead:
 - **`type definition` / `union specifier` belong upstream.** They are a
   general C/C++ gap in `def-types.ts`, not a swxtch preference. Worth
   contributing to `garrytan/gbrain` so the fork can retire 1e entirely on a
-  later port.
+  later port. The same is true of the whole 1d chunker reach — upstream's own
+  `cpp` set indexes `namespace_definition` and `template_declaration` as
+  opaque top-level chunks, which is a bug by upstream's own standard (a
+  namespace indexes only its name).
+- **C `#define` / prototype RUNS lose their symbol names** under upstream's
+  `MERGEABLE_RUN_TYPES` (see the 1d section). Isolated ones are unaffected.
+  This is an accepted upstream design decision, recorded here so a future
+  operator who finds `gbrain code-def SOME_MACRO` empty on a macro block knows
+  it is known, not a port regression.
+- **R8 (the argv `run()` refactor in `scripts/gbrain-safe-update`) has no
+  reachable failure** on the non-dry-run path — see the B1 section. It is kept
+  as hardening. If it is ever revisited, the honest framing is "class-level
+  hardening + dry-run output fidelity", not "fixes a stash bug".
