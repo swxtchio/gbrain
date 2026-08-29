@@ -189,6 +189,67 @@ if [ "$CHECK_ONLY" = 1 ]; then
   exit 0
 fi
 
+# ---- does this run land code? ONE answer, computed once ---------------------
+#
+# CONTRACT
+#   Question:   will this invocation change the code the box executes?
+#   Inputs:     the branch topology as it stands BEFORE anything mutates —
+#               the served ref (HEAD at launch), the ref the run will end on,
+#               and the fetched $UPSTREAM. Nothing else; in particular NOT the
+#               invocation's mode flags, because the answer is a property of
+#               the plan, not of whether we carry it out.
+#   Output:     RUN_LANDS_CODE=1 (lands) or 0 (does not).
+#   Evaluated:  exactly once, here, before the first mutation.
+#   Invariant:  every site reads this one value, so a --dry-run prediction and
+#               the real run it predicts CANNOT disagree — they are the same
+#               number. That is the whole point: four rounds of defects came
+#               from four non-equivalent answers to this one question (an
+#               ancestry test, a post-hoc HEAD comparison, REBASED, and the
+#               version diff), each correct for some inputs and wrong for
+#               others.
+#
+# WHY PLANNED STATE, NOT POST-HOC. The obvious confirmation — did HEAD actually
+# move — is unsatisfiable under --dry-run, because `run()` prints mutations
+# instead of performing them, so HEAD never moves and the destructive half of
+# the script vanishes from the operator's only pre-flight. The plan is knowable
+# up front, so the prediction is the honest basis for BOTH paths.
+#
+# WHY IT IS EXACT rather than a heuristic, given this script's own control flow:
+#   * the run ends on $CUSTOM_BRANCH when it exists, else the mirror, and it
+#     checks that ref out — so serving a DIFFERENT ref at launch means the
+#     served code changes, whatever git does afterwards;
+#   * that target ref moves iff $UPSTREAM is not already an ancestor of it
+#     (the mirror fast-forwards to $UPSTREAM, then the custom branch rebases
+#     onto it — a replay onto a new parent always yields new commits);
+#   * a rebase that conflicts `die`s before any consumer reads this.
+# So no input makes the prediction disagree with what a real run does.
+# The ref the run ENDS on. Mirrors the tail's own choice exactly (search
+# TARGET_BRANCH below): the custom branch when it exists, otherwise back to the
+# branch we launched from — NOT the mirror, which the run only passes through.
+TARGET_REF="$CUSTOM_BRANCH"
+git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" || TARGET_REF="$ORIG_BRANCH"
+
+run_lands_code() {
+  # A detached HEAD has no branch to compare or advance; the run returns to the
+  # same commit, so nothing lands.
+  [ "$TARGET_REF" = "HEAD" ] && return 1
+  local target_tip
+  target_tip="$(git rev-parse --verify --quiet "$TARGET_REF" || true)"
+  [ -n "$target_tip" ] || return 1
+  # (a) the run will serve a DIFFERENT ref than the one it launched on.
+  #     Missing this term let a run launched on the mirror, with the custom
+  #     branch already on upstream, check out the custom branch and arm the
+  #     whole upgrade block with the gate silent.
+  [ "$SERVED_HEAD_BEFORE" = "$target_tip" ] || return 0
+  # (b) that ref will itself move — it is not already on the fetched upstream.
+  #     Only reachable when the target IS the served ref, so this is exactly
+  #     "will the code under my feet be replayed".
+  git merge-base --is-ancestor "$UPSTREAM" "$TARGET_REF" || return 0
+  return 1
+}
+
+if run_lands_code; then RUN_LANDS_CODE=1; else RUN_LANDS_CODE=0; fi
+
 # ---- write-through posture gate --------------------------------------------
 #
 # Placed here: AFTER the read-only exits, BEFORE the stash and the rebase.
@@ -200,16 +261,8 @@ fi
 # restart established nothing: the unit is enabled with `Restart=on-failure`
 # and `WantedBy=default.target`, so systemd re-activates it regardless.
 #
-# But only for invocations that will actually mutate. An earlier revision put
-# this above the `--check` exit, which charged a recorded posture decision as
-# the price of a READ: `--check`, `--dry-run`, and an already-current run all
-# died, and the message ("Rebasing would put the new code…") was counterfactual
-# in all three. `--check` exits above; `--dry-run` reports instead of dying;
-# and `gate_lands_code` answers whether anything would land at all.
-#
-# That predicate is not about the mirror at all — see `gate_lands_code` below.
-# It asks whether the SERVED ref will move, because that is what puts new code
-# in front of every gbrain process on the box.
+# But only for invocations that will actually mutate — `--check` exits above,
+# and RUN_LANDS_CODE says whether anything would land at all.
 #
 # SCOPED to the deployment it was written for. `gbrain-http.service` being
 # installed is what makes "shared, DB-authoritative brain" true. On a box with
@@ -222,33 +275,8 @@ fi
 # moment the DB-plane posture is decided, and refuses to put new code on the
 # box while it is not. It cannot establish that the posture stays decided —
 # the flag is DB-backed and any client can change it later.
-# PREDICTION half of that one fact, for the pre-mutation gate.
-#
-# The question is whether the SERVED ref will move, not whether the mirror
-# will. Those come apart in both directions, and each direction was a defect:
-#
-#   * mirror behind, custom already rebased onto $UPSTREAM — `BEHIND != 0` said
-#     "lands code" and the gate refused a run whose rebase is a no-op on code
-#     the box is ALREADY executing;
-#   * mirror current, custom not yet on it — `BEHIND = 0` said "lands nothing"
-#     while the rebase below replays the custom branch and moves HEAD.
-#
-# So ask the ancestry question against $UPSTREAM, which is the ref the rebase
-# actually lands on (the mirror is fast-forwarded to it first). $TRACK_BRANCH
-# is the PRE-fast-forward local mirror and is the wrong ref to ask about.
-#
-# No custom branch: the checkout follows the mirror, so the mirror question is
-# the served question.
-gate_lands_code() {
-  if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
-    git merge-base --is-ancestor "$UPSTREAM" "$CUSTOM_BRANCH" && return 1
-    return 0
-  fi
-  [ "$BEHIND" != 0 ]
-}
-
 HTTP_SERVICE="${GBRAIN_HTTP_SERVICE:-gbrain-http.service}"
-if gate_lands_code \
+if [ "$RUN_LANDS_CODE" = 1 ] \
    && command -v systemctl >/dev/null 2>&1 \
    && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
   # Read through write-through-probe.ts, not `gbrain config get`: `config get`
@@ -375,15 +403,14 @@ fi
 # (bun install only touches gitignored node_modules; gbrain post-upgrade runs DB
 #  migrations against the brain in $BRAIN_DIR. Both run here so they match the
 #  rebased source — and so the mirror branch is never left dirty.)
-# CONFIRMATION half. `BEHIND != 0 || REBASED = 1` was the same wrong proxy as
-# the gate's, and it armed the expensive, destructive half of this script: a
-# mirror that moved while the served ref did not still ran `bun install`, a
-# pg_dump of the LIVE brain, migrations against it, and a service restart that
-# drops every connected session — for code the box was already executing. It
-# also MISSED the fast-forward branch above, which moves HEAD without setting
-# REBASED. Compare the served ref to what it was before anything mutated: that
-# is the property, directly observed rather than inferred.
-if [ "$(git rev-parse HEAD)" != "$SERVED_HEAD_BEFORE" ]; then
+# Same one answer. This used to be its own predicate — first `BEHIND != 0 ||
+# REBASED = 1`, then a post-hoc HEAD comparison — and each was wrong in its own
+# direction: the first armed `bun install`, a pg_dump of the LIVE brain,
+# migrations and a session-dropping restart for code already in service, and
+# missed the fast-forward branch that moves HEAD without setting REBASED; the
+# second went silent under --dry-run, hiding exactly that destructive half from
+# the operator's pre-flight.
+if [ "$RUN_LANDS_CODE" = 1 ]; then
   if command -v bun >/dev/null 2>&1; then
     say "Installing dependencies (bun install)…"
     run bun install
@@ -556,8 +583,16 @@ restore_stash
 
 NEW_VERSION="$(read_version)"
 echo
-if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
-  ok "Done — still on v$NEW_VERSION (no upstream change). Now on '$(git rev-parse --abbrev-ref HEAD)'."
+# The summary keys off the same one answer, not off the version diff. A rebase
+# onto an upstream commit that does not touch package.json lands code while
+# leaving the version alone, and the version-only wording printed "no upstream
+# change" directly above the warning that the branch had been rebased — two
+# adjacent contradicting lines, at the moment the operator decides whether to
+# force-push a rebased fork branch.
+if [ "$RUN_LANDS_CODE" != 1 ]; then
+  ok "Done — nothing landed; still on v$NEW_VERSION. Now on '$(git rev-parse --abbrev-ref HEAD)'."
+elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+  ok "Done — new code landed, version unchanged at v$NEW_VERSION. Now on '$(git rev-parse --abbrev-ref HEAD)'."
 else
   ok "Done — upgraded v$OLD_VERSION → v$NEW_VERSION. Now on '$(git rev-parse --abbrev-ref HEAD)'."
 fi
