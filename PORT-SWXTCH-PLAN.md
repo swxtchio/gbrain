@@ -205,6 +205,41 @@ no anonymous merged chunk exists. Fail-without: with only the fork arm removed
 from `isProtectedChunk` and upstream's `isDefChunk` left in place, 5 pass /
 2 fail; restored, 7 pass.
 
+### 1d — file-level prose reach (round-1 cluster 7)
+
+Restoring the PASSTHROUGH recursion had a cost the round-1 branch neither
+recorded nor pinned, and two seats measured it independently: a C/C++ header
+whose prose (licence, threading contract, wire-frame table) lives OUTSIDE
+every semantic node used to be indexed in full, because zero semantic nodes
+meant the whole file fell to `fallbackChunks`. The recursion finds nodes in
+those headers, which moves them onto the semantic path — where upstream emits
+nothing between nodes. The carry was trading the file's prose for its symbols.
+
+`chunkParsedLanguage` now emits the preamble, inter-node and trailing text as
+symbol-less chunks, scoped to `c`/`cpp` (every other language reaches that
+path exactly as before). Gap chunks carry `symbolName: null` and
+`symbolType: 'module'` — the label `fallbackChunks` already uses for
+symbol-less code text — so `findCodeDef`, which resolves on `symbol_name`,
+can never return one. They flow through `mergeSmallSiblings` and
+`capOversizedChunks` with everything else.
+
+**A/B, measured on one header (581 source bytes: licence + threading + frame
+table, header guard, `#include`, a typedef'd struct, one prototype).**
+"Indexed body bytes" is total chunk text minus the `[C] path:N-M symbol`
+header `buildChunk` prepends:
+
+| | chunks | indexed body bytes | Copyright / Threading / frame table searchable | named symbols |
+|---|---|---|---|---|
+| pristine `origin/master` | 1 | 580 | yes | 0 |
+| round-1 branch (`b1a06931`) | 4 | **170** | **no** | 3 |
+| this branch | 6 | 571 | yes | 3 |
+
+571 vs master's 580 is the whitespace trimmed at chunk boundaries. So the
+fixed state is master's byte coverage plus the three symbols master could not
+name — not a trade-off in either direction. Pinned by the two coverage cases
+in `test/chunkers/code-c-cpp.test.ts`; fail-without (gap emission disabled,
+everything else intact): 7 pass / 2 fail.
+
 ### 1e — reduced from four DEF_TYPES entries to two, in a new file
 
 p2 added `'declaration', 'type definition', 'union specifier', 'preproc def'`.

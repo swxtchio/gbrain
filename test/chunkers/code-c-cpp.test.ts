@@ -112,6 +112,37 @@ void spp_reset(void);
 #endif /* SPP_LIMITS_H */
 `;
 
+// The byte-coverage shape: a header whose file-level prose (licence,
+// threading contract, wire-frame table) lives OUTSIDE every semantic node.
+// Pre-carry this file had zero top-level semantic nodes and fell to the text
+// chunker, so all of it was indexed; the PASSTHROUGH recursion moves it onto
+// the semantic path, where upstream emits nothing between nodes.
+const C_PROSE_HEADER = `/*
+ * Copyright (c) 2026 swxtch.io. All rights reserved.
+ *
+ * Threading: spp_encode_packet is re-entrant; spp_reset is NOT and must be
+ * called only from the control thread while no encode is in flight.
+ *
+ * Wire frame layout:
+ *   +--------+--------+----------------+
+ *   | seq(4) | flag(1)| payload(0..N)  |
+ *   +--------+--------+----------------+
+ */
+#ifndef SPP_WIRE_H
+#define SPP_WIRE_H
+
+#include <stdint.h>
+
+typedef struct {
+  uint32_t seq;
+  uint8_t flags;
+} packet_header_t;
+
+int spp_encode_packet(const uint8_t *src, int len, uint8_t *dst);
+
+#endif /* SPP_WIRE_H */
+`;
+
 const CPP_SOURCE = `
 #include <stdint.h>
 
@@ -146,6 +177,9 @@ struct PacketHeaderView {
   uint8_t flags;
 };
 `;
+
+/** Chunk text minus the "[C] path:N-M symbol\n\n" header buildChunk prepends. */
+const CHUNK_HEADER = /^\[[^\]]+\] [^\n]+\n\n/;
 
 async function symbolsFor(source: string, filePath: string) {
   const chunks = await chunkCodeText(source, filePath);
@@ -235,6 +269,32 @@ describe('swxtch: C/C++ macro and prototype RUNS keep their symbol names', () =>
     expect(typeOf('spp_encode_packet')).toBe('declaration');
     expect(MERGE_PROTECTED_SYMBOL_TYPES.has('preproc def')).toBe(false);
     expect(MERGE_PROTECTED_SYMBOL_TYPES.has('declaration')).toBe(false);
+  });
+});
+
+describe('swxtch: C/C++ file-level prose stays indexed', () => {
+  test('licence, threading contract and frame table survive the semantic path', async () => {
+    const { chunks, names } = await symbolsFor(C_PROSE_HEADER, 'spp_wire.h');
+    const indexed = chunks.map((c) => c.text.replace(CHUNK_HEADER, '')).join('\n');
+
+    // The three prose regions master reached via the whole-file fallback.
+    // Without gap emission all three vanish: they sit outside every semantic
+    // node, and the semantic path emits only node ranges.
+    expect(indexed).toContain('Copyright (c) 2026 swxtch.io');
+    expect(indexed).toContain('Threading: spp_encode_packet is re-entrant');
+    expect(indexed).toContain('payload(0..N)');
+
+    // And the symbols the carry exists for are still there — the point is
+    // that the two are not a trade-off.
+    expect(names.has('packet_header_t')).toBe(true);
+    expect(names.has('spp_encode_packet')).toBe(true);
+  });
+
+  test('gap chunks are symbol-less, so code-def can never return one', async () => {
+    const { chunks } = await symbolsFor(C_PROSE_HEADER, 'spp_wire.h');
+    const prose = chunks.filter((c) => c.text.includes('Copyright (c) 2026'));
+    expect(prose.length).toBeGreaterThan(0);
+    for (const c of prose) expect(c.metadata.symbolName).toBeNull();
   });
 });
 

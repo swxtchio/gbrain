@@ -839,8 +839,56 @@ async function chunkParsedLanguage(
     const chunks: CodeChunk[] = [];
     const nestedConfig = NESTED_EMIT_CONFIG[language];
 
+    // SWX: emit the source text that lies BETWEEN semantic nodes for C/C++.
+    //
+    // Why only here, and why at all: pre-patch a real C/C++ header had zero
+    // top-level semantic nodes (everything sits inside a header guard), so it
+    // fell to `fallbackChunks` and the WHOLE file — licence block, threading
+    // notes, frame-layout tables, `#include` lists — was indexed as text. The
+    // PASSTHROUGH recursion above now finds nodes in those headers, which
+    // moves them onto this path, where upstream emits nothing outside a
+    // semantic node. Without this the carry would trade symbol metadata for
+    // the file's prose. Scoped to c/cpp: for every other language this path
+    // is reached exactly as before and its behaviour is unchanged.
+    //
+    // Gaps are symbol-less (`symbolName: null`), so they can never be
+    // returned by code-def, and they flow through mergeSmallSiblings +
+    // capOversizedChunks with everything else. `symbolType: 'module'` matches
+    // what `fallbackChunks` already labels symbol-less code text with.
+    const emitGaps = language === 'c' || language === 'cpp';
+    let gapCursor = 0;
+    let gapCursorLine = 1;
+    const advanceGapCursor = (to: number): void => {
+      if (to <= gapCursor) return;
+      for (let i = gapCursor; i < to; i++) if (source.charCodeAt(i) === 10) gapCursorLine++;
+      gapCursor = to;
+    };
+    const flushGap = (until: number): void => {
+      if (!emitGaps || until <= gapCursor) { advanceGapCursor(until); return; }
+      const raw = source.slice(gapCursor, until);
+      const body = raw.trim();
+      if (body) {
+        // Line of the first non-whitespace byte, not of the gap's start.
+        let startLine = gapCursorLine;
+        const lead = raw.length - raw.trimStart().length;
+        for (let i = 0; i < lead; i++) if (raw.charCodeAt(i) === 10) startLine++;
+        chunks.push(buildChunk({
+          body, filePath, language,
+          symbolName: null, symbolType: 'module',
+          startLine, endLine: startLine + countLines(body) - 1,
+          index: chunks.length,
+          parentSymbolPath: [],
+        }));
+      }
+      advanceGapCursor(until);
+    };
+
     for (const node of semanticNodes) {
       const endNode = chunkEndNode(node, language);
+      // Preamble + inter-node text, in source order so chunk indexes stay
+      // monotonic without a post-hoc sort.
+      flushGap(node.startIndex);
+      advanceGapCursor(endNode.endIndex);
       const nodeText = source.slice(node.startIndex, endNode.endIndex).trim();
       if (!nodeText) continue;
 
@@ -913,6 +961,10 @@ async function chunkParsedLanguage(
         }));
       }
     }
+
+    // SWX: trailing text after the last semantic node (a closing `#endif`
+    // plus whatever follows it).
+    flushGap(source.length);
 
     // v0.20.0 Cathedral II Layer 5 (A1): harvest call-graph edges from the
     // tree before we delete it. The extractor is iterative (no recursion);
