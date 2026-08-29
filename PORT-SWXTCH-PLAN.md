@@ -553,9 +553,19 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run on the finished branch: 22526 pass / 1 fail / 10 skip**
-(`bun run test`, 1127s, 3 shards + the serial pass). The single failure is
-pre-existing — see below.
+**Final gate run after review round 1: 22540 pass / 1 fail / 10 skip**
+(`bun run test`, 630s, 4 shards + the serial pass; all four shards clean). The
+single failure is pre-existing — see below. `bun run verify` 55/55 green;
+`shellcheck` clean on both fork shell scripts.
+
+Two failures the round-1 fix work introduced were caught by running the WHOLE
+suite rather than the touched files, and are fixed: a third numeric
+`CHUNKER_VERSION` pin in `test/chunkers/code.test.ts` (the round-1 verdict said
+there were two), and a prose bleed of this branch's own making — the new
+`topDirsAllowlist` doc comment named a bare `-`-prefixed flag, and
+`core/sync.ts` is imported by nearly every command, so three unrelated commands
+started accepting and ignoring it. Reworded; the generated registry is
+byte-identical to master again.
 
 An earlier run of the same suite, before the fixes below, reported 22526 pass
 / 3 fail. The three were:
