@@ -29,7 +29,9 @@ function run(args: string[]): { exitCode: number; stdout: string; stderr: string
       // maxBuffer, which kills the child and leaves TRUNCATED stdout for
       // JSON.parse to choke on. Measured at 1,107,704 bytes here. The document
       // is legitimately that big and parses fine when run directly, so the cap
-      // is the harness's, not the command's.
+      // is the harness's, not the command's. (The other spawn helper in this
+      // file already sets one; this is the same fix applied to the one that
+      // audits many files rather than a single named path.)
       maxBuffer: 64 * 1024 * 1024,
     });
     return { exitCode: 0, stdout, stderr: '' };
