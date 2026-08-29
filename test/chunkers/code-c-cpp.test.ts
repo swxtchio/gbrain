@@ -234,28 +234,53 @@ describe('swxtch: C header symbol extraction (header guards + extern "C")', () =
     }
   });
 
-  test("'type definition' is emitted, and is a string ONLY this carry can produce", async () => {
+  test("'type definition' is the string the carry emits for a C typedef", async () => {
     // docs/GBRAIN_VERIFY.md 4d check 2 is
     //   gbrain query 'typedef' --lang c --symbol-kind 'type definition'
-    // and its whole claim is that a hit means the carried chunker walked the
-    // brain. `--symbol-kind` is an exact match on content_chunks.symbol_type
-    // (search/cjk-keyword-sql.ts), so the claim rests on two facts, pinned
-    // here so the runbook cannot silently rot:
+    // and `--symbol-kind` is an exact match on content_chunks.symbol_type
+    // (search/cjk-keyword-sql.ts), so the runbook's command only finds
+    // anything if the chunker emits exactly this string.
     const { typeOf } = await symbolsFor(C_HEADER, 'spp_wire.h');
-
-    // 1. the carry emits exactly that string;
     expect(typeOf('packet_header_t')).toBe('type definition');
+  });
 
-    // 2. and nothing else can. `type_definition` appears in no upstream
-    //    TOP_LEVEL_TYPES set, and normalizeSymbolType has no rule for it, so
-    //    the only route to that symbol_type is the c/cpp entries this carry
-    //    adds. Read from the source rather than asserted from memory.
-    const src = await Bun.file(new URL('../../src/core/chunkers/code.ts', import.meta.url)).text();
-    const topLevel = src.slice(src.indexOf('const TOP_LEVEL_TYPES'), src.indexOf('const PASSTHROUGH_TYPES'));
-    const owners = [...topLevel.matchAll(/^ {2}(\w+): new Set\(\[([\s\S]*?)\]\)/gm)]
-      .filter(([, , body]) => body.includes("'type_definition'"))
-      .map(([, lang]) => lang);
-    expect(owners.sort()).toEqual(['c', 'cpp']);
+  test('no other language emits that symbol type, so a hit means the C/C++ carry ran', async () => {
+    // The other half of the runbook's claim, asserted against what the chunker
+    // PRODUCES rather than against how its source is written. An earlier
+    // revision read src/core/chunkers/code.ts as text and checked which
+    // TOP_LEVEL_TYPES entries own `type_definition` — that made this repo's own
+    // source the subject, which is not a check this crew builds.
+    //
+    // Sampled, not exhaustive: these are the languages whose grammars have a
+    // type-alias or typedef-shaped construct, i.e. the plausible sources of a
+    // collision. It cannot prove the negative for all ~35 registered
+    // languages; it does catch the realistic ways the string could stop being
+    // C/C++-exclusive.
+    // Each fixture is written so its type-alias construct reaches
+    // normalizeSymbolType as a TOP-LEVEL chunk — a bare `type Alias = …`
+    // rather than an exported one, which would chunk as the `export statement`
+    // wrapper and never exercise the path. Verified: these emit
+    // type / type declaration / type item / struct item respectively.
+    const others: Array<[string, string, string]> = [
+      ['t.ts', 'type Alias = { a: number };\ninterface I { b: string }\nfunction g() { return 1; }\n', 'type'],
+      ['t.go', 'package m\n\ntype Alias struct{ A int }\n\nfunc F() {}\n', 'type declaration'],
+      ['t.rs', 'pub type Alias = u32;\npub struct S { a: u32 }\nfn f() {}\n', 'type item'],
+      ['t.java', 'class C { int f() { return 1; } }\n', 'class'],
+      ['t.cs', 'namespace N { class C { int F() => 1; } }\n', 'namespace declaration'],
+    ];
+
+    for (const [path, source, aliasType] of others) {
+      const chunks = await chunkCodeText(source, path);
+      const types = chunks.map((c) => c.metadata.symbolType);
+      // The sample is only meaningful if the alias-shaped construct actually
+      // became a chunk — otherwise "no offenders" would hold for the wrong
+      // reason, and the case could not redden if normalizeSymbolType drifted.
+      expect(types, `${path} never chunked its type-alias construct`).toContain(aliasType);
+      const offenders = chunks
+        .filter((c) => c.metadata.symbolType === 'type definition')
+        .map((c) => `${path}:${c.metadata.symbolName}`);
+      expect(offenders, `${path} also emits 'type definition'`).toEqual([]);
+    }
   });
 
   test('every emitted C symbol_type is accepted by code-def DEF_TYPES', async () => {
