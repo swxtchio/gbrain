@@ -15,9 +15,23 @@
  * launched from the custom branch. Both holes were on axes the round had
  * "added coverage along".
  *
- *   branch states  current | behind | ahead | diverged | lagging-mirror
+ *   branch states  custom present: current | behind | ahead | diverged |
+ *                                   lagging-mirror
+ *                  custom ABSENT:   launched on mirror | on a third branch |
+ *                                   detached
  *   modes          real | --check | --dry-run  (x with/without the opt-in)
  *   postures       unset | disabled | enabled-explicit
+ *
+ * Custom-branch PRESENCE and LAUNCH REF are parameters of the fixture, not
+ * fixed properties of it. They are the two inputs the predicate reads, and an
+ * earlier revision of this file held both constant — creating `swxtch` in
+ * every cell and launching from `swxtch` or `master` — while its header
+ * claimed to make "correct for the inputs I had in mind" impossible to ship.
+ * It shipped exactly that, twice over, in opposite directions.
+ *
+ * Every production consumer of RUN_LANDS_CODE is asserted: the posture gate,
+ * the upgrade block, AND the closing summary. The summary went unasserted for
+ * a round, which is why a false "new code landed" was invisible.
  *
  * Each cell asserts the predicate's answer through an observable consequence,
  * and the landing states additionally assert the INVARIANT the contract
@@ -38,8 +52,15 @@ const SAFE_UPDATE = join(REPO_ROOT, 'scripts', 'gbrain-safe-update');
 
 /** Does the run change the code the box executes? */
 type Lands = 'lands' | 'no-op';
-/** Branch topology at launch. */
+/** Branch topology at launch, WITH the custom branch present. */
 type BranchState = 'current' | 'behind' | 'ahead' | 'diverged' | 'lagging-mirror';
+/**
+ * Topology with NO custom branch. The rebase block is skipped entirely here,
+ * so the only ref that can move is the mirror — a different question, and the
+ * axis this file previously held constant while claiming to be exhaustive.
+ * The launch ref is what decides the answer, so it is the axis.
+ */
+type NoCustomState = 'no-custom-on-mirror' | 'no-custom-third-branch' | 'no-custom-detached';
 /** DB-plane sync.write_through as the probe would report it. */
 type Posture = 'unset' | 'disabled' | 'enabled';
 
@@ -77,7 +98,7 @@ afterEach(() => {
  * Baseline: bare upstream + clone, `master` mirroring it, `swxtch` one commit
  * ahead, launched on `swxtch`.
  */
-function fixture(state: BranchState): string {
+function fixture(state: BranchState | NoCustomState): string {
   const dir = join(sandbox, 'inst');
   mkdirSync(dir, { recursive: true });
   const bare = join(dir, 'upstream.git');
@@ -91,10 +112,15 @@ function fixture(state: BranchState): string {
   git(install, 'add', '-A');
   git(install, 'commit', '-qm', 'init');
   git(install, 'push', '-q', '-u', 'origin', 'master');
-  git(install, 'checkout', '-q', '-b', 'swxtch');
-  writeFileSync(join(install, 'custom.txt'), 'x\n');
-  git(install, 'add', '-A');
-  git(install, 'commit', '-qm', 'SWX custom');
+  // The custom branch is a PARAMETER: the no-custom shapes never create it, so
+  // the rebase block is skipped and only the mirror can move.
+  const withCustom = !String(state).startsWith('no-custom');
+  if (withCustom) {
+    git(install, 'checkout', '-q', '-b', 'swxtch');
+    writeFileSync(join(install, 'custom.txt'), 'x\n');
+    git(install, 'add', '-A');
+    git(install, 'commit', '-qm', 'SWX custom');
+  }
 
   /** Push a new commit to origin/master through a second clone. */
   const advanceOrigin = (): void => {
@@ -130,6 +156,26 @@ function fixture(state: BranchState): string {
       git(install, 'commit', '-qm', 'mirror advance');
       git(install, 'push', '-q', 'origin', 'master');
       git(install, 'checkout', '-q', 'swxtch');
+      break;
+    case 'no-custom-on-mirror':
+      // Launched ON the mirror with upstream ahead: the fast-forward moves the
+      // ref under our feet, so code lands. The only no-custom topology the
+      // single-arm predicate got right, and only by accident.
+      advanceOrigin();
+      break;
+    case 'no-custom-third-branch': {
+      // Launched on an ordinary branch. The mirror advances, but the run
+      // returns here untouched — HEAD is identical before and after.
+      advanceOrigin();
+      git(install, 'checkout', '-q', '-b', 'feature-x');
+      break;
+    }
+    case 'no-custom-detached':
+      // Detached launch with upstream ahead. `git checkout HEAD` does NOT
+      // restore this after the mirror moves, so the run must return to the
+      // COMMIT for "nothing landed" to be true rather than merely claimed.
+      advanceOrigin();
+      git(install, 'checkout', '-q', '--detach');
       break;
     case 'lagging-mirror':
       // origin advanced and swxtch was already rebased onto it by hand; the
@@ -184,16 +230,40 @@ function runScript(args: string[], install: string, extra: Record<string, string
   };
 }
 
+/**
+ * The closing summary is the THIRD consumer of RUN_LANDS_CODE, and it went
+ * unasserted for a round — reverting it to the old version-only wording left
+ * all 52 cells green, which is exactly why a false "new code landed" on a
+ * no-op run was invisible. Every cell that knows the expected answer now
+ * checks it.
+ */
+function expectSummary(out: string, lands: Lands): void {
+  if (lands === 'lands') {
+    expect(out, 'summary denied a run that landed code').not.toContain('nothing landed');
+    expect(out).toMatch(/Done — (new code landed|upgraded v)/);
+  } else {
+    expect(out, 'summary claimed code landed on a no-op run').not.toContain('new code landed');
+    expect(out, 'summary claimed an upgrade on a no-op run').not.toMatch(/Done — upgraded v/);
+    expect(out).toContain('nothing landed');
+  }
+}
+
 /** What the predicate says, read off the run's observable behaviour. */
-const EXPECTED: Record<BranchState, Lands> = {
+const EXPECTED: Record<BranchState | NoCustomState, Lands> = {
   current: 'no-op',
   behind: 'lands',
   ahead: 'lands',
   diverged: 'lands',
   'lagging-mirror': 'no-op',
+  // No custom branch: only a run launched ON the mirror is served by its
+  // fast-forward. A third branch is returned to untouched; a detached launch
+  // is restored to its own commit.
+  'no-custom-on-mirror': 'lands',
+  'no-custom-third-branch': 'no-op',
+  'no-custom-detached': 'no-op',
 };
 
-const BRANCH_STATES = Object.keys(EXPECTED) as BranchState[];
+const BRANCH_STATES = Object.keys(EXPECTED) as Array<BranchState | NoCustomState>;
 const POSTURES: Posture[] = ['unset', 'disabled', 'enabled'];
 
 describe('SWX: lands-code predicate — branch x mode x posture', () => {
@@ -205,9 +275,21 @@ describe('SWX: lands-code predicate — branch x mode x posture', () => {
       test(`real | ${state} | posture=${posture} | no unit → upgrade block ${EXPECTED[state] === 'lands' ? 'arms' : 'stays quiet'}`, () => {
         const install = fixture(state);
         stubExternals(install, posture, false);
+        const headBefore = git(install, 'rev-parse', 'HEAD');
         const r = runScript([], install);
 
         expect({ status: r.status, out: r.out }).toEqual(expect.objectContaining({ status: 0 }));
+        // The predicate's answer is a CLAIM about the served code. Check the
+        // claim against the served code itself, or "nothing landed" can be
+        // true of the variable and false of the checkout — which is exactly
+        // how a detached launch ended up attached to the moved mirror while
+        // the run announced a no-op.
+        const headAfter = git(install, 'rev-parse', 'HEAD');
+        if (EXPECTED[state] === 'lands') {
+          expect(headAfter, 'claimed to land code but HEAD never moved').not.toBe(headBefore);
+        } else {
+          expect(headAfter, 'claimed nothing landed but the served commit changed').toBe(headBefore);
+        }
         if (EXPECTED[state] === 'lands') {
           expect(r.calls, 'landed code without running the upgrade block').toContain('bun install');
           expect(r.calls).toContain('post-upgrade');
@@ -215,6 +297,7 @@ describe('SWX: lands-code predicate — branch x mode x posture', () => {
           expect(r.calls, 'ran bun install for code already in service').not.toContain('bun install');
           expect(r.calls, 'ran migrations against the live brain for no code change').not.toContain('post-upgrade');
         }
+        expectSummary(r.out, EXPECTED[state]);
       }, 120_000);
     }
   }
@@ -237,6 +320,7 @@ describe('SWX: lands-code predicate — branch x mode x posture', () => {
         } else {
           expect({ status: r.status, out: r.out }).toEqual(expect.objectContaining({ status: 0 }));
           expect(r.out).not.toContain('refusing to update');
+          expectSummary(r.out, EXPECTED[state]);
         }
       }, 120_000);
     }

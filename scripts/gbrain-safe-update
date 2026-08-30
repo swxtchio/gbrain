@@ -215,37 +215,68 @@ fi
 # up front, so the prediction is the honest basis for BOTH paths.
 #
 # WHY IT IS EXACT rather than a heuristic, given this script's own control flow:
-#   * the run ends on $CUSTOM_BRANCH when it exists, else the mirror, and it
-#     checks that ref out — so serving a DIFFERENT ref at launch means the
-#     served code changes, whatever git does afterwards;
+#   * the run ends on $CUSTOM_BRANCH when it exists, else back on the ref it
+#     launched from, and it checks that ref out — so serving a DIFFERENT ref at
+#     launch means the served code changes, whatever git does afterwards;
 #   * that target ref moves iff $UPSTREAM is not already an ancestor of it
 #     (the mirror fast-forwards to $UPSTREAM, then the custom branch rebases
 #     onto it — a replay onto a new parent always yields new commits);
 #   * a rebase that conflicts `die`s before any consumer reads this.
-# So no input makes the prediction disagree with what a real run does.
-# The ref the run ENDS on. Mirrors the tail's own choice exactly (search
-# TARGET_BRANCH below): the custom branch when it exists, otherwise back to the
-# branch we launched from — NOT the mirror, which the run only passes through.
-TARGET_REF="$CUSTOM_BRANCH"
-git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" || TARGET_REF="$ORIG_BRANCH"
+# The two arms below cover the two control-flow shapes; within each, no input
+# makes the prediction disagree with what a real run does.
+# The ref the run ENDS on, computed ONCE. The tail reuses this variable rather
+# than recomputing the same choice 350 lines later — two verbatim copies kept
+# in sync by a comment is the drift shape that produced this defect in the
+# first place, one level down.
+#
+# Detached launches resolve to the COMMIT, not the literal string "HEAD":
+# `git checkout HEAD` does not restore a detached launch after the mirror has
+# been fast-forwarded, so the run would silently end attached to the moved
+# mirror. Checking out the sha returns the working tree to exactly where it
+# started, which is what makes "nothing landed" true rather than merely
+# claimed.
+if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
+  TARGET_REF="$CUSTOM_BRANCH"
+elif [ "$ORIG_BRANCH" = "HEAD" ]; then
+  TARGET_REF="$SERVED_HEAD_BEFORE"
+else
+  TARGET_REF="$ORIG_BRANCH"
+fi
 
+# Two arms, because the run's control flow has two shapes and the question
+# "will the served code change" has a different answer in each.
+#
+# CUSTOM BRANCH PRESENT — the mirror fast-forwards, then the custom branch is
+# checked out and rebased onto it. Both movements can change the served code.
+#
+# CUSTOM BRANCH ABSENT — the rebase block is skipped entirely, so the ONLY ref
+# that moves is the mirror, and the run returns to the branch it launched from.
+# Asking the ancestry question here modelled a replay that never happens, and
+# was wrong in both directions: on a detached launch it said "no-op" while HEAD
+# ended up on the moved mirror (new code served against an un-migrated brain,
+# announced as a no-op), and on an ordinary third branch it said "lands" for a
+# run whose HEAD is identical before and after — arming the migrations, the
+# restart, and the posture refusal for nothing.
 run_lands_code() {
-  # A detached HEAD has no branch to compare or advance; the run returns to the
-  # same commit, so nothing lands.
-  [ "$TARGET_REF" = "HEAD" ] && return 1
-  local target_tip
-  target_tip="$(git rev-parse --verify --quiet "$TARGET_REF" || true)"
-  [ -n "$target_tip" ] || return 1
-  # (a) the run will serve a DIFFERENT ref than the one it launched on.
-  #     Missing this term let a run launched on the mirror, with the custom
-  #     branch already on upstream, check out the custom branch and arm the
-  #     whole upgrade block with the gate silent.
-  [ "$SERVED_HEAD_BEFORE" = "$target_tip" ] || return 0
-  # (b) that ref will itself move — it is not already on the fetched upstream.
-  #     Only reachable when the target IS the served ref, so this is exactly
-  #     "will the code under my feet be replayed".
-  git merge-base --is-ancestor "$UPSTREAM" "$TARGET_REF" || return 0
-  return 1
+  if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
+    local target_tip
+    target_tip="$(git rev-parse --verify --quiet "$CUSTOM_BRANCH" || true)"
+    [ -n "$target_tip" ] || return 1
+    # (a) the run will serve a DIFFERENT ref than the one it launched on.
+    #     Missing this term let a run launched on the mirror, with the custom
+    #     branch already on upstream, check out the custom branch and arm the
+    #     whole upgrade block with the gate silent.
+    [ "$SERVED_HEAD_BEFORE" = "$target_tip" ] || return 0
+    # (b) that ref will itself move — it is not already on the fetched
+    #     upstream, so the rebase replays it.
+    git merge-base --is-ancestor "$UPSTREAM" "$CUSTOM_BRANCH" || return 0
+    return 1
+  fi
+  # No custom branch: nothing is rebased. The served code changes only when the
+  # run was launched ON the mirror and the mirror actually advances. A detached
+  # launch is restored to its own commit by TARGET_REF above, and any other
+  # branch is returned to untouched.
+  [ "$ORIG_BRANCH" = "$TRACK_BRANCH" ] && [ "$BEHIND" != 0 ]
 }
 
 if run_lands_code; then RUN_LANDS_CODE=1; else RUN_LANDS_CODE=0; fi
@@ -576,9 +607,10 @@ if [ "$RUN_LANDS_CODE" = 1 ]; then
 fi
 
 # ---- return to where we started + restore stash ----------------------------
-TARGET_BRANCH="$CUSTOM_BRANCH"
-git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" || TARGET_BRANCH="$ORIG_BRANCH"
-run git checkout --quiet "$TARGET_BRANCH"
+# One target-ref choice, decided once above with the predicate that depends on
+# it. A detached launch resolves to its commit there, so this restores the
+# working tree to exactly where the run started.
+run git checkout --quiet "$TARGET_REF"
 restore_stash
 
 NEW_VERSION="$(read_version)"
