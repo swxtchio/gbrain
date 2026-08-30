@@ -277,9 +277,16 @@ describe('swxtch: C header symbol extraction (header guards + extern "C")', () =
     //     introduced a `type_definition` node would show up. Swift is in this
     //     group on measurement, not assumption: `typealias_declaration` is not
     //     among its top-level types, so a top-level typealias emits nothing.
+    //     Scala earns its row for a specific reason: tree-sitter-scala's alias
+    //     node is literally named `type_definition` — the same string C/C++
+    //     uses. It is safe today only because that node is not among Scala's
+    //     top-level types (measured: `type Alias = Int` in t.scala emits only
+    //     [class C]), so this is the one language where the breadth group's
+    //     hypothetical is already half-true and worth a standing guard.
     const breadth: Array<[string, string, string]> = [
       ['t.java', 'class C { int f() { return 1; } }\n', 'class'],
       ['t.swift', 'typealias Alias = Int\nclass C { func f() {} }\n', 'class'],
+      ['t.scala', 'type Alias = Int\nclass C { def f(): Int = 1 }\n', 'class'],
     ];
 
     for (const [path, source, anchor] of [...aliasEmitters, ...breadth]) {

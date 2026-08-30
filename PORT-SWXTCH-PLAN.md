@@ -724,6 +724,15 @@ An earlier run of the same suite, before the fixes below, reported 22526 pass
   scaffold's absolute green-gate lacking that carve-out is a brief defect owned
   by firstmate and tracked elsewhere.
 
+  **Settled in round 8 by firstmate's amendment**: the gate that must be green
+  is every test this branch touches, not that upstream cell. The attribution
+  was closed by measurement first — reverting the whole of `src/` to pristine
+  master (`git checkout 7b7921d8 -- src/`) and re-running the file gives the
+  identical 57 pass / 1 fail, which matters because the test dynamically
+  imports `src/commands/sync.ts` and this branch modifies both that and
+  `src/core/sync.ts`. It is an upstream sync-checkpoint bug; the port does not
+  chase it.
+
   **Reproduction recipe (replaced in round 2 — the round-1 one no longer
   works).** Round 1 said "revert only this branch's two sync files to
   `origin/master` and re-run". That stopped isolating anything: round 2 moved
@@ -877,6 +886,44 @@ underlying point to firstmate: the objective's absolute green-gate has no
 pre-existing-upstream carve-out, so either the scaffold gains one or the
 waiver is recorded against this task. That is firstmate's to settle, not a
 branch change.
+
+## Round-8 record — the settlement's second arm
+
+Round 7 settled the ANSWER into one value. The BODY still modelled a rebase:
+term (b) asked whether `$UPSTREAM` is an ancestor of the target ref, which is
+only the right question when `$CUSTOM_BRANCH` exists. Without it the rebase
+block is skipped and the only ref that moves is the mirror — so the predicate
+was asking about a replay that never happens, and was wrong in BOTH directions:
+a detached launch read "no-op" while HEAD ended attached to the moved mirror
+(new code in service against a brain skipped for migrations, announced as a
+no-op), and an ordinary third branch read "lands" for a run whose HEAD is
+identical before and after.
+
+**The custom-absent arm:** `[ "$ORIG_BRANCH" = "$TRACK_BRANCH" ] && [ "$BEHIND"
+!= 0 ]` — the served code changes only when the run launched ON the mirror and
+the mirror advances. One arm, both directions, rather than the coordinate
+either seat happened to hit.
+
+**Detached: restore, not refuse.** `TARGET_REF` resolves a detached launch to
+`$SERVED_HEAD_BEFORE`, so the tail checks out the commit rather than the
+literal `"HEAD"`, which does not restore a detached launch once the mirror has
+moved. Restore keeps the run useful and makes the no-op claim TRUE rather than
+merely asserted.
+
+**The instrument lesson, fifth form.** The matrix claimed exhaustiveness while
+its fixture created `swxtch` in every cell and launched only from `swxtch` or
+`master` — holding constant precisely the two inputs the predicate reads. Both
+are now fixture parameters (52 cells → 82), and the closing summary, which went
+unasserted for a round, has its own assertion.
+
+**Ablation-completeness is now the bar.** For each behaviour change, revert
+exactly that hunk and require a cell to redden: single-arm predicate → 14 fail;
+summary reverted → 40 fail (it reddened NOTHING before). The detached fix
+initially reddened nothing either — the cells asserted the predicate's CLAIM
+without checking the served code — so every cell now compares HEAD before and
+after against the expected answer. "Nothing landed" can no longer be true of
+the variable and false of the checkout. That miniature is the whole round: an
+answer is not settled until something fails when it is wrong.
 
 ## Round-7 record — the design settled
 
