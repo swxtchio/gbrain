@@ -618,11 +618,26 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 7: 22559 pass / 1 fail / 10 skip**
-(`bun run test`, 1698s). **All four parallel shards clean** (6058 / 5270 /
-6172 / 5059, zero failures), and the single remaining failure is the known
-pre-existing upstream cell in the serial pass. `bun run verify` 55/55 green;
+**The gate, after firstmate's round-8 amendment: every test this branch
+touches — 362 pass / 0 fail.** Nineteen files, run the way the runner runs
+them (plain files together, each `*.serial.test.ts` in its own process, per
+`scripts/run-serial-tests.sh`): 252 pass across the plain set, then 3 / 82 / 2
+/ 17 / 3 / 3 across the six serial files. `bun run verify` 55/55 green;
 `shellcheck` clean on both fork shell scripts.
+
+**Full suite for context: 22550 pass / 3 fail / 10 skip** (1362s, 4 shards).
+Three failures, none in a surface this branch touches: the upstream
+`sync-rename-reconcile` cell firstmate has ruled out of scope, and two
+`worker-job-isolation` cases that died with "PGLite failed to initialize its
+WASM runtime" — the WASM-OOM shape, which passes 7/0 in isolation and whose
+file imports only `minions/queue`, `minions/worker` and `pglite-engine`, none
+of them touched here.
+
+That OOM is the direct trade-off of the knob below, and worth stating plainly:
+on this box, with other tenants at load 15-40, the memory clamp ON collapses
+the shards (20-case cascade) and the clamp OFF occasionally OOMs a PGLite
+worker. Both are the box. Neither is reachable from the branch, and the
+touched-file gate above is unaffected by either.
 
 Run with `GBRAIN_TEST_NO_MEM_ADAPT=1`, which is what makes it comparable to
 every earlier round rather than a measurement of the box's other tenants — see
