@@ -22,16 +22,24 @@
  *   modes          real | --check | --dry-run  (x with/without the opt-in)
  *   postures       unset | disabled | enabled-explicit
  *
- * Custom-branch PRESENCE and LAUNCH REF are parameters of the fixture, not
- * fixed properties of it. They are the two inputs the predicate reads, and an
- * earlier revision of this file held both constant — creating `swxtch` in
- * every cell and launching from `swxtch` or `master` — while its header
- * claimed to make "correct for the inputs I had in mind" impossible to ship.
- * It shipped exactly that, twice over, in opposite directions.
+ * Custom-branch PRESENCE is a parameter of the fixture. LAUNCH REF is a
+ * parameter within the no-custom family only — the three `no-custom-*` states
+ * differ precisely by where the run launches, because that is what decides the
+ * answer when nothing is rebased. The five custom-present states still launch
+ * from `swxtch` or `master` by construction; a third-branch or detached launch
+ * WITH the custom branch present is not covered here, deliberately: term (a)
+ * answers those by comparing the served head to the custom branch's tip, and
+ * they were reviewed as correct rather than left untested by oversight.
  *
- * Every production consumer of RUN_LANDS_CODE is asserted: the posture gate,
- * the upgrade block, AND the closing summary. The summary went unasserted for
- * a round, which is why a false "new code landed" was invisible.
+ * An earlier revision held both inputs constant — creating `swxtch` in every
+ * cell and launching only from `swxtch` or `master` — while its header claimed
+ * to make "correct for the inputs I had in mind" impossible to ship. It
+ * shipped exactly that, twice over, in opposite directions.
+ *
+ * All three production consumers of RUN_LANDS_CODE are reached: the posture
+ * gate, the upgrade block, and the closing summary. The summary went
+ * unasserted for a round, which is why a false "new code landed" was
+ * invisible.
  *
  * Each cell asserts the predicate's answer through an observable consequence,
  * and the landing states additionally assert the INVARIANT the contract
@@ -234,8 +242,14 @@ function runScript(args: string[], install: string, extra: Record<string, string
  * The closing summary is the THIRD consumer of RUN_LANDS_CODE, and it went
  * unasserted for a round — reverting it to the old version-only wording left
  * all 52 cells green, which is exactly why a false "new code landed" on a
- * no-op run was invisible. Every cell that knows the expected answer now
- * checks it.
+ * no-op run was invisible.
+ *
+ * Called from the two REAL-run families (no unit, and unit-installed where the
+ * gate allows the run), which is where the summary is actually printed for
+ * every branch state x posture. The INVARIANT and dry-run-opt-in cells know
+ * EXPECTED too but do not call it: the first is about prediction-vs-reality
+ * and the second about the gate's arm order, and neither reaches a summary
+ * whose wording adds anything the real-run families have not already pinned.
  */
 function expectSummary(out: string, lands: Lands): void {
   if (lands === 'lands') {
@@ -283,7 +297,9 @@ describe('SWX: lands-code predicate — branch x mode x posture', () => {
         // claim against the served code itself, or "nothing landed" can be
         // true of the variable and false of the checkout — which is exactly
         // how a detached launch ended up attached to the moved mirror while
-        // the run announced a no-op.
+        // the run announced a no-op. This family is where that check lives:
+        // no unit, so the gate never short-circuits the run, and every branch
+        // state reaches the end and can be compared against EXPECTED.
         const headAfter = git(install, 'rev-parse', 'HEAD');
         if (EXPECTED[state] === 'lands') {
           expect(headAfter, 'claimed to land code but HEAD never moved').not.toBe(headBefore);

@@ -15,9 +15,13 @@
 #     3. rebases your `swxtch` commits on top of the new `master`,
 #     4. THEN (on swxtch) runs `bun install` + `gbrain post-upgrade`.
 #
-#   Build steps run on the CUSTOM branch AFTER the rebase — never on the mirror. (The
+#   On that deployment — the one this script is for, where $CUSTOM_BRANCH exists —
+#   build steps run on the CUSTOM branch AFTER the rebase, not on the mirror. (The
 #   sibling gstack-safe-update runs ./setup on the mirror first, which dirties tracked
 #   files and aborts the subsequent checkout; gbrain avoids that class of bug entirely.)
+#   On a checkout with no custom branch the rebase is skipped and the build steps run
+#   with HEAD on the mirror; that is safe because neither of them writes a tracked file
+#   (see the build-steps block), but the "never on the mirror" shape does not hold there.
 #
 #   Your work on `$CUSTOM_BRANCH` is replayed via rebase, never reset away. The rebased
 #   branch is left LOCAL: this script never force-pushes the shared fork. Review, then
@@ -383,7 +387,10 @@ restore_stash() {
   fi
 }
 
-# ---- update the mirror branch (fast-forward only; never dirtied) ------------
+# ---- update the mirror branch (fast-forward only) ---------------------------
+# Fast-forward can't conflict, and nothing below writes a tracked file, so the
+# mirror is not left dirty by this script on either path. It IS the checked-out
+# branch while the build steps run when there is no custom branch to return to.
 if [ "$BEHIND" != 0 ]; then
   say "Updating $TRACK_BRANCH → $UPSTREAM…"
   run git checkout --quiet "$TRACK_BRANCH"
@@ -430,10 +437,13 @@ else
   warn "customization branch '$CUSTOM_BRANCH' does not exist — skipping rebase"
 fi
 
-# ---- build steps: ON the custom branch, AFTER the rebase --------------------
-# (bun install only touches gitignored node_modules; gbrain post-upgrade runs DB
-#  migrations against the brain in $BRAIN_DIR. Both run here so they match the
-#  rebased source — and so the mirror branch is never left dirty.)
+# ---- build steps: after the rebase, on whatever ref the run serves ----------
+# On the custom-branch deployment this script is for, that ref is $CUSTOM_BRANCH
+# and these run against the freshly rebased source. On a checkout with no custom
+# branch the rebase was skipped and HEAD is the mirror, so they run there
+# instead — which is safe rather than merely tolerated: `bun install` only
+# touches gitignored node_modules and `gbrain post-upgrade` runs DB migrations
+# against the brain in $BRAIN_DIR, so neither writes a tracked file on any path.
 # Same one answer. This used to be its own predicate — first `BEHIND != 0 ||
 # REBASED = 1`, then a post-hoc HEAD comparison — and each was wrong in its own
 # direction: the first armed `bun install`, a pg_dump of the LIVE brain,

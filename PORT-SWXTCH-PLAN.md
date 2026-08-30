@@ -935,10 +935,14 @@ unasserted for a round, has its own assertion.
 exactly that hunk and require a cell to redden: single-arm predicate → 14 fail;
 summary reverted → 40 fail (it reddened NOTHING before). The detached fix
 initially reddened nothing either — the cells asserted the predicate's CLAIM
-without checking the served code — so every cell now compares HEAD before and
-after against the expected answer. "Nothing landed" can no longer be true of
-the variable and false of the checkout. That miniature is the whole round: an
-answer is not settled until something fails when it is wrong.
+without checking the served code — so the no-unit real-run family, where every
+branch state runs to completion and can be compared, now checks HEAD before and
+after against the expected answer. "Nothing landed" can no longer be true of the
+variable and false of the checkout without that family reddening. (The
+unit-installed and `--check` families compare HEAD too, but for their own
+properties — that a refusal did not mutate, and that a read changes nothing —
+not against the expected answer.) That miniature is the whole round: an answer
+is not settled until something fails when it is wrong.
 
 ## Round-7 record — the design settled
 
