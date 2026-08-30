@@ -618,11 +618,17 @@ ride-along brainstorm branch has its own case in `test/brainstorm/save.test.ts`.
 
 ## Full-suite result
 
-**Final gate run after review round 6: 22559 pass / 1 fail / 10 skip**
-(`bun run test`, 1819s, on a quiet box — load average 7.8). **All three
-parallel shards clean** (8006 / 7143 / 7410, zero failures), and the single
-remaining failure is the known pre-existing upstream cell in the serial pass.
-`bun run verify` 55/55 green; `shellcheck` clean on both fork shell scripts.
+**Final gate run after review round 7: 22559 pass / 1 fail / 10 skip**
+(`bun run test`, 1698s). **All four parallel shards clean** (6058 / 5270 /
+6172 / 5059, zero failures), and the single remaining failure is the known
+pre-existing upstream cell in the serial pass. `bun run verify` 55/55 green;
+`shellcheck` clean on both fork shell scripts.
+
+Run with `GBRAIN_TEST_NO_MEM_ADAPT=1`, which is what makes it comparable to
+every earlier round rather than a measurement of the box's other tenants — see
+the shard-collapse note below. The controlled comparison is unambiguous: two
+runs at the clamped 2-shard grouping gave 21-22 failures with 20 of them in one
+file; the same tree at the 4-shard grouping gives zero across all four shards.
 
 **Run it serially on this box.** An earlier round-2 attempt at
 `GBRAIN_UNIT_MAX_PARALLEL=2` produced 117 failures in one shard, every one a
@@ -641,6 +647,22 @@ shared-in-process-engine class. The same file passes 74/0 in isolation on this
 branch, and passed inside the 3- and 4-shard splits of every earlier round.
 Not a timeout, not port-caused, and not fixable from the branch: the shard
 count is chosen by the runner from available memory.
+
+Established four ways, not asserted: (1) the file passes 74/0 in isolation on
+this branch; (2) it imports nothing this branch changes — its `src/` imports
+are `extract-conversation-facts`, `ai/gateway`, `budget/budget-tracker`,
+`conversation-parser/llm-base` and `pglite-engine`, and its only sync-adjacent
+import, `core/sync-concurrency.ts`, is untouched; (3) the one plausible
+transitive link is inert anyway, since `topDirsAllowlist()` returns null
+immediately when `GBRAIN_TOP_DIRS` is unset, as it is under test; (4) the
+controlled comparison above — same tree, same commit, 2-shard grouping fails,
+4-shard grouping passes.
+
+`GBRAIN_TEST_NO_MEM_ADAPT=1` restores the grouping when the box's free memory
+sits just under the 4-shard requirement (4 shards x 4 concurrent files x
+1536MB = ~24.6GB, against ~22GB free here). It is the runner's own documented
+knob and skips no test; it is the third such recorded knob, beside
+`GBRAIN_UNIT_MAX_PARALLEL=1` and `GBRAIN_VERIFY_TIMEOUT=300`.
 
 So the box produces three distinct false signals, each with its own tell:
 wall-clock kills (exit 124 / multi-second elapsed), PGLite WASM OOM at
