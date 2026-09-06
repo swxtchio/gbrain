@@ -426,6 +426,19 @@ export function formatSaveOutcome(
       exitCode: 0,
     };
   }
+  // SWX patch: `sync.write_through=false` is a deliberate operator opt-out (the
+  // swxtch fork runs remote-DB-only, where the DB is authoritative and the
+  // rendered .md just litters whatever dir the CLI/MCP server runs from).
+  // Without this branch it falls through to the generic `dbSaved` message
+  // below, which reports "file NOT written — see error above" and reads as a
+  // failure when nothing went wrong.
+  if (dbSaved && writeThrough.skipped === 'disabled_by_config') {
+    return {
+      stdout: `\n_Saved to DB page \`${ctx.slug}\` (\`sync.write_through\` is off — file write-through disabled)._`,
+      stderr,
+      exitCode: 0,
+    };
+  }
   if (dbSaved) {
     // File write attempted but errored (already on stderr). Row is durable.
     return {
