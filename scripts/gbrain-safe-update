@@ -23,7 +23,7 @@
 #   push yourself:  git push --force-with-lease swxtch swxtch
 #
 # Usage:
-#   gbrain-safe-update [--dry-run] [--check] [--no-backup] [custom_branch]
+#   gbrain-safe-update [--dry-run] [--check] [--backup|--no-backup] [custom_branch]
 #
 # Env overrides:
 #   GBRAIN_DIR        install dir            (default: ~/tools/gbrain)
@@ -61,13 +61,17 @@ BRAIN_DIR="${GBRAIN_HOME:-$HOME/.gbrain}"
 
 DRY_RUN=0
 CHECK_ONLY=0
-NO_BACKUP=0
+# auto | always | never. `auto` (default) backs up PGLite but NOT postgres:
+# for a managed postgres the platform's continuous WAL archiving is the real
+# recovery net, and a full pg_dump is expensive egress for a duplicate copy.
+BACKUP_MODE="${GBRAIN_SAFE_UPDATE_BACKUP:-auto}"
 CUSTOM_ARG=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run)   DRY_RUN=1 ;;
     --check)     CHECK_ONLY=1 ;;
-    --no-backup) NO_BACKUP=1 ;;
+    --no-backup) BACKUP_MODE=never ;;
+    --backup)    BACKUP_MODE=always ;;
     -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
     -*) echo "unknown flag: $arg" >&2; exit 2 ;;
     *)  CUSTOM_ARG="$arg" ;;
@@ -235,13 +239,31 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
     warn "bun not on PATH — skipping dependency install"
   fi
 
-  # back up the brain before running migrations (skippable with --no-backup).
-  # gbrain post-upgrade runs apply-migrations against the LIVE brain. Engine-aware:
-  #   postgres -> best-effort pg_dump snapshot. Supabase PITR/WAL-G is the primary
-  #               recovery net; this is a convenient logical restore point. Non-fatal.
-  #   pglite   -> copy the local brain dir (the only net for an embedded brain).
-  if [ "$NO_BACKUP" != 1 ]; then
-    ENGINE="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.gbrain/config.json'))).get('engine','pglite'))" 2>/dev/null || echo pglite)"
+  # back up the brain before running migrations. gbrain post-upgrade runs
+  # apply-migrations against the LIVE brain — schema DDL a code revert cannot
+  # undo — so the snapshot exists for the migration, not the code update.
+  #
+  # Engine-aware, and the DEFAULT differs by engine on purpose:
+  #   pglite   -> ALWAYS copy the brain dir. The file IS the database; this is
+  #               the only recovery net an embedded brain has.
+  #   postgres -> SKIP by default. On managed postgres (Supabase) continuous
+  #               WAL archiving is the primary net — verify with
+  #               `SHOW archive_mode` (expect `on`) and a WAL-push
+  #               archive_command. A pg_dump duplicates protection that already
+  #               exists and streams the WHOLE database over the wire: on a
+  #               multi-GB brain that is hundreds of MB of egress per update,
+  #               which is real money on a metered plan.
+  #
+  # Force one with `--backup` (or GBRAIN_SAFE_UPDATE_BACKUP=always) when you
+  # want a LOGICAL restore point — PITR rewinds the whole instance to a
+  # timestamp, while a dump lets you inspect it or restore a single table.
+  # `--no-backup` (or =never) skips both engines.
+  ENGINE="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.gbrain/config.json'))).get('engine','pglite'))" 2>/dev/null || echo pglite)"
+  if [ "$BACKUP_MODE" = never ]; then
+    say "Skipping pre-migration backup (--no-backup)."
+  elif [ "$BACKUP_MODE" != always ] && [ "$ENGINE" = postgres ]; then
+    say "Skipping pg_dump snapshot: managed postgres relies on continuous WAL archiving (--backup to force)."
+  else
     mkdir -p "$BRAIN_DIR/backups"
     TS="$(date +%Y%m%d-%H%M%S)"
     if [ "$ENGINE" = "postgres" ]; then
