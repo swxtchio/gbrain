@@ -1269,9 +1269,19 @@ function gitListSyncableFiles(
  *    index-based against a sorted list. Unstable order skips the wrong
  *    files on resume.
  */
+let warnedTopDirsRetired = false;
+
 export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): string[] {
   const strategy: SyncStrategy = opts.strategy ?? 'markdown';
   const multimodalOn = process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true';
+
+  // SWX: GBRAIN_TOP_DIRS (a process-global top-level allowlist) was retired in
+  // swxtchio/gbrain#16. It filtered every source's full-sync file list, so full
+  // sync could soft-delete another source's pages. Per-repo sources replace it.
+  if (process.env.GBRAIN_TOP_DIRS && !warnedTopDirsRetired) {
+    warnedTopDirsRetired = true;
+    console.warn('[gbrain] GBRAIN_TOP_DIRS is retired and ignored (swxtchio/gbrain#16); register per-repo sources instead.');
+  }
 
   // v0.42.x (#1159 --respect-gitignore / #1483 .gbrainignore): when `dir` is a
   // git work tree, enumerate via `git ls-files` so the walk honors
@@ -1290,17 +1300,6 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   const maxDepth = resolveMaxWalkDepth();
   const visitedInodes = new Map<string, true>();
   const files: string[] = [];
-
-  // SWX local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain to a fixed set
-  // of top-level directory names. Used when the brain root sits above many
-  // sibling repos and we only want a subset (e.g. swx-srtx,swx-spp). Applied
-  // at the brain root only (d === dir); subdirectories descend normally. This
-  // is now the single walker both the full-import and incremental-sync paths
-  // route through, so one check covers both.
-  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
-  const topDirsAllow = topDirsEnv
-    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
-    : null;
 
   function walk(d: string, depth: number): void {
     if (depth >= maxDepth) {
@@ -1343,8 +1342,6 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
       }
 
       if (stat.isDirectory()) {
-        // SWX local patch: at the brain root, restrict descent to GBRAIN_TOP_DIRS.
-        if (topDirsAllow && d === dir && !topDirsAllow.has(entry)) continue;
         const inodeKey = `${stat.dev}:${stat.ino}`;
         if (visitedInodes.has(inodeKey)) {
           console.warn(`[gbrain] walker cycle detected at ${full}; skipping`);
