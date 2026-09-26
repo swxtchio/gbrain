@@ -258,6 +258,38 @@ export function trackServerSockets(server: Pick<HttpServerLifecycle, 'on'>): Soc
 }
 
 /**
+ * SWX: resolve once `server` is bound, reject once it fails to bind.
+ * EADDRINUSE gets an actionable message: a second `serve --http` on a taken
+ * port must exit non-zero instead of idling unbound, which is how duplicate
+ * launches used to pile up as orphaned processes.
+ */
+export function waitForHttpListening(
+  server: Pick<EventSubscriber, 'once' | 'off'>,
+  port: number,
+  bind: string,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    const onError = (error: Error & { code?: string }) => {
+      server.off('listening', onListening);
+      if (error.code === 'EADDRINUSE') {
+        reject(new Error(
+          `gbrain serve --http: ${bind}:${port} is already in use (EADDRINUSE). ` +
+            `Another server is listening there — check with: ss -ltnp | grep :${port}`,
+        ));
+        return;
+      }
+      reject(error);
+    };
+    server.once('listening', onListening);
+    server.once('error', onError);
+  });
+}
+
+/**
  * Keep the HTTP server strongly referenced and make the daemon lifetime
  * explicit instead of relying on runtime-specific event-loop behavior for an
  * unobserved `app.listen()` return value. The shared abnormal-termination
@@ -3026,8 +3058,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // ---------------------------------------------------------------------------
   const clientCount = await sql`SELECT count(*)::int as count FROM oauth_clients`;
 
-  const httpServer = app.listen(port, bind, () => {
-    console.error(`
+  // SWX: wait for the socket to actually bind before printing the banner or
+  // binding the resolve-IPC socket. Express 5 routes a listen failure into the
+  // listen() callback, so a callback that ignores its argument printed the
+  // banner for a server that never bound and then waited forever.
+  const httpServer = app.listen(port, bind);
+  await waitForHttpListening(httpServer, port, bind);
+  console.error(`
 ╔══════════════════════════════════════════════════════╗
 ║  GBrain MCP Server v${VERSION.padEnd(37)}║
 ╠══════════════════════════════════════════════════════╣
@@ -3050,7 +3087,6 @@ ${bootstrapFromEnv
     ? '║  Admin Token: hidden (non-TTY log-leak guard)        ║\n║  set $GBRAIN_ADMIN_BOOTSTRAP_TOKEN, or pass          ║\n║  --print-admin-token on a trusted terminal.          ║\n╚══════════════════════════════════════════════════════╝'
     : `║  Admin Token (paste into /admin login):              ║\n║  ${bootstrapToken.substring(0, 50)}  ║\n║  ${bootstrapToken.substring(50).padEnd(50)}  ║\n╚══════════════════════════════════════════════════════╝`}
 `);
-  });
 
   // #4474: bind the resolve-IPC unix socket under --http too. This is the
   // exact posture `gbrain bootstrap harness` targets — without the listener

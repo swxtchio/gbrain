@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { EventEmitter } from 'events';
-import { waitForHttpServerLifecycle } from '../src/commands/serve-http.ts';
+import { createServer, type Server } from 'node:http';
+import express from 'express';
+import { waitForHttpListening, waitForHttpServerLifecycle } from '../src/commands/serve-http.ts';
 import { finishHttpServe } from '../src/commands/serve.ts';
 
 class FakeHttpServer extends EventEmitter {
@@ -242,5 +244,36 @@ describe('HTTP serve teardown', () => {
     // A second exit here would be the bug: production's process.exit never
     // returns, so this path is only reachable through the injected seam.
     expect(exits).toEqual([0]);
+  });
+});
+
+// SWX: a second `serve --http` on a taken port used to print its banner, never
+// bind, and idle forever (76 such orphans accumulated on one box). These drive
+// the real socket path `serve --http` uses: express().listen(port, bind).
+describe('HTTP listen readiness', () => {
+  const close = (server: Server) => new Promise<void>((resolve) => server.close(() => resolve()));
+
+  test('resolves once the server is actually bound', async () => {
+    const server = express().listen(0, '127.0.0.1');
+    await waitForHttpListening(server, 0, '127.0.0.1');
+    expect(server.listening).toBe(true);
+    await close(server);
+  });
+
+  test('rejects with an actionable EADDRINUSE error when the port is taken', async () => {
+    const holder = createServer();
+    await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', () => resolve()));
+    const port = (holder.address() as { port: number }).port;
+
+    const second = express().listen(port, '127.0.0.1');
+    const outcome = await waitForHttpListening(second, port, '127.0.0.1').then(
+      () => 'bound',
+      (error: Error) => error.message,
+    );
+
+    expect(outcome).toContain('EADDRINUSE');
+    expect(outcome).toContain(`127.0.0.1:${port}`);
+    expect(second.listening).toBe(false);
+    await close(holder);
   });
 });
