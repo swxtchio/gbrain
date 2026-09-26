@@ -63,6 +63,10 @@ TRACK_BRANCH="${GBRAIN_TRACK:-master}"
 REMOTE="${GBRAIN_REMOTE:-}"
 LINK_PATH="${GBRAIN_LINK-$HOME/.local/bin/gbrain-safe-update}"   # `-`, not `:-`: empty disables
 BRAIN_DIR="${GBRAIN_HOME:-$HOME/.gbrain}"
+# Written before the build steps and removed only after `gbrain post-upgrade`
+# succeeds, so a failed migration is retried by the next run even though the
+# branches no longer move. Holds the version the upgrade started from.
+PENDING_FILE="$BRAIN_DIR/safe-update-pending"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -258,7 +262,17 @@ fi
 # (bun install only touches gitignored node_modules; gbrain post-upgrade runs DB
 #  migrations against the brain in $BRAIN_DIR. Both run here so they match the
 #  rebased source — and so the mirror branch is never left dirty.)
-if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
+if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ] || [ -f "$PENDING_FILE" ]; then
+  if [ -f "$PENDING_FILE" ]; then
+    say "Resuming build steps a previous run left unfinished ($PENDING_FILE)."
+    UPGRADED_FROM="$(cat "$PENDING_FILE" 2>/dev/null || echo "$OLD_VERSION")"
+  else
+    UPGRADED_FROM="$OLD_VERSION"
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    mkdir -p "$BRAIN_DIR"
+    echo "$UPGRADED_FROM" > "$PENDING_FILE"
+  fi
   if command -v bun >/dev/null 2>&1; then
     say "Installing dependencies (bun install)…"
     run "bun install"
@@ -318,9 +332,16 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
 
   if command -v gbrain >/dev/null 2>&1; then
     say "Running gbrain post-upgrade (migration notes + data fixes)…"
-    run "gbrain post-upgrade" || warn "gbrain post-upgrade reported errors (review above)"
+    if ! run "gbrain post-upgrade"; then
+      # Never restart the live HTTP server onto code whose migrations failed.
+      restore_stash
+      die "gbrain post-upgrade failed — NOT restarting the HTTP MCP server.
+   Fix the error above, then re-run gbrain-safe-update: it resumes the build
+   steps ($PENDING_FILE) even though the branches no longer move."
+    fi
   else
-    warn "gbrain not on PATH — run 'gbrain post-upgrade' manually after this"
+    restore_stash
+    die "gbrain not on PATH — cannot run post-upgrade migrations. Put it on PATH and re-run."
   fi
 
   # Restart the shared HTTP MCP server so it loads the freshly-rebased code.
@@ -350,7 +371,8 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ]; then
 
   if [ "$DRY_RUN" != 1 ]; then
     mkdir -p "$BRAIN_DIR"
-    echo "$OLD_VERSION" > "$BRAIN_DIR/just-upgraded-from" 2>/dev/null || true
+    echo "$UPGRADED_FROM" > "$BRAIN_DIR/just-upgraded-from" 2>/dev/null || true
+    rm -f "$PENDING_FILE"
   fi
 fi
 
