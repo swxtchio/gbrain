@@ -202,6 +202,8 @@ describe('gbrain-safe-update', () => {
     expect(() => lstatSync(link)).toThrow(); // guard runs before the self-link and fetch
     expect(r.stderr.toString()).toContain("customization branch 'no-such-branch' does not exist");
     expect(git(install, 'rev-parse', 'master')).toBe(a);
+    // The fetch never ran: the upstream remote-tracking ref was never created.
+    expect(Bun.spawnSync(['git', 'show-ref', '--verify', '--quiet', 'refs/remotes/upstream/master'], { cwd: install }).exitCode).not.toBe(0);
     expect(callLog()).toBe('');
   });
 
