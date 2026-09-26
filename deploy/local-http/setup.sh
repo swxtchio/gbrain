@@ -29,9 +29,14 @@ systemctl --user restart "${UNIT}"
 
 echo "==> Waiting for ${HEALTH_URL} (up to 30s)"
 for _ in $(seq 1 30); do
-  # Require OUR unit to be active, not just something answering on the port.
+  # Require OUR unit's process to own the port, not just something answering
+  # there: an orphaned server on the port would otherwise pass while the
+  # restarted unit is still starting (and then fails to bind).
+  MAIN_PID="$(systemctl --user show -p MainPID --value "${UNIT}" 2>/dev/null || true)"
   if systemctl --user is-active --quiet "${UNIT}" \
-    && curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1; then
+    && [ -n "${MAIN_PID}" ] && [ "${MAIN_PID}" != 0 ] \
+    && curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1 \
+    && ss -Hltnp "sport = :${PORT}" 2>/dev/null | grep -q "pid=${MAIN_PID},"; then
     echo "==> Healthy:"
     curl -fsS --max-time 3 "${HEALTH_URL}"; echo
     echo
