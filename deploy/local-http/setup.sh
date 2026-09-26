@@ -18,13 +18,18 @@ echo "==> Installing ${UNIT} -> ${DEST_DIR}/"
 mkdir -p "${DEST_DIR}"
 cp "${SRC_DIR}/${UNIT}" "${DEST_DIR}/${UNIT}"
 
-echo "==> Reloading user systemd + enabling --now"
+echo "==> Reloading user systemd, enabling, and (re)starting"
 systemctl --user daemon-reload
-systemctl --user enable --now "${UNIT}"
+systemctl --user enable "${UNIT}"
+# restart, not `enable --now`: --now only starts an INACTIVE unit, so re-running
+# this after editing the unit left the old process and settings running.
+systemctl --user restart "${UNIT}"
 
 echo "==> Waiting for ${HEALTH_URL} (up to 30s)"
 for _ in $(seq 1 30); do
-  if curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1; then
+  # Require OUR unit to be active, not just something answering on the port.
+  if systemctl --user is-active --quiet "${UNIT}" \
+    && curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1; then
     echo "==> Healthy:"
     curl -fsS --max-time 3 "${HEALTH_URL}"; echo
     echo
