@@ -187,6 +187,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'npm_squat',
   'oauth_client_scope_health',
   'oauth_confidential_client_health',
+  // SWX: emitted when doctor's onboard phase times out on the transaction pooler.
+  'onboard_checks',
   'orphan_clones',
   'pgbouncer_prepare',
   'pglite_data_dir',

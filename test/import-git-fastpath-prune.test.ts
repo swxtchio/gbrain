@@ -77,9 +77,10 @@ describe('#2607 — git fast path excludes what incremental sync excludes', () =
     expect(files).not.toContain(join('vendor', 'pkg', 'notes.md'));
     expect(files).not.toContain(join('node_modules', 'dep', 'CHANGELOG.md'));
     expect(files).not.toContain(join('people', 'pedro.raw', 'source.md'));
-    // Metafiles stay excluded too.
+    // Metafiles stay excluded too. SWX local patch: index.md is a real folder
+    // entry page in this fork (see SYNC_SKIP_FILES in src/core/sync.ts).
     expect(files).not.toContain('README.md');
-    expect(files).not.toContain(join('notes', 'index.md'));
+    expect(files).toContain(join('notes', 'index.md'));
   });
 
   test('full-sync enumeration agrees with incremental isSyncable for every collected file', () => {
