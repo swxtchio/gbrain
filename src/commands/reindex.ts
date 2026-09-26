@@ -38,6 +38,7 @@ import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 import { loadConfig } from '../core/config.ts';
 import { BudgetExhausted, BudgetTracker } from '../core/budget/budget-tracker.ts';
 import { withBudgetTracker } from '../core/ai/gateway.ts';
+import { configureGatewayIfUninitialized } from '../core/ai/gateway.ts';
 
 interface ReindexOpts {
   /** Cap total pages reindexed. Useful for triage runs on huge brains. */
@@ -383,6 +384,9 @@ export async function runReindex(engine: BrainEngine, args: string[], runOpts: R
     }
     return { pending, pendingAfter: pending, reindexed: 0, skipped: 0, failed: 0, dryRun: true, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
   }
+
+  // Post-upgrade can reach this entry without the CLI's gateway initialization.
+  if (!opts.noEmbed) configureGatewayIfUninitialized();
 
   // W4.5: re-embedding is paid work; ask before it starts (throws the exit-3 consent refusal or cost_cap_exceeded).
   // W12 P1: the approved cap is enforced while the run spends (embedding and synopsis calls), not only checked up front.
