@@ -35,6 +35,7 @@ beforeEach(() => {
   bin = join(base, 'bin');
   mkdirSync(bin);
   stub('curl', 'exit 0');
+  stub('ss', 'echo "LISTEN 0 512 127.0.0.1:${GBRAIN_HTTP_PORT:-8787} 0.0.0.0:* users:((\\"bun\\",pid=${LISTENER_PID:-4242},fd=10))"');
   stub('journalctl', 'exit 0');
   stub('sleep', 'exit 0');
 });
@@ -45,7 +46,7 @@ afterEach(() => {
 
 describe('deploy/local-http/setup.sh', () => {
   test('installs the unit and restarts it so an edited unit takes effect', () => {
-    stub('systemctl', 'exit 0');
+    stub('systemctl', '[ "$2" = show ] && echo 4242\nexit 0');
 
     const r = runSetup();
 
@@ -67,7 +68,7 @@ describe('deploy/local-http/setup.sh', () => {
   });
 
   test('GBRAIN_HTTP_PORT reaches the installed unit, not just the health probe', () => {
-    stub('systemctl', 'exit 0');
+    stub('systemctl', '[ "$2" = show ] && echo 4242\nexit 0');
 
     const r = runSetup({ GBRAIN_HTTP_PORT: '9000' });
 
@@ -76,5 +77,14 @@ describe('deploy/local-http/setup.sh', () => {
     expect(unit).toContain('--port 9000 ');
     expect(unit).not.toContain('--port 8787');
     expect(readFileSync(calls, 'utf8')).toContain('http://127.0.0.1:9000/health');
+  });
+
+  test('does not report healthy when an orphan, not the unit, owns the port', () => {
+    stub('systemctl', '[ "$2" = show ] && echo 4242\nexit 0');
+
+    const r = runSetup({ LISTENER_PID: '999' });
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout.toString()).not.toContain('Healthy');
   });
 });

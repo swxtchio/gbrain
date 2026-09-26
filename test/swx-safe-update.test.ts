@@ -36,20 +36,34 @@ const commit = (cwd: string, file: string, body: string, message: string) => {
   return git(cwd, 'rev-parse', 'HEAD');
 };
 
-const stub = (name: string, exitCode = 0) => {
+const stub = (name: string, exitCode = 0, body = '') => {
   const path = join(bin, name);
-  writeFileSync(path, `#!/usr/bin/env bash\necho "${name} $*" >> "${calls}"\nexit ${exitCode}\n`);
+  writeFileSync(path, `#!/usr/bin/env bash\necho "${name} $*" >> "${calls}"\n${body}\nexit ${exitCode}\n`);
   chmodSync(path, 0o755);
 };
 
-const runUpdate = (install: string) =>
+// systemd user unit on UNIT_PORT with MainPID 4242; `ss` reports LISTENER_PID on the port.
+const serviceStubs = () => {
+  stub('systemctl', 0, [
+    'case "$2" in',
+    '  cat) echo "ExecStart=bun gbrain serve --http --port ${UNIT_PORT:-8787} --bind 127.0.0.1" ;;',
+    '  show) echo 4242 ;;',
+    'esac',
+  ].join('\n'));
+  stub('ss', 0, 'echo "LISTEN 0 512 127.0.0.1:${UNIT_PORT:-8787} 0.0.0.0:* users:((\\"bun\\",pid=${LISTENER_PID:-4242},fd=10))"');
+  stub('curl');
+  stub('sleep');
+};
+
+const runUpdate = (install: string, extraEnv: Record<string, string> = {}) =>
   Bun.spawnSync(['bash', SCRIPT], {
     env: {
+      ...extraEnv,
       PATH: `${bin}:/usr/bin:/bin`,
       HOME: join(base, 'home'),
       TMPDIR: base,
       GBRAIN_DIR: install,
-      GBRAIN_HOME: join(base, 'home', '.gbrain'),
+      GBRAIN_HOME: join(base, 'home'), // gbrain's convention: the PARENT of .gbrain
       GBRAIN_LINK: '',
       GIT_AUTHOR_NAME: 't',
       GIT_AUTHOR_EMAIL: 't@example.com',
@@ -68,8 +82,7 @@ beforeEach(() => {
   mkdirSync(join(base, 'home'));
   stub('bun');
   stub('gbrain');
-  stub('systemctl'); // unit "installed": `cat` succeeds, restarts are logged
-  stub('curl'); // health probe answers
+  serviceStubs();
 });
 
 afterEach(() => {
@@ -151,5 +164,39 @@ describe('gbrain-safe-update', () => {
     expect(callLog()).toContain('gbrain post-upgrade');
     expect(callLog()).toContain('systemctl --user restart gbrain-http.service');
     expect(existsSync(join(base, 'home', '.gbrain', 'safe-update-pending'))).toBe(false);
+  });
+
+  test('an unhealthy restart fails the run and keeps the resume marker', () => {
+    const { install } = forkLayout();
+
+    // An orphan (pid 999), not the unit's MainPID, owns the port.
+    const r = runUpdate(install, { LISTENER_PID: '999' });
+
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain('did not become healthy');
+    expect(r.stdout.toString()).not.toContain('Done');
+    expect(existsSync(join(base, 'home', '.gbrain', 'safe-update-pending'))).toBe(true);
+  });
+
+  test('probes the port the installed unit binds', () => {
+    const { install } = forkLayout();
+
+    const r = runUpdate(install, { UNIT_PORT: '9000' });
+
+    expect(r.exitCode).toBe(0);
+    expect(callLog()).toContain('http://127.0.0.1:9000/health');
+    expect(callLog()).not.toContain(':8787/health');
+  });
+
+  test('a missing customization branch stops before anything changes', () => {
+    const { install, a } = forkLayout();
+    git(install, 'checkout', '-q', 'master');
+
+    const r = runUpdate(install, { GBRAIN_CUSTOM: 'no-such-branch' });
+
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("customization branch 'no-such-branch' does not exist");
+    expect(git(install, 'rev-parse', 'master')).toBe(a);
+    expect(callLog()).toBe('');
   });
 });
