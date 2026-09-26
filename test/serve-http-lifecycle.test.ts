@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { EventEmitter } from 'events';
 import { createServer, type Server } from 'node:http';
 import express from 'express';
-import { waitForHttpListening, waitForHttpServerLifecycle } from '../src/commands/serve-http.ts';
+import { waitForHttpServerLifecycle } from '../src/commands/serve-http.ts';
+import { waitForHttpListening } from '../src/commands/serve-http-listen.ts';
 import { finishHttpServe } from '../src/commands/serve.ts';
 
 class FakeHttpServer extends EventEmitter {

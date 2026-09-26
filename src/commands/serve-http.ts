@@ -20,6 +20,7 @@ import { randomBytes, createHash, createHmac } from 'crypto';
 import { safeHexEqual } from '../core/timing-safe.ts';
 import { isValidRepoName } from '../core/github-source.ts';
 import { createMetricsCounters, metricsTrackingMiddleware, renderPrometheusMetrics } from './serve-http-metrics.ts';
+import { waitForHttpListening } from './serve-http-listen.ts';
 import { ADMIN_TOKEN_SHAPE } from '../core/serve-service.ts';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -255,38 +256,6 @@ export function trackServerSockets(server: Pick<HttpServerLifecycle, 'on'>): Soc
     size: () => live().length,
     destroyAll: () => { for (const socket of live()) socket.destroy(); },
   };
-}
-
-/**
- * SWX: resolve once `server` is bound, reject once it fails to bind.
- * EADDRINUSE gets an actionable message: a second `serve --http` on a taken
- * port must exit non-zero instead of idling unbound, which is how duplicate
- * launches used to pile up as orphaned processes.
- */
-export function waitForHttpListening(
-  server: Pick<EventSubscriber, 'once' | 'off'>,
-  port: number,
-  bind: string,
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const onListening = () => {
-      server.off('error', onError);
-      resolve();
-    };
-    const onError = (error: Error & { code?: string }) => {
-      server.off('listening', onListening);
-      if (error.code === 'EADDRINUSE') {
-        reject(new Error(
-          `gbrain serve --http: ${bind}:${port} is already in use (EADDRINUSE). ` +
-            `Another server is listening there — check with: ss -ltnp | grep :${port}`,
-        ));
-        return;
-      }
-      reject(error);
-    };
-    server.once('listening', onListening);
-    server.once('error', onError);
-  });
 }
 
 /**
@@ -3058,10 +3027,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // ---------------------------------------------------------------------------
   const clientCount = await sql`SELECT count(*)::int as count FROM oauth_clients`;
 
-  // SWX: wait for the socket to actually bind before printing the banner or
-  // binding the resolve-IPC socket. Express 5 routes a listen failure into the
-  // listen() callback, so a callback that ignores its argument printed the
-  // banner for a server that never bound and then waited forever.
+  // SWX: bind before the banner and resolve-IPC (see serve-http-listen.ts).
   const httpServer = app.listen(port, bind);
   await waitForHttpListening(httpServer, port, bind);
   console.error(`
