@@ -6,6 +6,8 @@
  * - A re-run with nothing to replay must NOT run the build steps (bun install,
  *   gbrain post-upgrade, HTTP service restart): an already-up-to-date rebase
  *   succeeds without moving the branch.
+ * - A failed `gbrain post-upgrade` must stop before restarting the live HTTP
+ *   server, and the next run must retry the build steps.
  *
  * bun / gbrain / systemctl are PATH stubs that append to a call log, so the
  * real install and the live brain are never touched.
@@ -66,7 +68,8 @@ beforeEach(() => {
   mkdirSync(join(base, 'home'));
   stub('bun');
   stub('gbrain');
-  stub('systemctl', 1); // "unit not installed" → restart is skipped
+  stub('systemctl'); // unit "installed": `cat` succeeds, restarts are logged
+  stub('curl'); // health probe answers
 });
 
 afterEach(() => {
@@ -125,5 +128,28 @@ describe('gbrain-safe-update', () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).toContain('nothing to replay');
     expect(callLog()).toBe('');
+  });
+
+  test('a failed post-upgrade skips the restart and the next run retries it', () => {
+    const { install } = forkLayout();
+    stub('gbrain', 1);
+
+    const failed = runUpdate(install);
+
+    expect(failed.exitCode).not.toBe(0);
+    expect(failed.stderr.toString()).toContain('NOT restarting');
+    expect(callLog()).toContain('gbrain post-upgrade');
+    expect(callLog()).not.toContain('restart');
+    expect(existsSync(join(base, 'home', '.gbrain', 'safe-update-pending'))).toBe(true);
+
+    stub('gbrain');
+    writeFileSync(calls, '');
+    const retried = runUpdate(install);
+
+    expect(retried.exitCode).toBe(0);
+    expect(retried.stdout.toString()).toContain('Resuming build steps');
+    expect(callLog()).toContain('gbrain post-upgrade');
+    expect(callLog()).toContain('systemctl --user restart gbrain-http.service');
+    expect(existsSync(join(base, 'home', '.gbrain', 'safe-update-pending'))).toBe(false);
   });
 });
