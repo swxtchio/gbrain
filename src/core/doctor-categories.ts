@@ -101,7 +101,6 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #4795 — reindex-search-vector marker still set: keyword index split
   // across two tokenizers until the resumed run finishes.
   'fts_reindex_incomplete',
-  'onboard_checks',
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
@@ -256,6 +255,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'npm_squat',
   'oauth_client_scope_health',
   'oauth_confidential_client_health',
+  // SWX: emitted when doctor's onboard phase times out on the transaction pooler.
+  'onboard_checks',
   'orphan_clones',
   'persistence_capacity',
   'worktree_refresh_stuck',

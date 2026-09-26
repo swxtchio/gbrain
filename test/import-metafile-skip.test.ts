@@ -47,7 +47,10 @@ describe('collectSyncableFiles metafile exclusion (closes #345)', () => {
     seed();
     const got = collectSyncableFiles(tmp).map(f => basename(f));
     expect(got).toContain('example-person.md');
-    for (const meta of ['README.md', 'index.md', 'log.md', 'schema.md', 'RESOLVER.md']) {
+    // SWX local patch: index.md is a real folder entry page in this fork's brain
+    // (see SYNC_SKIP_FILES in src/core/sync.ts), so it is collected.
+    expect(got).toContain('index.md');
+    for (const meta of ['README.md', 'log.md', 'schema.md', 'RESOLVER.md']) {
       expect(got).not.toContain(meta);
     }
   });
@@ -59,7 +62,7 @@ describe('collectSyncableFiles metafile exclusion (closes #345)', () => {
     const got = collectSyncableFiles(tmp).map(f => basename(f));
     expect(got).toContain('example-person.md');
     expect(got.filter(n => n === 'README.md')).toHaveLength(0);
-    expect(got).not.toContain('index.md');
+    expect(got).toContain('index.md'); // SWX local patch: see SYNC_SKIP_FILES
     expect(got).not.toContain('log.md');
     expect(got).not.toContain('schema.md');
     expect(got).not.toContain('RESOLVER.md');
