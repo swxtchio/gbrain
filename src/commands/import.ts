@@ -1282,32 +1282,25 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   // vendored data/fixtures). `--cached --others --exclude-standard` = tracked
   // PLUS untracked-not-ignored, so uncommitted source is still indexed. Non-git
   // dirs (or git unavailable) fall through to the FS walk below.
-  // SWX local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain to a fixed set
-  // of top-level directory names. Used when the brain root sits above many
-  // sibling repos and we only want a subset (e.g. swx-srtx,swx-spp). Applied
-  // at the brain root only; subdirectories descend normally and root-level
-  // files are kept. Both enumeration routes below (git ls-files and the FS
-  // walk) apply it, and both the full-import and incremental-sync paths route
-  // through this function, so one check covers every caller.
-  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
-  const topDirsAllow = topDirsEnv
-    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
-    : null;
-
   if (!opts.includeGitignored) {
     const gitFiles = gitListSyncableFiles(dir, strategy, multimodalOn, opts.onExcluded, opts.includeHidden);
-    if (gitFiles) {
-      if (!topDirsAllow) return gitFiles;
-      return gitFiles.filter((full) => {
-        const segments = relative(dir, full).split(sep);
-        return segments.length === 1 || topDirsAllow.has(segments[0]!);
-      });
-    }
+    if (gitFiles) return gitFiles;
   }
 
   const maxDepth = resolveMaxWalkDepth();
   const visitedInodes = new Map<string, true>();
   const files: string[] = [];
+
+  // SWX local patch: GBRAIN_TOP_DIRS scopes a multi-repo brain to a fixed set
+  // of top-level directory names. Used when the brain root sits above many
+  // sibling repos and we only want a subset (e.g. swx-srtx,swx-spp). Applied
+  // at the brain root only (d === dir); subdirectories descend normally. This
+  // is now the single walker both the full-import and incremental-sync paths
+  // route through, so one check covers both.
+  const topDirsEnv = process.env.GBRAIN_TOP_DIRS;
+  const topDirsAllow = topDirsEnv
+    ? new Set(topDirsEnv.split(',').map(s => s.trim()).filter(Boolean))
+    : null;
 
   function walk(d: string, depth: number): void {
     if (depth >= maxDepth) {
