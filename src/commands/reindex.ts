@@ -34,6 +34,7 @@ import { resolve } from 'path';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
 import { refreshProjectionStatistics } from '../core/search/projection-statistics.ts';
+import { configureGatewayIfUninitialized } from '../core/ai/gateway.ts';
 
 interface ReindexOpts {
   /** Cap total pages reindexed. Useful for triage runs on huge brains. */
@@ -354,6 +355,12 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
     }
     return { pending, pendingAfter: pending, reindexed: 0, skipped: 0, failed: 0, dryRun: true, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
   }
+
+  // SWX: `gbrain post-upgrade`'s chunker-bump sweep reaches here without cli.ts's
+  // engine-connect gateway init, so every page failed with "AI gateway is not
+  // configured" and was retried with backoff. Same recovery upstream uses for
+  // enrich / extract-conversation-facts (#2590); a configured gateway is kept.
+  if (!opts.noEmbed) configureGatewayIfUninitialized();
 
   const reporter = createProgress(cliOptsToProgressOptions(getCliOptions()));
   reporter.start('reindex.markdown', target);
