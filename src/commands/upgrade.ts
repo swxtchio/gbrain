@@ -815,7 +815,9 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
           const managed = await managedPersistenceEnabled(engine);
           if (!managed) {
             const { runPostUpgradeReembedPrompt } = await import('../core/post-upgrade-reembed.ts');
-            const { getEmbeddingModel } = await import('../core/ai/gateway.ts');
+            const { getEmbeddingModel, configureGatewayIfUninitialized } = await import('../core/ai/gateway.ts');
+            // Match the estimate to the gateway used for the actual re-embed.
+            configureGatewayIfUninitialized();
             let modelString = 'openai:text-embedding-3-large';
             try { modelString = getEmbeddingModel(); } catch { /* gateway not configured — keep default */ }
             const promptResult = await runPostUpgradeReembedPrompt(engine, modelString);
