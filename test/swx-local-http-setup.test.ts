@@ -59,7 +59,7 @@ describe('deploy/local-http/setup.sh', () => {
 
   test('does not report healthy while the unit is inactive, even if the port answers', () => {
     // is-active fails; everything else succeeds; curl (the port) answers.
-    stub('systemctl', '[ "$2" = is-active ] && exit 3\nexit 0');
+    stub('systemctl', '[ "$2" = show ] && echo 4242\n[ "$2" = is-active ] && exit 3\nexit 0');
 
     const r = runSetup();
 
