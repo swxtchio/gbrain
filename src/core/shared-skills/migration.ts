@@ -107,7 +107,10 @@ export async function runSharedSkillsMigration(ctx: OperationContext, options: {
       row.root = checkedContentRoot(row.root);
       if (!existsSync(row.root)) throw new OperationError('local_conflict', 'The registered canonical root is missing.');
       row.inventory = inventorySkillpack(row.root);
-      if (prior && (prior.source_incarnation !== source.incarnation || prior.root !== row.root)) throw new OperationError('local_conflict', 'The source root changed since migration inventory.');
+      // SWX: guard only a checkpoint that actually inventoried its root. A run
+      // that failed because the root was missing still persisted that missing
+      // root, which then refused every repaired path (sources set-path) forever.
+      if (prior?.inventory && (prior.source_incarnation !== source.incarnation || prior.root !== row.root)) throw new OperationError('local_conflict', 'The source root changed since migration inventory.');
       if (prior?.inventory && (!row.inventory || !sameInventory(prior.inventory.hashes, row.inventory.hashes))) {
         const original = { ...prior.inventory.hashes }, current = { ...row.inventory?.hashes };
         delete original['skillpack.json']; delete current['skillpack.json'];
