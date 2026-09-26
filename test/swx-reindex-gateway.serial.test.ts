@@ -63,3 +63,20 @@ describe('reindex --markdown without a pre-configured gateway', () => {
     expect(embedCalls).toBeGreaterThan(0);
   }, 30_000);
 });
+
+describe('post-upgrade re-embed prompt', () => {
+  // Structural (same pattern as test/fix-wave-structural.test.ts): the cost
+  // estimate must read the CONFIGURED embedding model. Without the gateway
+  // initialized first, getEmbeddingModel() throws and the prompt quotes the
+  // openai:text-embedding-3-large fallback while runReindex embeds with the
+  // configured model at a different price.
+  test('initializes the gateway before reading the model for the estimate', async () => {
+    const src = await Bun.file('src/commands/upgrade.ts').text();
+    const init = src.indexOf('configureGatewayIfUninitialized();');
+    const read = src.indexOf('modelString = getEmbeddingModel()');
+    const prompt = src.indexOf('runPostUpgradeReembedPrompt(engine, modelString)');
+    expect(init).toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(init);
+    expect(prompt).toBeGreaterThan(read);
+  });
+});

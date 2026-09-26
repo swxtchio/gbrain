@@ -643,7 +643,11 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
         // Idempotent — `runReindex` short-circuits when no pages are pending.
         try {
           const { runPostUpgradeReembedPrompt } = await import('../core/post-upgrade-reembed.ts');
-          const { getEmbeddingModel } = await import('../core/ai/gateway.ts');
+          const { getEmbeddingModel, configureGatewayIfUninitialized } = await import('../core/ai/gateway.ts');
+          // SWX: init the gateway BEFORE the estimate, so the prompt quotes the
+          // configured model — the one runReindex then embeds with — instead of
+          // the fallback below (which only applies when there is no config).
+          configureGatewayIfUninitialized();
           let modelString = 'openai:text-embedding-3-large';
           try { modelString = getEmbeddingModel(); } catch { /* gateway not configured — keep default */ }
           const promptResult = await runPostUpgradeReembedPrompt(engine, modelString);
