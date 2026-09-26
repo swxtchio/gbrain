@@ -5,7 +5,9 @@
 # Why this exists:
 #   This gbrain checkout is a swxtch FORK: `origin` mirrors upstream (garrytan/gbrain,
 #   default branch `master`) and your work lives as `SWX:` commits on the `swxtch`
-#   branch (pushed to swxtchio/gbrain). The documented upgrade (`git pull origin master`)
+#   branch (pushed to swxtchio/gbrain). When this clone's `origin` IS the fork instead,
+#   add garrytan/gbrain as an `upstream` remote: the script then tracks `upstream`
+#   automatically (see GBRAIN_REMOTE). The documented upgrade (`git pull origin master`)
 #   assumes a vanilla `master` checkout — run from `swxtch` it would merge upstream INTO
 #   your fork (or, worse, a hard reset elsewhere would discard your commits). This script
 #   instead:
@@ -20,7 +22,7 @@
 #
 #   Your work on `$CUSTOM_BRANCH` is replayed via rebase, never reset away. The rebased
 #   branch is left LOCAL: this script never force-pushes the shared fork. Review, then
-#   push yourself:  git push --force-with-lease swxtch swxtch
+#   push yourself with the command the script prints at the end.
 #
 # Usage:
 #   gbrain-safe-update [--dry-run] [--check] [--backup|--no-backup] [custom_branch]
@@ -29,7 +31,10 @@
 #   GBRAIN_DIR        install dir            (default: ~/tools/gbrain)
 #   GBRAIN_TRACK      upstream mirror branch (default: master)
 #   GBRAIN_CUSTOM     customization branch   (default: swxtch, or $1)
-#   GBRAIN_REMOTE     upstream remote        (default: origin)
+#   GBRAIN_REMOTE     upstream remote        (default: `upstream` when that remote
+#                     exists, else origin)
+#   GBRAIN_FORK_REMOTE remote the customization branch is pushed to (default:
+#                     origin when tracking `upstream`, else swxtch)
 #   GBRAIN_LINK       PATH symlink to maintain (default: ~/.local/bin/gbrain-safe-update;
 #                     set empty to disable the self-link)
 #
@@ -55,8 +60,8 @@ set -euo pipefail
 # ---- config -----------------------------------------------------------------
 INSTALL_DIR="${GBRAIN_DIR:-$HOME/tools/gbrain}"
 TRACK_BRANCH="${GBRAIN_TRACK:-master}"
-REMOTE="${GBRAIN_REMOTE:-origin}"
-LINK_PATH="${GBRAIN_LINK:-$HOME/.local/bin/gbrain-safe-update}"
+REMOTE="${GBRAIN_REMOTE:-}"
+LINK_PATH="${GBRAIN_LINK-$HOME/.local/bin/gbrain-safe-update}"   # `-`, not `:-`: empty disables
 BRAIN_DIR="${GBRAIN_HOME:-$HOME/.gbrain}"
 
 DRY_RUN=0
@@ -132,12 +137,26 @@ fi
 git show-ref --verify --quiet "refs/heads/$TRACK_BRANCH" \
   || die "tracking branch '$TRACK_BRANCH' does not exist"
 
+# A fork clone (`origin` = swxtchio/gbrain) keeps the real upstream as a
+# separate `upstream` remote; the fork's own master mirror can lag (its ruleset
+# blocks direct updates). Prefer `upstream` whenever it exists so the default
+# run never compares against a stale mirror and reports "up to date".
+if [ -z "$REMOTE" ]; then
+  if git remote get-url upstream >/dev/null 2>&1; then REMOTE=upstream; else REMOTE=origin; fi
+fi
+if [ "$REMOTE" = upstream ]; then
+  FORK_REMOTE="${GBRAIN_FORK_REMOTE:-origin}"
+else
+  FORK_REMOTE="${GBRAIN_FORK_REMOTE:-swxtch}"
+fi
+
 ORIG_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 OLD_VERSION="$(read_version)"
 
 say "Install:   $INSTALL_DIR"
 say "Version:   $OLD_VERSION"
 say "Branches:  track=$TRACK_BRANCH  custom=$CUSTOM_BRANCH  (currently on $ORIG_BRANCH)"
+say "Remotes:   upstream=$REMOTE  fork=$FORK_REMOTE"
 
 ensure_symlink
 
@@ -211,11 +230,19 @@ if git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH"; then
     say "Rebasing $CUSTOM_BRANCH ($CUSTOM_AHEAD commit(s)) onto $TRACK_BRANCH…"
     git --no-pager log --oneline "$TRACK_BRANCH..$CUSTOM_BRANCH" | sed 's/^/    /'
     run "git checkout --quiet $CUSTOM_BRANCH"
+    CUSTOM_BEFORE="$(git rev-parse "$CUSTOM_BRANCH")"
     if [ "$DRY_RUN" = 1 ]; then
       echo "  [dry-run] git rebase $TRACK_BRANCH"
     elif git rebase "$TRACK_BRANCH"; then
-      ok "Rebase clean."
-      REBASED=1
+      # A rebase onto a mirror the branch already sits on succeeds without
+      # moving it. Only a branch that actually moved needs the build steps
+      # (and the live HTTP service restart) below.
+      if [ "$(git rev-parse "$CUSTOM_BRANCH")" != "$CUSTOM_BEFORE" ]; then
+        ok "Rebase clean."
+        REBASED=1
+      else
+        ok "$CUSTOM_BRANCH already sits on $TRACK_BRANCH — nothing to replay."
+      fi
     else
       git rebase --abort
       restore_stash
@@ -343,5 +370,5 @@ fi
 [ "$STASHED" = 1 ] && warn "Auto-stash was popped — double-check your working tree."
 if [ "$REBASED" = 1 ]; then
   warn "$CUSTOM_BRANCH was rebased and now DIVERGES from its pushed fork remote."
-  echo "  Review, then publish:  git -C $INSTALL_DIR push --force-with-lease swxtch $CUSTOM_BRANCH"
+  echo "  Review, then publish:  git -C $INSTALL_DIR push --force-with-lease $FORK_REMOTE $CUSTOM_BRANCH"
 fi
