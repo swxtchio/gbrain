@@ -11,7 +11,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { _clearGatewayForTests, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
+import { _clearGatewayForTests, configureGatewayIfUninitialized, getEmbeddingModel, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
+import { runPostUpgradeReembedPrompt } from '../src/core/post-upgrade-reembed.ts';
 import { runReindex } from '../src/commands/reindex.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -78,5 +79,25 @@ describe('post-upgrade re-embed prompt', () => {
     expect(init).toBeGreaterThan(-1);
     expect(read).toBeGreaterThan(init);
     expect(prompt).toBeGreaterThan(read);
+  });
+
+  test('the estimate quotes the configured model, not the OpenAI-large fallback', async () => {
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, type, title, compiled_truth, timeline, page_kind, chunker_version)
+       VALUES ('notes/pending', 'note', 'Pending', 'Still on an older chunker.', '', 'markdown', 1)`,
+    );
+    _clearGatewayForTests(); // post-upgrade: nothing configured the gateway yet
+    const lines: string[] = [];
+
+    const model = await withEnv({ GBRAIN_HOME: home, OPENAI_API_KEY: 'sk-test' }, async () => {
+      configureGatewayIfUninitialized(); // what upgrade.ts now does before the estimate
+      const configured = getEmbeddingModel();
+      await runPostUpgradeReembedPrompt(engine, configured, { isTTY: false, write: (line) => lines.push(line) });
+      return configured;
+    });
+
+    expect(model).toBe('openai:text-embedding-3-small');
+    expect(lines.join('\n')).toContain('text-embedding-3-small');
+    expect(lines.join('\n')).not.toContain('text-embedding-3-large');
   });
 });
