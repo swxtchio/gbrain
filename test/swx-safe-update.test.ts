@@ -13,7 +13,7 @@
  * real install and the live brain are never touched.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -46,8 +46,10 @@ const stub = (name: string, exitCode = 0, body = '') => {
 const serviceStubs = () => {
   stub('systemctl', 0, [
     'case "$2" in',
-    '  cat) echo "ExecStart=bun gbrain serve --http --port ${UNIT_PORT:-8787} --bind 127.0.0.1" ;;',
-    '  show) echo 4242 ;;',
+    '  cat) echo "# ExecStart=bun gbrain serve --http --port 9999 (stale comment)" ;;',
+    '  show) if [ "$4" = MainPID ]; then echo 4242',
+    '        elif [ -n "${NO_PORT:-}" ]; then echo "{ path=bun ; argv[]=bun gbrain serve --http ; }"',
+    '        else echo "{ path=bun ; argv[]=bun gbrain serve --http --port ${UNIT_PORT:-8787} --bind 127.0.0.1 ; }"; fi ;;',
     'esac',
   ].join('\n'));
   stub('ss', 0, 'echo "LISTEN 0 512 127.0.0.1:${UNIT_PORT:-8787} 0.0.0.0:* users:((\\"bun\\",pid=${LISTENER_PID:-4242},fd=10))"');
@@ -58,7 +60,6 @@ const serviceStubs = () => {
 const runUpdate = (install: string, extraEnv: Record<string, string> = {}) =>
   Bun.spawnSync(['bash', SCRIPT], {
     env: {
-      ...extraEnv,
       PATH: `${bin}:/usr/bin:/bin`,
       HOME: join(base, 'home'),
       TMPDIR: base,
@@ -69,6 +70,7 @@ const runUpdate = (install: string, extraEnv: Record<string, string> = {}) =>
       GIT_AUTHOR_EMAIL: 't@example.com',
       GIT_COMMITTER_NAME: 't',
       GIT_COMMITTER_EMAIL: 't@example.com',
+      ...extraEnv,
     },
   });
 
@@ -192,11 +194,41 @@ describe('gbrain-safe-update', () => {
     const { install, a } = forkLayout();
     git(install, 'checkout', '-q', 'master');
 
-    const r = runUpdate(install, { GBRAIN_CUSTOM: 'no-such-branch' });
+    const link = join(base, 'home', '.local', 'bin', 'gbrain-safe-update');
+    const r = runUpdate(install, { GBRAIN_CUSTOM: 'no-such-branch', GBRAIN_LINK: link });
 
     expect(r.exitCode).not.toBe(0);
+    // lstat, not existsSync: the self-link would dangle (no script in this repo).
+    expect(() => lstatSync(link)).toThrow(); // guard runs before the self-link and fetch
     expect(r.stderr.toString()).toContain("customization branch 'no-such-branch' does not exist");
     expect(git(install, 'rev-parse', 'master')).toBe(a);
     expect(callLog()).toBe('');
+  });
+
+  test('a unit without --port falls back to 8787 instead of aborting under pipefail', () => {
+    const { install } = forkLayout();
+
+    const r = runUpdate(install, { NO_PORT: '1' });
+
+    expect(r.exitCode).toBe(0);
+    expect(callLog()).toContain('http://127.0.0.1:8787/health');
+    expect(callLog()).toContain('systemctl --user restart gbrain-http.service');
+  });
+
+  test('reads the brain config under GBRAIN_HOME, not ~/.gbrain', () => {
+    const { install } = forkLayout();
+    // HOME says postgres (would skip the backup); GBRAIN_HOME says pglite.
+    mkdirSync(join(base, 'home', '.gbrain'), { recursive: true });
+    writeFileSync(join(base, 'home', '.gbrain', 'config.json'), JSON.stringify({ engine: 'postgres', database_url: 'postgres://x' }));
+    const brain = join(base, 'brainhome', '.gbrain');
+    mkdirSync(join(brain, 'brain.pglite'), { recursive: true });
+    writeFileSync(join(brain, 'config.json'), JSON.stringify({ engine: 'pglite' }));
+
+    const r = runUpdate(install, { GBRAIN_HOME: join(base, 'brainhome') });
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.toString()).toContain('Backing up PGLite brain');
+    expect(readdirSync(join(brain, 'backups')).some((f) => f.startsWith('brain.pglite.bak-'))).toBe(true);
+    expect(existsSync(join(brain, 'just-upgraded-from'))).toBe(true);
   });
 });

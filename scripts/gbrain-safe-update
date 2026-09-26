@@ -173,6 +173,13 @@ else
   FORK_REMOTE="${GBRAIN_FORK_REMOTE:-swxtch}"
 fi
 
+# Never build, migrate, or restart the live service from the bare upstream
+# mirror: a misspelled GBRAIN_CUSTOM or an incomplete clone would silently drop
+# every fork customization this script exists to preserve.
+git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" \
+  || die "customization branch '$CUSTOM_BRANCH' does not exist — nothing was changed.
+   Check GBRAIN_CUSTOM / the argument, or fetch it: git fetch $FORK_REMOTE $CUSTOM_BRANCH:$CUSTOM_BRANCH"
+
 ORIG_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 OLD_VERSION="$(read_version)"
 
@@ -207,12 +214,6 @@ else
   git --no-pager log --oneline -15 "$TRACK_BRANCH..$UPSTREAM" | sed 's/^/    /'
 fi
 
-# Never build, migrate, or restart the live service from the bare upstream
-# mirror: a misspelled GBRAIN_CUSTOM or an incomplete clone would silently drop
-# every fork customization this script exists to preserve.
-git show-ref --verify --quiet "refs/heads/$CUSTOM_BRANCH" \
-  || die "customization branch '$CUSTOM_BRANCH' does not exist — nothing was changed.
-   Check GBRAIN_CUSTOM / the argument, or fetch it: git fetch $FORK_REMOTE $CUSTOM_BRANCH:$CUSTOM_BRANCH"
 CUSTOM_AHEAD="$(git rev-list --count "$UPSTREAM..$CUSTOM_BRANCH")"
 say "$CUSTOM_BRANCH carries $CUSTOM_AHEAD commit(s) to replay onto the new $TRACK_BRANCH."
 
@@ -375,8 +376,14 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ] || [ -f "$PENDING_FILE" ]; then
   if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$HTTP_SERVICE" >/dev/null 2>&1; then
     # Probe the port the installed unit binds (deploy/local-http/setup.sh renders
     # GBRAIN_HTTP_PORT into it), not a hardcoded default.
-    HTTP_PORT="${GBRAIN_HTTP_PORT:-$(systemctl --user cat "$HTTP_SERVICE" 2>/dev/null \
-      | grep -o -- '--port [0-9][0-9]*' | head -1 | awk '{print $2}')}"
+    # From the EFFECTIVE ExecStart argv (drop-ins applied, comments excluded), not
+    # the raw unit text. `|| true`: no --port must reach the 8787 fallback
+    # instead of aborting the run under pipefail after migrations already ran.
+    HTTP_PORT="${GBRAIN_HTTP_PORT:-}"
+    if [ -z "$HTTP_PORT" ]; then
+      HTTP_PORT="$(systemctl --user show -p ExecStart --value "$HTTP_SERVICE" 2>/dev/null \
+        | grep -m1 -o -- '--port[= ][0-9][0-9]*' | grep -o '[0-9]*$' || true)"
+    fi
     HTTP_PORT="${HTTP_PORT:-8787}"
     HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:$HTTP_PORT/health}"
     say "Restarting $HTTP_SERVICE to load the updated code…"
