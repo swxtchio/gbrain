@@ -16,7 +16,9 @@ DEST_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 echo "==> Installing ${UNIT} -> ${DEST_DIR}/"
 mkdir -p "${DEST_DIR}"
-cp "${SRC_DIR}/${UNIT}" "${DEST_DIR}/${UNIT}"
+# The committed unit binds 8787; render GBRAIN_HTTP_PORT into the installed copy
+# so the port this script probes is the port the service actually binds.
+sed "s/--port 8787 /--port ${PORT} /" "${SRC_DIR}/${UNIT}" > "${DEST_DIR}/${UNIT}"
 
 echo "==> Reloading user systemd, enabling, and (re)starting"
 systemctl --user daemon-reload

@@ -24,9 +24,9 @@ const stub = (name: string, body: string) => {
   chmodSync(path, 0o755);
 };
 
-const runSetup = () =>
+const runSetup = (extraEnv: Record<string, string> = {}) =>
   Bun.spawnSync(['bash', SETUP], {
-    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base, XDG_CONFIG_HOME: join(base, 'config') },
+    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base, XDG_CONFIG_HOME: join(base, 'config'), ...extraEnv },
   });
 
 beforeEach(() => {
@@ -64,5 +64,17 @@ describe('deploy/local-http/setup.sh', () => {
 
     expect(r.exitCode).toBe(1);
     expect(r.stdout.toString()).not.toContain('Healthy');
+  });
+
+  test('GBRAIN_HTTP_PORT reaches the installed unit, not just the health probe', () => {
+    stub('systemctl', 'exit 0');
+
+    const r = runSetup({ GBRAIN_HTTP_PORT: '9000' });
+
+    expect(r.exitCode).toBe(0);
+    const unit = readFileSync(join(base, 'config', 'systemd', 'user', 'gbrain-http.service'), 'utf8');
+    expect(unit).toContain('--port 9000 ');
+    expect(unit).not.toContain('--port 8787');
+    expect(readFileSync(calls, 'utf8')).toContain('http://127.0.0.1:9000/health');
   });
 });
