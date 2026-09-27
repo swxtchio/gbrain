@@ -35,10 +35,12 @@ drift=0
 # pairs: "<repo source>|<installed destination>|<mode>". Units are 644.
 pairs() {
   local f rel
-  # Install git's tracked mode (100755 -> 755, else 644), not the checkout's
-  # filesystem mode, which carries the umask and may have lost its exec bit.
+  # Install git's tracked mode (100755 -> 755, 100644 -> 644), not the
+  # checkout's filesystem mode, which carries the umask and may have lost its
+  # exec bit. A file without exactly one stage-0 index entry (untracked,
+  # staged for deletion, unmerged) gets `?` and stops the install below.
   for f in "$SRC"/scripts/* "$SRC"/tools/*; do
-    echo "$f|$BIN_DEST/$(basename "$f")|$(git -C "$SRC" ls-files -s -- "$f" | grep -q '^100755 ' && echo 755 || echo 644)"
+    echo "$f|$BIN_DEST/$(basename "$f")|$(git -C "$SRC" ls-files -s -- "$f" | awk '$3 == 0 {m[n++] = $1} END {print (n == 1 && m[0] == "100755") ? 755 : (n == 1 && m[0] == "100644") ? 644 : "?"}')"
   done
   while IFS= read -r f; do
     rel="${f#"$SRC/systemd/"}"
@@ -46,7 +48,16 @@ pairs() {
   done < <(find "$SRC/systemd" -type f | sort)
 }
 
-while IFS='|' read -r src dst mode; do
+mapfile -t PAIRS < <(pairs)
+untracked=$(printf '%s\n' "${PAIRS[@]}" | awk -F'|' '$3 == "?" {print "  " $1}')
+if [ -n "$untracked" ]; then
+  echo "refusing to install: not tracked in git (no single stage-0 index entry):" >&2
+  echo "$untracked" >&2
+  exit 1
+fi
+
+for pair in "${PAIRS[@]}"; do
+  IFS='|' read -r src dst mode <<< "$pair"
   # Same bytes AND same mode: a script that lost its exec bit is drift too
   # (its timer would fail with Permission denied).
   if [ -f "$dst" ] && cmp -s "$src" "$dst" && [ "$(stat -c %a "$dst")" = "$mode" ]; then
@@ -65,7 +76,7 @@ while IFS='|' read -r src dst mode; do
       echo "installed ($state): $dst"
       ;;
   esac
-done < <(pairs)
+done
 
 if [ "$MODE" = check ]; then
   [ "$drift" = 0 ] && echo "no drift: installed ops suite matches $SRC"

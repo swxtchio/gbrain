@@ -123,6 +123,23 @@ describe('install.sh', () => {
     expect(check.stdout.toString()).toContain('no drift');
   });
 
+  test('a script git does not track stops the install before anything is copied', () => {
+    // Untracked (or staged for deletion): there's no index mode to install, so
+    // guessing 644 would ship a timer target that can't execute.
+    const stray = join(OPS, 'scripts', 'zz-untracked-probe.sh');
+    writeFileSync(stray, '#!/usr/bin/env bash\n');
+    chmodSync(stray, 0o755);
+    try {
+      const r = run();
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr.toString()).toContain('zz-untracked-probe.sh');
+      expect(existsSync(join(base, '.gbrain'))).toBe(false);
+      expect(calls()).toBe('');
+    } finally {
+      rmSync(stray);
+    }
+  });
+
   test('installs git-tracked modes (755/644), not the checkout filesystem mode', () => {
     // The checkout disagrees with git both ways: a 100644 tool with group-write,
     // and a 100755 script that lost its exec bit. Both install as git tracks them.
@@ -305,18 +322,31 @@ echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) A
     expect(out).toContain('STASH=On main: theirs');
   });
 
+  test("another worktree's stash pushed mid-restore is neither applied nor dropped", () => {
+    // The foreign push lands right before we apply/pop, shifting our stash@{n}.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+g $T/r worktree add -q $T/wt2 main 2>/dev/null; echo theirs >> $T/wt2/a.txt
+eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+_rs_git() { if [ "$1" = stash ] && { [ "\${2:-}" = apply ] || [ "\${2:-}" = pop ]; } && [ ! -e $T/pushed ]; then touch $T/pushed; git -C $T/wt2 stash push -q -m theirs; fi; _rs_git_real "$@"; }
+sync_on_default_branch s15 code $T/r
+echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) A=$(tail -1 $T/r/a.txt) STASH=$(g $T/r stash list --format=%s | tr '\\n' ,)"`);
+    expect(out).toContain('restored local changes on feature');
+    expect(out).toContain('BRANCH=feature B=local');
+    expect(out).not.toContain('A=theirs');
+    expect(out).toContain('STASH=On main: theirs,');
+  });
+
   test('SIGTERM during the final restore neither re-enters it nor misreports the stash', () => {
-    // The signal lands right after `stash pop` succeeds, before the lib has
-    // forgotten the stash: a re-entered restore would look it up, not find it,
-    // and log "nothing restored" for changes that were in fact restored.
+    // The signal lands right after `stash apply` succeeds, before the drop: a
+    // re-entered restore would find the stash still listed and apply it twice.
     const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
 ( export RS_TEST_PID=$BASHPID
   eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
-  _rs_git() { _rs_git_real "$@"; local rc=$?; [ "$1" = stash ] && [ "\${2:-}" = pop ] && kill -TERM "$RS_TEST_PID"; return $rc; }
+  _rs_git() { _rs_git_real "$@"; local rc=$?; [ "$1" = stash ] && [ "\${2:-}" = apply ] && kill -TERM "$RS_TEST_PID"; return $rc; }
   sync_on_default_branch s13 code $T/r )
 echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
     expect(out).toContain('restored local changes on feature');
-    expect(out).not.toContain('no longer in');
+    expect(out).not.toMatch(/no longer in|could not restore|not dropped/);
     expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
   });
 
