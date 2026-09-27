@@ -386,6 +386,15 @@ if [ "$BEHIND" != 0 ] || [ "$REBASED" = 1 ] || [ -f "$PENDING_FILE" ]; then
     fi
     HTTP_PORT="${HTTP_PORT:-8787}"
     HTTP_HEALTH="${GBRAIN_HTTP_HEALTH:-http://127.0.0.1:$HTTP_PORT/health}"
+    # Refresh the installed liveness probe copy (deploy/local-http/setup.sh puts
+    # it in libexec so a removed checkout can't break it), so probe fixes ship
+    # with the update instead of the timer running the old copy forever.
+    LIVENESS_SRC="$INSTALL_DIR/deploy/local-http/gbrain-http-liveness.sh"
+    LIVENESS_DST="${XDG_DATA_HOME:-$HOME/.local/share}/gbrain/libexec/gbrain-http-liveness.sh"
+    if [ -f "$LIVENESS_SRC" ] && systemctl --user cat gbrain-http-liveness.service >/dev/null 2>&1; then
+      say "Refreshing the gbrain-http liveness probe…"
+      run "mkdir -p '$(dirname "$LIVENESS_DST")' && install -m 755 '$LIVENESS_SRC' '$LIVENESS_DST'"
+    fi
     say "Restarting $HTTP_SERVICE to load the updated code…"
     run "systemctl --user restart $HTTP_SERVICE"
     if [ "$DRY_RUN" != 1 ]; then

@@ -87,10 +87,13 @@ elif ! ss -Hltnp "sport = :$PORT" 2>/dev/null | grep -q "pid=$main_pid,"; then
 else
   # -w prints the HTTP status even when the body is empty; 000 = no answer.
   body="$(curl -sS --max-time "$TIMEOUT_S" -w '\n%{http_code}' "http://127.0.0.1:$PORT/health" 2>/dev/null)"
+  curl_rc=$?
   code="${body##*$'\n'}"
-  if [ "$code" = 200 ] && printf '%s' "$body" | grep -q '"status":"ok"'; then
+  # curl_rc must be 0 too: a 200 header followed by a body that stalls past the
+  # timeout still prints 200 via -w, and is a hang, not a healthy answer.
+  if [ "$curl_rc" = 0 ] && [ "$code" = 200 ] && printf '%s' "$body" | grep -q '"status":"ok"'; then
     :
-  elif [ -z "$code" ] || [ "$code" = 000 ]; then
+  elif [ "$curl_rc" != 0 ] || [ -z "$code" ] || [ "$code" = 000 ]; then
     kind=hung reason="/health did not answer within ${TIMEOUT_S}s"
   else
     kind=degraded reason="/health answered $code (database unavailable or pool saturated)"
@@ -118,6 +121,11 @@ if [ "$recent" -ge "$RESTARTS_PER_HOUR" ]; then
   echo "gbrain-http liveness: NOT restarting â€” already restarted $recent time(s) in the last hour (cap $RESTARTS_PER_HOUR); needs a human: journalctl --user -u $UNIT"
   exit 0
 fi
+if ! systemctl --user is-active --quiet "$UNIT"; then
+  echo "gbrain-http liveness: unit stopped during the check; not restarting it"
+  rm -f "$COUNTS"
+  exit 0
+fi
 if [ "$(main_pid_of)" != "$main_pid" ]; then
   echo "gbrain-http liveness: pid changed during the check; not restarting the new process"
   rm -f "$COUNTS"
@@ -128,4 +136,6 @@ echo "gbrain-http liveness: $max consecutive $kind failures for pid $main_pid â€
 echo "$now" >> "$RESTARTS"
 awk -v since=$((now - 86400)) '$1 >= since' "$RESTARTS" > "$RESTARTS.tmp" 2>/dev/null && mv "$RESTARTS.tmp" "$RESTARTS"
 rm -f "$COUNTS"
-systemctl --user restart "$UNIT"
+# try-restart: restarts only a RUNNING unit, so a stop that lands between the
+# check above and this call is never undone by starting it back up.
+systemctl --user try-restart "$UNIT"
