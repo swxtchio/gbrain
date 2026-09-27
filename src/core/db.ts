@@ -106,6 +106,29 @@ export function resolvePrepare(url: string): boolean | undefined {
   return undefined;
 }
 
+/**
+ * SWX (swxtchio/gbrain#14): turn off postgres.js pipelining behind a
+ * transaction-mode pooler.
+ *
+ * Supavisor (Supabase, port 6543) delivers only the FIRST reply of a pipelined
+ * batch. Every later query on that connection waits forever, and its backend
+ * sits in `active` or `idle in transaction` on ClientRead, holding its locks
+ * until `transaction_timeout`. postgres.js pipelines a query onto a busy
+ * connection only when every pool connection is busy, so this surfaced only
+ * under load: stuck `SELECT`s blocking migrations, and the shared HTTP
+ * server's pool wedging into 503s. Two pipelined `SELECT 1`s reproduce it.
+ *
+ * The signal is the same as resolvePrepare's: `prepare: false` means "behind
+ * a transaction pooler", so `GBRAIN_PREPARE=true` (a session-mode pooler on
+ * 6543) keeps pipelining too. `GBRAIN_MAX_PIPELINE=<n>` overrides both.
+ * Returns `undefined` when the postgres.js default (100) should stand.
+ */
+export function resolveMaxPipeline(url: string): number | undefined {
+  const env = process.env.GBRAIN_MAX_PIPELINE;
+  if (env && /^\d+$/.test(env)) return Number(env);
+  return resolvePrepare(url) === false ? 0 : undefined;
+}
+
 export function resolvePoolSize(explicit?: number): number {
   if (typeof explicit === 'number' && explicit > 0) return explicit;
   const raw = process.env.GBRAIN_POOL_SIZE;
@@ -305,6 +328,8 @@ export async function connect(config: EngineConfig): Promise<boolean> {
     if (Object.keys(timeouts).length > 0) {
       opts.connection = timeouts;
     }
+    const maxPipeline = resolveMaxPipeline(url);
+    if (maxPipeline !== undefined) opts.max_pipeline = maxPipeline;
     if (typeof prepare === 'boolean') {
       opts.prepare = prepare;
       if (!prepare) {

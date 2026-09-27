@@ -37,7 +37,7 @@
  */
 
 import postgres from 'postgres';
-import { resolvePrepare, resolveSessionTimeouts, resolvePoolSize, resolveMaxLifetimeSeconds, endPoolBounded } from './db.ts';
+import { resolvePrepare, resolveMaxPipeline, resolveSessionTimeouts, resolvePoolSize, resolveMaxLifetimeSeconds, endPoolBounded } from './db.ts';
 import { redactPgUrl } from './url-redact.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 
@@ -353,6 +353,8 @@ export class ConnectionManager {
     if (Object.keys(timeouts).length > 0) opts.connection = timeouts;
     const prepare = resolvePrepare(this.opts.url);
     if (typeof prepare === 'boolean') opts.prepare = prepare;
+    const maxPipeline = resolveMaxPipeline(this.opts.url);
+    if (maxPipeline !== undefined) opts.max_pipeline = maxPipeline;
     this._readPool = postgres(this.opts.url, opts);
     logConnectionEvent({ pool: 'read', op: 'init' });
     return this._readPool;
