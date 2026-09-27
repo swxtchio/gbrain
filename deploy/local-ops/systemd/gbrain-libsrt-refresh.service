@@ -3,6 +3,8 @@ Description=GBrain libsrt drift refresh (weekly)
 After=network-online.target
 
 [Service]
+# oneshot inherits DefaultTimeoutStartSec (90s), which kills the import/embed tail.
+TimeoutStartSec=30min
 Type=oneshot
 ExecStart=%h/.gbrain/libsrt-refresh.sh
 StandardOutput=journal

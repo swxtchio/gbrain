@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { expectedSettings, missingSettings, SQL_FILE } from '../deploy/supabase/role-settings.ts';
+import { expectedSettings, missingSettings, overriddenSettings, SQL_FILE } from '../deploy/supabase/role-settings.ts';
 
 const OPS = resolve(import.meta.dir, '../deploy/local-ops');
 const walk = (dir: string): string[] =>
@@ -43,6 +43,35 @@ describe('deploy/local-ops structure', () => {
 
   test('no hard-coded home directory (units use %h, scripts use $HOME)', () => {
     for (const f of walk(OPS)) expect({ f, hit: readFileSync(f, 'utf8').includes('/home/byates') }).toEqual({ f, hit: false });
+  });
+
+  test('every Key Vault capture is guarded (a failing az must not abort a set -e job)', () => {
+    for (const f of walk(join(OPS, 'scripts')).filter((p) => p.endsWith('.sh'))) {
+      for (const line of readFileSync(f, 'utf8').split('\n').filter((l) => /=\$\(az /.test(l))) {
+        expect({ f, line, guarded: /\|\| true\s*$/.test(line) || /^\s*if ! /.test(line) }).toEqual({ f, line, guarded: true });
+      }
+    }
+  });
+
+  test('every oneshot service declares TimeoutStartSec (the 90s default kills long embeds)', () => {
+    for (const f of walk(join(OPS, 'systemd')).filter((p) => p.endsWith('.service'))) {
+      const unit = readFileSync(f, 'utf8');
+      if (/^Type=oneshot$/m.test(unit)) expect({ f, timeout: /^TimeoutStartSec=/m.test(unit) }).toEqual({ f, timeout: true });
+    }
+  });
+
+  test('libsrt-refresh refuses to hard-reset a mirror that is dirty or off master', () => {
+    const clone = join(base, 'tools', 'libsrt');
+    mkdirSync(clone, { recursive: true });
+    const g = (...a: string[]) => Bun.spawnSync(['git', '-C', clone, '-c', 'user.email=t@e', '-c', 'user.name=t', ...a]);
+    g('init', '-q', '-b', 'master'); writeFileSync(join(clone, 'a.md'), 'a\n'); g('add', '-A'); g('commit', '-qm', 'A');
+    g('checkout', '-qb', 'local-work'); writeFileSync(join(clone, 'a.md'), 'edited\n');
+    mkdirSync(join(base, '.gbrain'), { recursive: true });
+    const r = Bun.spawnSync(['bash', join(OPS, 'scripts', 'libsrt-refresh.sh')], { env: { PATH: '/usr/bin:/bin', HOME: base } });
+    expect(r.exitCode).toBe(0);
+    expect(readFileSync(join(base, '.gbrain', 'libsrt-refresh.log'), 'utf8')).toContain('is not a clean master mirror');
+    expect(g('symbolic-ref', '--short', 'HEAD').stdout.toString().trim()).toBe('local-work');
+    expect(readFileSync(join(clone, 'a.md'), 'utf8')).toBe('edited\n');
   });
 
   test("every unit's ExecStart points at a script shipped in scripts/", () => {
@@ -77,6 +106,17 @@ describe('install.sh', () => {
     const check = run('--check');
     expect(check.exitCode).toBe(0);
     expect(check.stdout.toString()).toContain('no drift');
+  });
+
+  test('--check reports a script that lost its exec bit; a reinstall restores the mode', () => {
+    run();
+    const installed = join(base, '.gbrain', 'daily-resync.sh');
+    chmodSync(installed, 0o644);
+    const check = run('--check');
+    expect(check.exitCode).toBe(1);
+    expect(check.stdout.toString()).toContain(`drift (mode 644 != 755): ${installed}`);
+    run();
+    expect((Bun.spawnSync(['stat', '-c', '%a', installed]).stdout.toString().trim())).toBe('755');
   });
 
   test('--check reports an edited installed copy; a reinstall backs it up and restores it', () => {
@@ -170,18 +210,70 @@ sync_on_default_branch s2 code $T/r; state r; echo "B=$(tail -1 $T/r/b.txt) U=$(
     expect(m[1]).toBe(m[2]);
     expect(stub).toBe('');
   });
+  test('staged changes stay staged', () => {
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo staged >> $T/r/b.txt; g $T/r add b.txt; echo unstaged >> $T/r/a.txt
+sync_on_default_branch s8 code $T/r; echo "ST=[$(g $T/r status --porcelain | tr '\\n' ',')]"`);
+    const st = out.match(/ST=\[([^\]]*)\]/)![1]!.split(',').filter(Boolean).sort();
+    expect(st).toEqual([' M a.txt', 'M  b.txt'].sort()); // b.txt staged (col 1), a.txt unstaged (col 2)
+  });
+
+  test('changes stash cannot hold: repo skipped, an older unrelated stash is left alone', () => {
+    const { out, stub } = scenario(`mk r; echo older >> $T/r/a.txt; g $T/r stash push -q -m older-user-stash
+git init -q $T/r/nested; echo x > $T/r/nested/f; g $T/r/nested add f; g $T/r/nested commit -qm n
+sync_on_default_branch s9 code $T/r; echo "STASHES=[$(g $T/r stash list --format=%s | tr '\\n' '|')] NESTED=$(ls $T/r/nested)"`);
+    expect(out).toContain('changes git stash cannot hold');
+    expect(stub).toBe('');
+    expect(out).toContain('STASHES=[On main: older-user-stash|]');
+    expect(out).toContain('NESTED=f');
+  });
+
+  test('a failed switch-back keeps the stash instead of popping it on the wrong branch', () => {
+    // The sync leaves an untracked file on main that checking out feature would overwrite.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo tracked > $T/r/clash.txt; g $T/r add clash.txt; g $T/r commit -qm feat
+echo local >> $T/r/b.txt   # b.txt is untouched upstream, so a wrong-branch pop would apply cleanly
+cat > $T/bin/gbrain <<'STUB'
+#!/usr/bin/env bash
+echo untracked > clash.txt
+STUB
+chmod +x $T/bin/gbrain
+sync_on_default_branch s10 code $T/r; echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('your changes are safe in stash');
+    expect(out).toContain('STASHES=1');
+    expect(out).not.toContain('restored local changes');
+    expect(out).toContain('BRANCH=main'); // left where the switch-back failed, changes untouched in the stash
+  });
+
+  test('SIGTERM mid-sync still restores the branch and the changes', () => {
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+cat > $T/bin/gbrain <<'STUB'
+#!/usr/bin/env bash
+kill -TERM "$RS_TEST_PID"
+sleep 1
+STUB
+chmod +x $T/bin/gbrain
+( export RS_TEST_PID=$BASHPID; sync_on_default_branch s11 code $T/r ); echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('restored local changes on feature');
+    expect(out).toContain('BRANCH=feature B=local STASHES=0');
+  });
 });
 
 describe('deploy/supabase role settings', () => {
   const expected = expectedSettings(readFileSync(SQL_FILE, 'utf8'));
 
-  test('role-settings.sql sets both backstops', () => {
-    expect(expected).toEqual({ transaction_timeout: '30min', idle_in_transaction_session_timeout: '5min' });
+  test('role-settings.sql sets both backstops on role postgres', () => {
+    expect(expected).toEqual({ postgres: { transaction_timeout: '30min', idle_in_transaction_session_timeout: '5min' } });
+  });
+
+  test('overriddenSettings flags a database-specific row that differs', () => {
+    expect(overriddenSettings(expected.postgres!, ['transaction_timeout=0'])).toEqual(['transaction_timeout=0']);
+    expect(overriddenSettings(expected.postgres!, ['transaction_timeout=30min', 'search_path=x'])).toEqual([]);
+    expect(overriddenSettings(expected.postgres!, null)).toEqual([]);
   });
 
   test('missingSettings reports absent or different values only', () => {
-    expect(missingSettings(expected, ['search_path="$user", public', 'transaction_timeout=30min', 'idle_in_transaction_session_timeout=5min'])).toEqual([]);
-    expect(missingSettings(expected, ['transaction_timeout=10min'])).toEqual(['transaction_timeout=30min', 'idle_in_transaction_session_timeout=5min']);
-    expect(missingSettings(expected, null)).toEqual(['transaction_timeout=30min', 'idle_in_transaction_session_timeout=5min']);
+    const e = expected.postgres!;
+    expect(missingSettings(e, ['search_path="$user", public', 'transaction_timeout=30min', 'idle_in_transaction_session_timeout=5min'])).toEqual([]);
+    expect(missingSettings(e, ['transaction_timeout=10min'])).toEqual(['transaction_timeout=30min', 'idle_in_transaction_session_timeout=5min']);
+    expect(missingSettings(e, null)).toEqual(['transaction_timeout=30min', 'idle_in_transaction_session_timeout=5min']);
   });
 });
