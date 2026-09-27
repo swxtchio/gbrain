@@ -16,7 +16,8 @@
 # A repo mid-rebase/merge is skipped (stashing is unsafe there), as is a repo
 # whose changes `git stash` cannot hold (e.g. a dirty submodule). A stash that
 # cannot be restored cleanly is kept and reported, never dropped.
-# Always returns 0 so one repo can't abort the nightly job under `set -e`.
+# Always returns 0 so one repo can't abort the nightly job under `set -e`; a
+# failed `gbrain sync` is appended to RS_FAILED for the caller to report.
 
 _rs_git() { git -C "$RS_DIR" "$@"; }
 _rs_head() { _rs_git symbolic-ref --short -q HEAD || _rs_git rev-parse HEAD; }
@@ -157,8 +158,15 @@ sync_on_default_branch() {
     # Run from the repo so any cwd-based resolution agrees with --source.
     # Drop per-file progress lines, "[<phase>] N/M (P%) ..." with an optional
     # "[<source>] " prefix (src/core/progress.ts); keep everything else.
-    (cd "$RS_DIR" && gbrain sync --source "$src" --strategy "$strategy" --no-pull --yes) 2>&1 | \
-      grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' || true
+    local out rc=0
+    out=$(mktemp)
+    (cd "$RS_DIR" && gbrain sync --source "$src" --strategy "$strategy" --no-pull --yes) >"$out" 2>&1 || rc=$?
+    grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' "$out" || true
+    rm -f "$out"
+    if [ "$rc" != 0 ]; then
+      echo "  !! gbrain sync --source $src failed (exit $rc)"
+      RS_FAILED="${RS_FAILED:-} $src"
+    fi
   fi
 
   # `|| true`: a failed switch-back is already logged with the stash to recover;
