@@ -100,7 +100,11 @@ fi
 
 # Import (content_hash dedup makes unchanged files no-op)
 cd "$HOME"
-gbrain import "$STAGE" --no-embed 2>&1 | grep -E "imported|skipped|error|Import complete" | tail -5
+# Keep every per-file failure in the log: import reports them as
+# "  Skipped <path>: <reason>" / "  Warning: skipped ..." (capitalized, one per
+# file), and bulk imports don't reach sync-failures.jsonl, so this log is the
+# only record. `|| true`: no matching line must not trip `set -e`.
+gbrain import "$STAGE" --no-embed 2>&1 | grep -iE "imported|skipped|warning|error|import complete|checkpoint" || true
 gbrain embed --stale 2>&1 | tail -2
 
 # Extract links + timeline AFTER import so the graph stays current. Autopilot's
