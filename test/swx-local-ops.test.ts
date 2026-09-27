@@ -74,6 +74,21 @@ describe('deploy/local-ops structure', () => {
     expect(readFileSync(join(clone, 'a.md'), 'utf8')).toBe('edited\n');
   });
 
+  test('libsrt-refresh refuses a clean master mirror that has local commits', () => {
+    const seed = join(base, 'seed'), clone = join(base, 'tools', 'libsrt');
+    mkdirSync(seed, { recursive: true });
+    const g = (dir: string, ...a: string[]) => Bun.spawnSync(['git', '-C', dir, '-c', 'user.email=t@e', '-c', 'user.name=t', ...a]);
+    g(seed, 'init', '-q', '-b', 'master'); writeFileSync(join(seed, 'a.md'), 'a\n'); g(seed, 'add', '-A'); g(seed, 'commit', '-qm', 'A');
+    mkdirSync(join(base, 'tools'), { recursive: true });
+    Bun.spawnSync(['git', 'clone', '-q', seed, clone]);
+    writeFileSync(join(clone, 'b.md'), 'local\n'); g(clone, 'add', '-A'); g(clone, 'commit', '-qm', 'local commit');
+    const head = g(clone, 'rev-parse', 'HEAD').stdout.toString().trim();
+    mkdirSync(join(base, '.gbrain'), { recursive: true });
+    expect(Bun.spawnSync(['bash', join(OPS, 'scripts', 'libsrt-refresh.sh')], { env: { PATH: '/usr/bin:/bin', HOME: base } }).exitCode).toBe(0);
+    expect(readFileSync(join(base, '.gbrain', 'libsrt-refresh.log'), 'utf8')).toContain('1 local commit(s)); not resetting it');
+    expect(g(clone, 'rev-parse', 'HEAD').stdout.toString().trim()).toBe(head);
+  });
+
   test("every unit's ExecStart points at a script shipped in scripts/", () => {
     for (const f of walk(join(OPS, 'systemd')).filter((p) => p.endsWith('.service'))) {
       const exec = readFileSync(f, 'utf8').match(/^ExecStart=%h\/\.gbrain\/(\S+)$/m);
@@ -106,6 +121,18 @@ describe('install.sh', () => {
     const check = run('--check');
     expect(check.exitCode).toBe(0);
     expect(check.stdout.toString()).toContain('no drift');
+  });
+
+  test('installs git-tracked modes (755/644), not the checkout filesystem mode', () => {
+    const tool = join(OPS, 'tools', 'suggest-tags.py');
+    const was = Bun.spawnSync(['stat', '-c', '%a', tool]).stdout.toString().trim();
+    try {
+      chmodSync(tool, 0o664); // group-write in the checkout; git still tracks 100644
+      run();
+      expect(Bun.spawnSync(['stat', '-c', '%a', join(base, '.gbrain', 'suggest-tags.py')]).stdout.toString().trim()).toBe('644');
+    } finally {
+      chmodSync(tool, parseInt(was, 8));
+    }
   });
 
   test('--check reports a script that lost its exec bit; a reinstall restores the mode', () => {
@@ -236,11 +263,40 @@ cat > $T/bin/gbrain <<'STUB'
 echo untracked > clash.txt
 STUB
 chmod +x $T/bin/gbrain
-sync_on_default_branch s10 code $T/r; echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+set -e   # daily-resync.sh runs under set -e: a failed switch-back must not abort it
+sync_on_default_branch s10 code $T/r; echo "CONTINUED BRANCH=$(g $T/r symbolic-ref --short HEAD) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('CONTINUED');
     expect(out).toContain('your changes are safe in stash');
     expect(out).toContain('STASHES=1');
     expect(out).not.toContain('restored local changes');
     expect(out).toContain('BRANCH=main'); // left where the switch-back failed, changes untouched in the stash
+  });
+
+  test('SIGTERM right after the stash is made still restores the changes', () => {
+    // Wrap _rs_git so the signal lands immediately after `stash push`, before
+    // the lib has recorded which stash it made.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+( export RS_TEST_PID=$BASHPID
+  eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+  _rs_git() { _rs_git_real "$@"; local rc=$?; [ "$1" = stash ] && [ "\${2:-}" = push ] && kill -TERM "$RS_TEST_PID"; return $rc; }
+  sync_on_default_branch s12 code $T/r )
+echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
+  });
+
+  test('SIGTERM during the final restore neither re-enters it nor misreports the stash', () => {
+    // The signal lands right after `stash pop` succeeds, before the lib has
+    // forgotten the stash: a re-entered restore would look it up, not find it,
+    // and log "nothing restored" for changes that were in fact restored.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+( export RS_TEST_PID=$BASHPID
+  eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+  _rs_git() { _rs_git_real "$@"; local rc=$?; [ "$1" = stash ] && [ "\${2:-}" = pop ] && kill -TERM "$RS_TEST_PID"; return $rc; }
+  sync_on_default_branch s13 code $T/r )
+echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('restored local changes on feature');
+    expect(out).not.toContain('no longer in');
+    expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
   });
 
   test('SIGTERM mid-sync still restores the branch and the changes', () => {
@@ -253,7 +309,7 @@ STUB
 chmod +x $T/bin/gbrain
 ( export RS_TEST_PID=$BASHPID; sync_on_default_branch s11 code $T/r ); echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
     expect(out).toContain('restored local changes on feature');
-    expect(out).toContain('BRANCH=feature B=local STASHES=0');
+    expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
   });
 });
 

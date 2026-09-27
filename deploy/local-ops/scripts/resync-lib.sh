@@ -22,20 +22,20 @@ _rs_git() { git -C "$RS_DIR" "$@"; }
 _rs_head() { _rs_git symbolic-ref --short -q HEAD || _rs_git rev-parse HEAD; }
 
 # Restore the recorded branch, then our stash. Uses RS_DIR, RS_ORIG, RS_STASH.
+# Returns 1 only when switching back failed (the stash is then kept and named).
+# A signal that lands mid-restore does not re-enter it: the restore finishes,
+# then the job exits.
 _rs_restore() {
-  if [ "$(_rs_head)" != "$RS_ORIG" ]; then
-    if ! _rs_git checkout -q "$RS_ORIG"; then
-      if [ -n "$RS_STASH" ]; then
-        echo "  !! could not switch $RS_DIR back to $RS_ORIG; your changes are safe in stash $RS_STASH (git -C $RS_DIR stash list)"
-      else
-        echo "  !! could not switch $RS_DIR back to $RS_ORIG — do it by hand"
-      fi
-      RS_STASH=""
-      return 1
+  local ok=0 ref
+  RS_RESTORING=1
+  if [ "$(_rs_head)" != "$RS_ORIG" ] && ! _rs_git checkout -q "$RS_ORIG"; then
+    if [ -n "$RS_STASH" ]; then
+      echo "  !! could not switch $RS_DIR back to $RS_ORIG; your changes are safe in stash $RS_STASH (git -C $RS_DIR stash list)"
+    else
+      echo "  !! could not switch $RS_DIR back to $RS_ORIG — do it by hand"
     fi
-  fi
-  if [ -n "$RS_STASH" ]; then
-    local ref
+    ok=1
+  elif [ -n "$RS_STASH" ]; then
     ref="$(_rs_git stash list --format='%gd %H' | awk -v h="$RS_STASH" '$2 == h {print $1; exit}')"
     if [ -z "$ref" ]; then
       echo "  !! stash $RS_STASH is no longer in $RS_DIR's stash list; nothing restored"
@@ -44,15 +44,31 @@ _rs_restore() {
     else
       echo "  !! could not restore stash $RS_STASH cleanly in $RS_DIR; it is kept (git -C $RS_DIR stash list)"
     fi
-    RS_STASH=""
   fi
-  return 0
+  RS_STASH="" RS_RESTORING=""
+  if [ -n "$RS_SIGNALED" ]; then trap - TERM INT; exit 143; fi
+  return "$ok"
+}
+
+# On SIGTERM/SIGINT: find a stash we created but had not recorded yet (the
+# signal landed right after `stash push`), then restore everything and exit.
+_rs_on_signal() {
+  RS_SIGNALED=1
+  [ -n "$RS_RESTORING" ] && return 0   # the running _rs_restore exits when done
+  if [ -z "$RS_STASH" ] && [ -n "$RS_STASH_BEFORE" ]; then
+    local now
+    now=$(_rs_git rev-parse -q --verify refs/stash || echo none)
+    [ "$now" != "$RS_STASH_BEFORE" ] && RS_STASH="$now"
+  fi
+  _rs_restore || true
+  trap - TERM INT
+  exit 143
 }
 
 sync_on_default_branch() {
   local src="$1" strategy="$2"
-  RS_DIR="${3:-$HOME/$1}" RS_ORIG="" RS_STASH=""
-  local def gitdir ready=0 before after
+  RS_DIR="${3:-$HOME/$1}" RS_ORIG="" RS_STASH="" RS_STASH_BEFORE="" RS_RESTORING="" RS_SIGNALED=""
+  local def gitdir ready=0 after
 
   if ! _rs_git rev-parse --git-dir >/dev/null 2>&1; then
     echo "  skip: $RS_DIR is not a git checkout"; return 0
@@ -70,26 +86,28 @@ sync_on_default_branch() {
   [ -n "$def" ] || def=main
   RS_ORIG=$(_rs_head)
 
+  # From here on the repo may be off its branch with the user's work stashed:
+  # an interrupted job still restores it (including a stash made just before
+  # the signal).
+  trap _rs_on_signal TERM INT
+
   if [ -n "$(_rs_git status --porcelain)" ]; then
-    before=$(_rs_git rev-parse -q --verify refs/stash || echo none)
+    RS_STASH_BEFORE=$(_rs_git rev-parse -q --verify refs/stash || echo none)
     if ! _rs_git stash push -u -q -m "gbrain-daily-resync auto-stash $(date -Iseconds)"; then
-      echo "  skip: could not stash local changes in $RS_DIR"; return 0
+      echo "  skip: could not stash local changes in $RS_DIR"; trap - TERM INT; return 0
     fi
     after=$(_rs_git rev-parse -q --verify refs/stash || echo none)
-    [ "$after" != "$before" ] && RS_STASH="$after"
+    [ "$after" != "$RS_STASH_BEFORE" ] && RS_STASH="$after"
     if [ -n "$(_rs_git status --porcelain)" ]; then
       # Changes stash could not hold (e.g. a dirty submodule): never switch
       # branches over them. Put back what we did stash and leave the repo alone.
       echo "  skip: $RS_DIR has changes git stash cannot hold"
-      _rs_restore
+      _rs_restore || true
+      trap - TERM INT
       return 0
     fi
     [ -n "$RS_STASH" ] && echo "  stashed local changes on $RS_ORIG ($RS_STASH)"
   fi
-
-  # From here on the repo may be off its branch with the user's work stashed:
-  # an interrupted job still restores it.
-  trap '_rs_restore; trap - TERM INT; exit 143' TERM INT
 
   if ! _rs_git fetch -q origin "$def"; then
     echo "  !! fetch of origin/$def failed"
@@ -114,7 +132,9 @@ sync_on_default_branch() {
       grep -vE "^\[(import\.files|sync\.imports|embed)\.[a-z]+\] [0-9]+/[0-9]+ \(" || true
   fi
 
-  _rs_restore
+  # `|| true`: a failed switch-back is already logged with the stash to recover;
+  # under the caller's `set -e` it must not abort the remaining repos.
+  _rs_restore || true
   trap - TERM INT
   return 0
 }

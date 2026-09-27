@@ -20,8 +20,11 @@ STAGE="$HOME/.gbrain-staging/libsrt"
 cd "$CLONE"
 # $CLONE is a dedicated shallow mirror, reset hard to origin/master below. Refuse
 # if it has become anything else, so a local edit or branch is never discarded.
-if [ "$(git symbolic-ref --short -q HEAD)" != master ] || [ -n "$(git status --porcelain)" ]; then
-  echo "  skip: $CLONE is not a clean master mirror ($(git symbolic-ref --short -q HEAD || echo detached), $(git status --porcelain | wc -l) change(s)); not resetting it"
+# Local commits count too: HEAD must already be contained in the last-fetched
+# origin/master (checked before the shallow fetch, while both are local refs).
+if [ "$(git symbolic-ref --short -q HEAD)" != master ] || [ -n "$(git status --porcelain)" ] \
+  || [ "$(git rev-list --count refs/remotes/origin/master..HEAD 2>/dev/null || echo 1)" != 0 ]; then
+  echo "  skip: $CLONE is not a clean master mirror ($(git symbolic-ref --short -q HEAD || echo detached), $(git status --porcelain | wc -l) change(s), $(git rev-list --count refs/remotes/origin/master..HEAD 2>/dev/null || echo '?') local commit(s)); not resetting it"
   exit 0
 fi
 OLD_SHA=$(git rev-parse HEAD)
