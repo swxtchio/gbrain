@@ -46,7 +46,8 @@ const stub = (name: string, exitCode = 0, body = '') => {
 const serviceStubs = () => {
   stub('systemctl', 0, [
     'case "$2" in',
-    '  cat) echo "# ExecStart=bun gbrain serve --http --port 9999 (stale comment)" ;;',
+    // cat: only units listed in INSTALLED_UNITS exist (default: both).
+    '  cat) case " ${INSTALLED_UNITS:-gbrain-http.service gbrain-http-liveness.service} " in *" $3 "*) echo "# ExecStart=bun gbrain serve --http --port 9999 (stale comment)" ;; *) exit 1 ;; esac ;;',
     '  show) if [ "$4" = MainPID ]; then echo 4242',
     '        elif [ -n "${NO_PORT:-}" ]; then echo "{ path=bun ; argv[]=bun gbrain serve --http ; }"',
     '        else echo "{ path=bun ; argv[]=bun gbrain serve --http --port ${UNIT_PORT:-8787} --bind 127.0.0.1 ; }"; fi ;;',
@@ -249,6 +250,23 @@ describe('gbrain-safe-update', () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).toContain('Refreshing the gbrain-http liveness probe');
     expect(readFileSync(dst, 'utf8')).toContain('probe v2');
+  });
+
+  test('leaves the probe copy alone when the liveness unit is not installed', () => {
+    const { install } = forkLayout();
+    mkdirSync(join(install, 'deploy', 'local-http'), { recursive: true });
+    writeFileSync(join(install, 'deploy', 'local-http', 'gbrain-http-liveness.sh'), '#!/bin/sh\necho probe v2\n');
+    git(install, 'add', '-A');
+    git(install, 'commit', '-q', '-m', 'SWX: probe v2');
+    const dst = join(base, 'home', '.local', 'share', 'gbrain', 'libexec', 'gbrain-http-liveness.sh');
+    mkdirSync(join(dst, '..'), { recursive: true });
+    writeFileSync(dst, '#!/bin/sh\necho probe v1\n');
+
+    const r = runUpdate(install, { INSTALLED_UNITS: 'gbrain-http.service' });
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.toString()).not.toContain('Refreshing the gbrain-http liveness probe');
+    expect(readFileSync(dst, 'utf8')).toContain('probe v1');
   });
 });
 
