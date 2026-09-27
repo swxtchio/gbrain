@@ -369,6 +369,17 @@ echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASH=$
     expect(out).toContain('THEIRS=theirs');
   });
 
+  test('the drop whose output is parsed runs in the C locale', () => {
+    // git translates "Dropped stash@{n} (<sha>)"; the identity check parses it.
+    // (No git translations are installed on the dev box, so pin the contract.)
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+_rs_git() { [ "$1" = stash ] && [ "\${2:-}" = drop ] && echo "DROP_LOCALE=\${LC_ALL:-unset}" >> $T/locale.log; _rs_git_real "$@"; }
+LC_ALL=de_DE.UTF-8 sync_on_default_branch s17 code $T/r 2>/dev/null; cat $T/locale.log`);
+    expect(out).toContain('DROP_LOCALE=C');
+    expect(out).not.toContain('not dropped');
+  });
+
   test('SIGTERM during the final restore neither re-enters it nor misreports the stash', () => {
     // The signal lands right after `stash apply` succeeds, before the drop: a
     // re-entered restore would find the stash still listed and apply it twice.
