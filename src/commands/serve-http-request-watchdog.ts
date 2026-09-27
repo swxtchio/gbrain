@@ -60,6 +60,7 @@ export function resolveServeMcpRequestTimeoutMs(
 /** Owns per-response watchdog state and its Express request/operation lifecycle. */
 export function createServeMcpRequestWatchdogLifecycle(
   timeoutMs: number,
+  watchdogDeps: ServeMcpRequestWatchdogDeps = {},
 ): ServeMcpRequestWatchdogLifecycle {
   const requests = new WeakMap<Response, McpRequestWatchdogState>();
   const stopIfSettled = (state: McpRequestWatchdogState): void => {
@@ -72,7 +73,7 @@ export function createServeMcpRequestWatchdogLifecycle(
         serverHandlerStarted: false,
         transportCompleted: false,
         activeServerOperations: 0,
-        stop: startServeMcpRequestWatchdog(timeoutMs),
+        stop: startServeMcpRequestWatchdog(timeoutMs, watchdogDeps),
       };
       requests.set(res, state);
       // Auth failures finish before the operation handler starts. A socket

@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
+import type { Request, Response } from 'express';
 import {
   DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS,
+  createServeMcpRequestWatchdogLifecycle,
   resolveServeMcpRequestTimeoutMs,
   startServeMcpRequestWatchdog,
   SERVE_MCP_REQUEST_TIMEOUT_ENV,
@@ -36,6 +39,13 @@ function fakeClock() {
       log: (message: string) => { logs.push(message); },
     },
   };
+}
+
+async function flushLifecycleMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe('resolveServeMcpRequestTimeoutMs', () => {
@@ -130,5 +140,48 @@ describe('startServeMcpRequestWatchdog', () => {
     clock.tick();
     expect(clock.intervalClears).toBe(0);
     expect(clock.signals).toEqual([]);
+  });
+});
+
+describe('createServeMcpRequestWatchdogLifecycle', () => {
+  test('a normally completed POST disarms its deadline through the lifecycle factory', async () => {
+    const clock = fakeClock();
+    const lifecycle = createServeMcpRequestWatchdogLifecycle(1000, clock.deps);
+    const request = {} as Request;
+    const response = new EventEmitter() as unknown as Response;
+
+    lifecycle.requestWatchdog(request, response, () => {});
+    const post = lifecycle.trackTransport(async (_req, res) => {
+      await lifecycle.trackServerOperation(res, async () => {});
+    });
+    post(request, response, () => {});
+    await flushLifecycleMicrotasks();
+    response.emit('finish');
+
+    clock.now = 2000;
+    clock.tick();
+    expect(clock.signals).toEqual([]);
+    expect(clock.intervalClears).toBe(1);
+  });
+
+  test('an auth-rejected POST disarms its deadline through the lifecycle factory', async () => {
+    const clock = fakeClock();
+    const lifecycle = createServeMcpRequestWatchdogLifecycle(1000, clock.deps);
+    const request = {} as Request;
+    const response = new EventEmitter() as unknown as Response;
+    let forwardedError: unknown;
+
+    lifecycle.requestWatchdog(request, response, () => {});
+    const authorization = lifecycle.trackAuthorization((_req, _res, next) => {
+      next(new Error('unauthorized'));
+    });
+    authorization(request, response, error => { forwardedError = error; });
+    await flushLifecycleMicrotasks();
+
+    expect(forwardedError).toBeInstanceOf(Error);
+    clock.now = 2000;
+    clock.tick();
+    expect(clock.signals).toEqual([]);
+    expect(clock.intervalClears).toBe(1);
   });
 });
