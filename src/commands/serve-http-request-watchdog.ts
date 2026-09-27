@@ -1,4 +1,7 @@
 import { STALL_DEFAULT_GRACE_MS } from '../core/process-watchdog.ts';
+import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import { withBearerScopeHint } from './serve-http-oauth.ts';
 
 export const SERVE_MCP_REQUEST_TIMEOUT_ENV = 'GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_MS';
 
@@ -6,6 +9,20 @@ export const SERVE_MCP_REQUEST_TIMEOUT_ENV = 'GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_M
 export const DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS = 300_000;
 
 export type RequestWatchdogSignal = 'SIGTERM' | 'SIGKILL';
+
+type McpRequestWatchdogState = {
+  serverHandlerStarted: boolean;
+  transportCompleted: boolean;
+  activeServerOperations: number;
+  stop: () => void;
+};
+
+export interface ServeMcpRequestWatchdogLifecycle {
+  requestWatchdog: RequestHandler;
+  trackAuthorization(handler: RequestHandler): RequestHandler;
+  trackTransport(handler: (req: Request, res: Response) => Promise<void>): RequestHandler;
+  trackServerOperation<T>(res: Response, operation: () => Promise<T>): Promise<T>;
+}
 
 export interface ServeMcpRequestWatchdogDeps {
   now?: () => number;
@@ -38,6 +55,115 @@ export function resolveServeMcpRequestTimeoutMs(
   }
   if (value === 0) return 0;
   return Math.max(1, Math.floor(value));
+}
+
+/** Owns per-response watchdog state and its Express request/operation lifecycle. */
+export function createServeMcpRequestWatchdogLifecycle(
+  timeoutMs: number,
+): ServeMcpRequestWatchdogLifecycle {
+  const requests = new WeakMap<Response, McpRequestWatchdogState>();
+  const stopIfSettled = (state: McpRequestWatchdogState): void => {
+    if (state.transportCompleted && state.activeServerOperations === 0) state.stop();
+  };
+
+  const requestWatchdog: RequestHandler = (_req, res, next) => {
+    if (timeoutMs > 0) {
+      const state: McpRequestWatchdogState = {
+        serverHandlerStarted: false,
+        transportCompleted: false,
+        activeServerOperations: 0,
+        stop: startServeMcpRequestWatchdog(timeoutMs),
+      };
+      requests.set(res, state);
+      // Auth failures finish before the operation handler starts. A socket
+      // close alone is deliberately NOT completion: server work may continue.
+      res.once('finish', () => { if (!state.serverHandlerStarted) state.stop(); });
+    }
+    next();
+  };
+
+  const trackAuthorization = (handler: RequestHandler): RequestHandler => (req, res, next) => {
+    const state = requests.get(res);
+    if (!state) return handler(req, res, next);
+
+    state.activeServerOperations += 1;
+    let authorized = false;
+    const authNext: NextFunction = error => {
+      if (!error) authorized = true;
+      next(error);
+    };
+    void Promise.resolve(handler(req, res, authNext)).then(
+      () => {
+        state.activeServerOperations -= 1;
+        if (!authorized) state.transportCompleted = true;
+        stopIfSettled(state);
+      },
+      error => {
+        state.activeServerOperations -= 1;
+        state.transportCompleted = true;
+        stopIfSettled(state);
+        next(error);
+      },
+    );
+  };
+
+  const trackTransport = (
+    handler: (req: Request, res: Response) => Promise<void>,
+  ): RequestHandler => (req, res, next) => {
+    const state = requests.get(res);
+    if (state) state.serverHandlerStarted = true;
+    const completeTransport = (): void => {
+      if (!state) return;
+      state.transportCompleted = true;
+      stopIfSettled(state);
+    };
+    void handler(req, res).then(
+      completeTransport,
+      error => {
+        completeTransport();
+        next(error);
+      },
+    );
+  };
+
+  const trackServerOperation = async <T>(res: Response, operation: () => Promise<T>): Promise<T> => {
+    const state = requests.get(res);
+    if (!state) return operation();
+    state.activeServerOperations += 1;
+    try {
+      return await operation();
+    } finally {
+      state.activeServerOperations -= 1;
+      stopIfSettled(state);
+    }
+  };
+
+  return { requestWatchdog, trackAuthorization, trackTransport, trackServerOperation };
+}
+
+/** Mount stateless MCP HTTP routes and return their per-request lifecycle tracker. */
+export function mountServeMcpRequestRoutes(
+  app: Express,
+  timeoutMs: number,
+  authOptions: Parameters<typeof requireBearerAuth>[0],
+  handlePost: (req: Request, res: Response) => Promise<void>,
+): ServeMcpRequestWatchdogLifecycle {
+  // Stateless Streamable HTTP has no GET backchannel, so return the protocol
+  // response that lets clients recognize this as an MCP endpoint.
+  app.get('/mcp', (_req: Request, res: Response) => {
+    res.set('Allow', 'POST, DELETE');
+    res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
+  });
+
+  const lifecycle = createServeMcpRequestWatchdogLifecycle(timeoutMs);
+  const authorization = withBearerScopeHint(requireBearerAuth(authOptions), ['read']);
+  app.post(
+    '/mcp',
+    lifecycle.requestWatchdog,
+    lifecycle.trackAuthorization(authorization),
+    lifecycle.trackTransport(handlePost),
+  );
+  return lifecycle;
 }
 
 /** Start a request deadline; the caller stops it after transport and handler work settle. */
