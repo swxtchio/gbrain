@@ -22,9 +22,13 @@ sed "s/--port 8787 /--port ${PORT} /" "${SRC_DIR}/${UNIT}" > "${DEST_DIR}/${UNIT
 
 # Liveness probe: Restart=on-failure never catches a server that hangs while
 # holding the port, so a timer restarts the unit after consecutive failed checks.
-# The script runs from this checkout; render its absolute path into the unit.
+# Install a COPY of the probe script: running it from this checkout would break
+# silently the moment the checkout (e.g. a worktree) is removed.
 LIVENESS="gbrain-http-liveness"
-sed "s#@LIVENESS_SCRIPT@#${SRC_DIR}/${LIVENESS}.sh#" "${SRC_DIR}/${LIVENESS}.service" > "${DEST_DIR}/${LIVENESS}.service"
+LIBEXEC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/gbrain/libexec"
+mkdir -p "${LIBEXEC_DIR}"
+install -m 755 "${SRC_DIR}/${LIVENESS}.sh" "${LIBEXEC_DIR}/${LIVENESS}.sh"
+sed "s#@LIVENESS_SCRIPT@#${LIBEXEC_DIR}/${LIVENESS}.sh#" "${SRC_DIR}/${LIVENESS}.service" > "${DEST_DIR}/${LIVENESS}.service"
 cp "${SRC_DIR}/${LIVENESS}.timer" "${DEST_DIR}/${LIVENESS}.timer"
 
 echo "==> Reloading user systemd, enabling, and (re)starting"
