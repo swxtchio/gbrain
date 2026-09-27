@@ -100,11 +100,20 @@ fi
 
 # Import (content_hash dedup makes unchanged files no-op)
 cd "$HOME"
-# Keep every per-file failure in the log: import reports them as
-# "  Skipped <path>: <reason>" / "  Warning: skipped ..." (capitalized, one per
-# file), and bulk imports don't reach sync-failures.jsonl, so this log is the
-# only record. `|| true`: no matching line must not trip `set -e`.
-gbrain import "$STAGE" --no-embed 2>&1 | grep -iE "imported|skipped|warning|error|import complete|checkpoint" || true
+# Log every per-file failure. Bulk imports don't reach sync-failures.jsonl
+# (the ledger needs a git-repo import dir), and import's human output collapses
+# identical thrown errors after five, so read the complete list from --json.
+import_err=$(mktemp)
+import_json=$(gbrain import "$STAGE" --no-embed --json 2>"$import_err") || true
+if printf '%s' "$import_json" | jq -e .status >/dev/null 2>&1; then
+  printf '%s' "$import_json" | jq -r '
+    "  import: \(.status): \(.imported) imported, \(.unchanged) unchanged, \(.errors) errors (\(.duration_s)s)",
+    (.failures[] | "  failed: \(.path): \(.error | gsub("\n"; " "))")'
+else
+  echo "  !! import printed no JSON summary; its last output:"
+  tail -5 "$import_err"
+fi
+rm -f "$import_err"
 gbrain embed --stale 2>&1 | tail -2
 
 # Extract links + timeline AFTER import so the graph stays current. Autopilot's
