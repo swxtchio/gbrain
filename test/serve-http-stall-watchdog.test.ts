@@ -139,6 +139,7 @@ describe('serve --http watchdog seam (#4281)', () => {
     expect(h.installs.length).toBe(1);
     expect(h.mcpRequestTimeouts).toEqual([0]);
     expect(h.logs.join('\n')).toContain('loop watchdog armed');
+    expect(h.logs.join('\n')).toContain('request watchdog disabled');
     expect(h.logs.join('\n')).not.toContain('request watchdog armed');
   });
 
@@ -168,12 +169,18 @@ describe('serve --http watchdog seam (#4281)', () => {
     expect(joined).toContain('request watchdog armed');
     expect(joined).toContain('GBRAIN_SERVE_STALL_WATCHDOG_MS');
     expect(joined).toContain(SERVE_MCP_REQUEST_TIMEOUT_ENV);
+    expect(joined).toContain(`unset/invalid defaults to ${DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS}ms`);
+    expect(joined).toContain('if configured to restart after clean exits');
+    expect(joined).toContain('a supervisor such as this systemd unit (Restart=always) brings it back');
+    expect(joined).toContain('unsupervised foreground/manual invocation exits and stays down');
+    expect(joined).toContain('long-blocking RPCs when running unsupervised');
   });
 
-  test('stays silent when both watchdogs are off', async () => {
+  test('reports the disabled request watchdog when both watchdogs are off', async () => {
     const h = makeHarness({ stallWatchdogMs: 0, mcpRequestTimeoutMs: 0 });
     await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
     expect(h.logs.join('\n')).not.toContain('loop watchdog armed');
+    expect(h.logs.join('\n')).toContain('request watchdog disabled');
     expect(h.logs.join('\n')).not.toContain('request watchdog armed');
   });
 });

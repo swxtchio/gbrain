@@ -13,6 +13,7 @@ import {
   type WatchdogHandle,
 } from '../core/process-watchdog.ts';
 import {
+  DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS,
   resolveServeMcpRequestTimeoutMs,
   SERVE_MCP_REQUEST_TIMEOUT_ENV,
 } from './serve-http-request-watchdog.ts';
@@ -311,7 +312,18 @@ export async function runServe(
     if (mcpRequestTimeoutMs > 0) {
       httpLog(
         `[serve-http-request-watchdog] request watchdog armed for POST /mcp: ${mcpRequestTimeoutMs}ms ` +
-          `(${SERVE_MCP_REQUEST_TIMEOUT_ENV}; 0 disables)`,
+          `(${SERVE_MCP_REQUEST_TIMEOUT_ENV}; unset/invalid defaults to ${DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS}ms; 0 disables)`,
+      );
+      httpLog(
+        '[serve-http-request-watchdog] expiry terminates this process; if configured to restart after clean exits, a ' +
+          'supervisor such as this systemd unit (Restart=always) brings it back. An unsupervised foreground/manual ' +
+          'invocation exits and stays down. Raise or disable for ' +
+          'long-blocking RPCs when running unsupervised.',
+      );
+    } else {
+      httpLog(
+        `[serve-http-request-watchdog] request watchdog disabled (${SERVE_MCP_REQUEST_TIMEOUT_ENV}=0); ` +
+          'unresolved POST /mcp requests do not trigger this request-deadline exit.',
       );
     }
 

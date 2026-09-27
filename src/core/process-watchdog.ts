@@ -227,11 +227,9 @@ export function installProcessWatchdog(opts: ProcessWatchdogOpts): WatchdogHandl
  * and forgives — a fresh full stall window is required post-wake.
  * ———————————————————————————————————————————————————————————————————————— */
 
-/** Env knob for `gbrain serve --http` (opt-in; ms; 0/unset = off).
- * It bounds both main-loop starvation and an unfinished POST /mcp request.
- * Large PGLite brains can pause synchronously for tens of seconds (WASM
- * checkpoint, vacuum, large parse), while a legitimate MCP operation can also
- * take time; choose a threshold above the longest expected work in this host. */
+/** Env knob for `gbrain serve --http` main-loop lag detection (opt-in; ms; 0/unset = off).
+ * It watches loop responsiveness only. POST /mcp has a separate deadline set
+ * by GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_MS (default 300000ms; 0 disables it). */
 export const SERVE_STALL_WATCHDOG_ENV = 'GBRAIN_SERVE_STALL_WATCHDOG_MS';
 
 /**
