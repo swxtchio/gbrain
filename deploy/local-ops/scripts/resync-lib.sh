@@ -159,10 +159,16 @@ sync_on_default_branch() {
     # Drop per-file progress lines, "[<phase>] N/M (P%) ..." with an optional
     # "[<source>] " prefix (src/core/progress.ts); keep everything else.
     local out rc=0
-    out=$(mktemp)
-    (cd "$RS_DIR" && gbrain sync --source "$src" --strategy "$strategy" --no-pull --yes) >"$out" 2>&1 || rc=$?
-    grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' "$out" || true
-    rm -f "$out"
+    # Guarded: under the caller's `set -e` a bare failure here would exit with
+    # the repo still switched and the user's changes stashed.
+    if ! out=$(mktemp); then
+      echo "  !! could not create a temp file; not syncing $src"
+      rc=temp
+    else
+      (cd "$RS_DIR" && gbrain sync --source "$src" --strategy "$strategy" --no-pull --yes) >"$out" 2>&1 || rc=$?
+      grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' "$out" || true
+      rm -f "$out"
+    fi
     if [ "$rc" != 0 ]; then
       echo "  !! gbrain sync --source $src failed (exit $rc)"
       RS_FAILED="${RS_FAILED:-} $src"

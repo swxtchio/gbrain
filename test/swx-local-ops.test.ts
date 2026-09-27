@@ -531,6 +531,15 @@ sync_on_default_branch s21 code $T/r; echo "RC=$? FAILED=[$RS_FAILED] BRANCH=$(g
     expect(out).toContain('RC=0 FAILED=[ s21] BRANCH=feature B=local');
   });
 
+  test('a temp-file failure under set -e still restores the repo and records the source', () => {
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+mktemp() { return 1; }
+set -e
+sync_on_default_branch s22 code $T/r; echo "CONTINUED FAILED=[$RS_FAILED] BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('!! could not create a temp file; not syncing s22');
+    expect(out).toContain('CONTINUED FAILED=[ s22] BRANCH=feature B=local STASHES=0');
+  });
+
   test('SIGTERM mid-sync still restores the branch and the changes', () => {
     const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
 cat > $T/bin/gbrain <<'STUB'
