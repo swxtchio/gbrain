@@ -32,11 +32,12 @@ esac
 TS="$(date +%Y%m%d-%H%M%S)"
 drift=0
 
-# pairs: "<repo source>|<installed destination>|<mode>". Scripts and tools
-# keep their repo mode (the tracked exec bit), units are 644.
+# pairs: "<repo source>|<installed destination>|<mode>". Units are 644.
 pairs() {
   local f rel
-  for f in "$SRC"/scripts/* "$SRC"/tools/*; do echo "$f|$BIN_DEST/$(basename "$f")|$(stat -c %a "$f")"; done
+  # git tracks only the exec bit, so install 755 or 644 from it rather than
+  # copying the checkout's filesystem mode (which may carry group-write bits).
+  for f in "$SRC"/scripts/* "$SRC"/tools/*; do echo "$f|$BIN_DEST/$(basename "$f")|$([ -x "$f" ] && echo 755 || echo 644)"; done
   while IFS= read -r f; do
     rel="${f#"$SRC/systemd/"}"
     echo "$f|$UNIT_DEST/$rel|644"
