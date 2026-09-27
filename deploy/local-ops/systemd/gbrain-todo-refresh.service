@@ -1,0 +1,9 @@
+[Unit]
+Description=GBrain TODO/ROADMAP refresh (daily, namespaced slugs per repo)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.gbrain/todo-refresh.sh
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,10 @@
+[Unit]
+Description=GBrain bulk content refresh (weekly, all owned repos, namespaced slugs)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.gbrain/bulk-refresh.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=30min
