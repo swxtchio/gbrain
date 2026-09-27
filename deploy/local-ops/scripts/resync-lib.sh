@@ -42,16 +42,12 @@ _rs_restore() {
     fi
     ok=1
   elif [ -n "$RS_STASH" ]; then
-    # Apply by SHA, never by a selector that another worktree's push can shift;
-    # then drop it by a selector re-resolved just before the drop.
+    # Apply by SHA, never by a selector that another worktree's push can shift.
     if [ -z "$(_rs_stash_ref)" ]; then
       echo "  !! stash $RS_STASH is no longer in $RS_DIR's stash list; nothing restored"
     elif _rs_git stash apply -q --index "$RS_STASH"; then
       echo "  restored local changes on $RS_ORIG"
-      ref=$(_rs_stash_ref)
-      if [ -z "$ref" ] || ! _rs_git stash drop -q "$ref"; then
-        echo "  note: stash $RS_STASH was applied but not dropped (git -C $RS_DIR stash list)"
-      fi
+      _rs_drop_ours
     else
       echo "  !! could not restore stash $RS_STASH cleanly in $RS_DIR; it is kept (git -C $RS_DIR stash list)"
     fi
@@ -70,6 +66,22 @@ _rs_on_signal() {
   _rs_restore || true
   trap - TERM INT
   exit 143
+}
+
+# Drop our (already applied) stash. git can only drop by `stash@{n}`, and a
+# push from another worktree can shift that between lookup and drop, so check
+# what was actually dropped: if it wasn't ours, store it straight back (same
+# commit, same message) and leave ours listed.
+_rs_drop_ours() {
+  local ref dropped
+  ref=$(_rs_stash_ref)
+  dropped=$([ -n "$ref" ] && _rs_git stash drop "$ref" 2>/dev/null | sed -n 's/^Dropped .* (\([0-9a-f]*\))$/\1/p')
+  [ "$dropped" = "$RS_STASH" ] && return 0
+  if [ -n "$dropped" ]; then
+    _rs_git stash store -m "$(_rs_git log -1 --format=%s "$dropped")" "$dropped"
+    echo "  note: a concurrent stash shifted $ref; put back $dropped"
+  fi
+  echo "  note: stash $RS_STASH was applied but not dropped (git -C $RS_DIR stash list)"
 }
 
 sync_on_default_branch() {

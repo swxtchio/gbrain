@@ -140,6 +140,23 @@ describe('install.sh', () => {
     }
   });
 
+  test.each([
+    ['an untracked unit', join('systemd', 'zz-untracked-probe.service')],
+    ['an untracked script whose name holds the record delimiter', join('scripts', 'zz|stray.sh')],
+  ])('%s also stops the install before anything is copied', (_, rel) => {
+    const stray = join(OPS, rel);
+    writeFileSync(stray, '[Unit]\n');
+    try {
+      const r = run();
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr.toString()).toContain('refusing to install');
+      expect(existsSync(join(base, '.gbrain'))).toBe(false);
+      expect(existsSync(join(base, 'config'))).toBe(false);
+    } finally {
+      rmSync(stray);
+    }
+  });
+
   test('installs git-tracked modes (755/644), not the checkout filesystem mode', () => {
     // The checkout disagrees with git both ways: a 100644 tool with group-write,
     // and a 100755 script that lost its exec bit. Both install as git tracks them.
@@ -334,6 +351,22 @@ echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) A=$(tai
     expect(out).toContain('BRANCH=feature B=local');
     expect(out).not.toContain('A=theirs');
     expect(out).toContain('STASH=On main: theirs,');
+  });
+
+  test("another worktree's stash pushed right before our drop is put back, not lost", () => {
+    // git drops only by stash@{n}; the foreign push lands between our lookup
+    // and the drop, so the selector names their stash.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+g $T/r worktree add -q $T/wt2 main 2>/dev/null; echo theirs >> $T/wt2/a.txt
+eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+_rs_git() { if [ "$1" = stash ] && [ "\${2:-}" = drop ] && [ ! -e $T/pushed ]; then touch $T/pushed; git -C $T/wt2 stash push -q -m theirs; fi; _rs_git_real "$@"; }
+sync_on_default_branch s16 code $T/r
+echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASH=$(g $T/r stash list --format=%s | tr '\\n' ,) THEIRS=$(g $T/r show stash@{0}:a.txt | tail -1)"`);
+    expect(out).toContain('restored local changes on feature');
+    expect(out).toContain('BRANCH=feature B=local');
+    // Theirs survives with its message and content; ours stays listed (applied, not dropped).
+    expect(out).toMatch(/STASH=On main: theirs,On feature: gbrain-daily-resync auto-stash [^,]*,/);
+    expect(out).toContain('THEIRS=theirs');
   });
 
   test('SIGTERM during the final restore neither re-enters it nor misreports the stash', () => {
