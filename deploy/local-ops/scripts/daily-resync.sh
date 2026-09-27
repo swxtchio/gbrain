@@ -43,7 +43,10 @@ fi
 # under ~/.gbrain-staging-bulk and gbrain-imports the lot under default).
 echo ""
 echo "--- phase 1: markdown bulk-refresh ---"
-"$HOME/.gbrain/bulk-refresh.sh"
+# A failed phase is recorded, not fatal: the rest still run, and the job exits
+# nonzero at the end so systemd shows the failure.
+failed=""
+"$HOME/.gbrain/bulk-refresh.sh" || { echo "  !! phase 1 failed (exit $?); see ~/.gbrain/bulk-refresh.log"; failed="$failed bulk-refresh"; }
 
 # Phase 2: per-repo code sync. Each ID matches a `gbrain sources` row.
 # 2026-09-26: the swx-model-router-* repos are deprecated and their sources were
@@ -78,7 +81,19 @@ done
 
 echo ""
 echo "--- phase 3: embed any stale chunks ---"
-gbrain embed --stale 2>&1 | grep -vE "^\[embed\.pages\] [0-9]+/[0-9]+ \(" || true
+if embed_out=$(mktemp); then
+  gbrain embed --stale >"$embed_out" 2>&1 || failed="$failed embed"
+  grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' "$embed_out" || true
+  rm -f "$embed_out"
+else
+  echo "  !! could not create a temp file; embed skipped"
+  failed="$failed embed"
+fi
 
+[ -n "${RS_FAILED:-}" ] && failed="$failed sync:${RS_FAILED# }"
 echo ""
 echo "=== daily resync done @ $(date -Iseconds) ==="
+if [ -n "$failed" ]; then
+  echo "!! failed:$failed"
+  exit 1
+fi

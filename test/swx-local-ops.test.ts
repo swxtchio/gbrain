@@ -89,6 +89,76 @@ describe('deploy/local-ops structure', () => {
     expect(g(clone, 'rev-parse', 'HEAD').stdout.toString().trim()).toBe(head);
   });
 
+  describe('bulk-refresh and daily-resync failure reporting', () => {
+    // The scripts reset PATH to $HOME/.bun/bin first, so the gbrain stub lives
+    // there. It logs every call to calls.log; `body` decides what each prints.
+    const setup = (body: string) => {
+      const bin = join(base, '.bun', 'bin');
+      mkdirSync(join(base, '.gbrain'), { recursive: true });
+      mkdirSync(bin, { recursive: true });
+      for (const f of ['refresh-watermark.sh', 'resync-lib.sh'])
+        Bun.spawnSync(['cp', join(OPS, 'scripts', f), join(base, '.gbrain', f)]);
+      writeFileSync(join(bin, 'gbrain'), `#!/usr/bin/env bash\necho "$*" >> "${join(base, 'calls.log')}"\ncase "$1" in\n${body}\nesac\nexit 0\n`);
+      chmodSync(join(bin, 'gbrain'), 0o755);
+    };
+    const run = (script: string) => {
+      const r = Bun.spawnSync(['bash', join(OPS, 'scripts', script)], { env: { PATH: '/usr/bin:/bin', HOME: base } });
+      const read = (f: string) => (existsSync(join(base, f)) ? readFileSync(join(base, f), 'utf8') : '');
+      return { code: r.exitCode, log: read(`.gbrain/${script.replace('.sh', '.log')}`), calls: read('calls.log') };
+    };
+
+    test('every per-file failure from --json reaches the log, even 6+ identical ones, plus malformed-name skips', () => {
+      // import's stderr names only the first five identical thrown errors, and
+      // names malformed-filename exclusions only on stderr.
+      const failures = [
+        ...Array.from({ length: 6 }, (_, i) => ({ path: `swx-spp/same${i}.md`, error: 'connection reset' })),
+        { path: 'swx-srtx/bad.md', error: 'Invalid YAML frontmatter:\nline 3' },
+      ];
+      const json = JSON.stringify({ status: 'partial', duration_s: 1.5, imported: 2, skipped: 7, errors: 7, unchanged: 0, malformed_skipped: 1, failures });
+      setup(`import)\n  echo "[gbrain import] 1 file(s) skipped: malformed filename (rename to import): swx-spp/roadmap[old].md" >&2\n  echo "  (suppressing further errors)" >&2\n  echo '${json}'\n  exit 1 ;;`);
+      const r = run('bulk-refresh.sh');
+      expect(r.code).toBe(0); // a partial import is logged, not a job failure
+      expect(r.log).toContain('import: partial: 2 imported, 0 unchanged, 7 errors, 1 malformed (1.5s)');
+      for (const f of failures.slice(0, 6)) expect(r.log).toContain(`failed: ${f.path}: connection reset`);
+      expect(r.log).toContain('failed: swx-srtx/bad.md: Invalid YAML frontmatter: line 3');
+      expect(r.log).toContain('swx-spp/roadmap[old].md');
+      expect(r.log).toContain('done @');
+    });
+
+    test('an import that dies without JSON fails the job, keeps all its output, and later steps still run', () => {
+      const lines = Array.from({ length: 8 }, (_, i) => `  Skipped swx-spp/f${i}.md: boom`);
+      setup(`import)\n${lines.map(l => `  echo "${l}" >&2`).join('\n')}\n  echo "[import.files] 8/9 (88%)" >&2\n  echo "fatal: database unreachable" >&2\n  exit 2 ;;`);
+      const r = run('bulk-refresh.sh');
+      expect(r.code).toBe(1);
+      expect(r.log).toContain('!! import died without its JSON summary (exit 2)');
+      for (const l of lines) expect(r.log).toContain(l.trim());
+      expect(r.log).toContain('fatal: database unreachable');
+      expect(r.log).not.toContain('8/9 (88%)');
+      expect(r.calls).toContain('embed --stale');
+      expect(r.calls).toContain('extract timeline');
+      expect(r.log).toContain('!! failed steps: import');
+    });
+
+    test('a failing embed or extract fails the job too', () => {
+      setup(`import) echo '{"status":"success","duration_s":1,"imported":1,"unchanged":0,"errors":0,"failures":[]}' ;;\n  embed) exit 3 ;;\n  extract) [ "$2" = links ] && exit 4 ;;`);
+      const r = run('bulk-refresh.sh');
+      expect(r.code).toBe(1);
+      expect(r.log).toContain('!! failed steps: embed extract-links');
+    });
+
+    test('daily-resync keeps going after a failed phase, then exits nonzero naming it', () => {
+      setup(`embed) exit 5 ;;`); // `sources list` prints nothing: every code source is skipped
+      writeFileSync(join(base, '.gbrain', 'bulk-refresh.sh'), '#!/usr/bin/env bash\nexit 7\n');
+      chmodSync(join(base, '.gbrain', 'bulk-refresh.sh'), 0o755);
+      const r = run('daily-resync.sh');
+      expect(r.code).toBe(1);
+      expect(r.log).toContain('!! phase 1 failed (exit 7)');
+      expect(r.log).toContain('--- phase 2: per-repo code sync ---');
+      expect(r.log).toContain('=== daily resync done @');
+      expect(r.log).toContain('!! failed: bulk-refresh embed');
+    });
+  });
+
   test("every unit's ExecStart points at a script shipped in scripts/", () => {
     for (const f of walk(join(OPS, 'systemd')).filter((p) => p.endsWith('.service'))) {
       const exec = readFileSync(f, 'utf8').match(/^ExecStart=%h\/\.gbrain\/(\S+)$/m);
@@ -429,6 +499,45 @@ echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) S
     expect(out).toContain('restored local changes on feature');
     expect(out).not.toMatch(/no longer in|could not restore|not dropped/);
     expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
+  });
+
+  test("sync's per-file progress lines stay out of the log; everything else stays in", () => {
+    // Format from src/core/progress.ts: "[<phase>] N/M (P%) [note]", optionally
+    // prefixed "[<source>] ".
+    const { out } = scenario(`mk r
+cat > $T/bin/gbrain <<'STUB'
+#!/usr/bin/env bash
+echo "[sync.imports] 330/343 (96%) components/blox/x.py"
+echo "[embed.pages] 424/261 (162%) done"
+echo "[swx-abbe] [import.files] 9/10 (90%)"
+echo "[gbrain] content-sanity warn: agents (99942 bytes)"
+echo "Synced 9e6fc14e..cfce6a2a:"
+echo "  +95 added, ~248 modified"
+STUB
+chmod +x $T/bin/gbrain
+sync_on_default_branch s20 code $T/r`);
+    expect(out).not.toMatch(/\d+\/\d+ \(\d+%\)/);
+    expect(out).toContain('[gbrain] content-sanity warn: agents');
+    expect(out).toContain('Synced 9e6fc14e..cfce6a2a:');
+    expect(out).toContain('+95 added, ~248 modified');
+  });
+
+  test('a failed gbrain sync is reported and recorded in RS_FAILED, and the repo is still restored', () => {
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+printf '#!/usr/bin/env bash\\necho "sync blew up" >&2\\nexit 3\\n' > $T/bin/gbrain; chmod +x $T/bin/gbrain
+sync_on_default_branch s21 code $T/r; echo "RC=$? FAILED=[$RS_FAILED] BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt)"`);
+    expect(out).toContain('sync blew up');
+    expect(out).toContain('!! gbrain sync --source s21 failed (exit 3)');
+    expect(out).toContain('RC=0 FAILED=[ s21] BRANCH=feature B=local');
+  });
+
+  test('a temp-file failure under set -e still restores the repo and records the source', () => {
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+mktemp() { return 1; }
+set -e
+sync_on_default_branch s22 code $T/r; echo "CONTINUED FAILED=[$RS_FAILED] BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
+    expect(out).toContain('!! could not create a temp file; not syncing s22');
+    expect(out).toContain('CONTINUED FAILED=[ s22] BRANCH=feature B=local STASHES=0');
   });
 
   test('SIGTERM mid-sync still restores the branch and the changes', () => {
