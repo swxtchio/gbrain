@@ -20,6 +20,9 @@
 
 _rs_git() { git -C "$RS_DIR" "$@"; }
 _rs_head() { _rs_git symbolic-ref --short -q HEAD || _rs_git rev-parse HEAD; }
+# Our stash, found by the run-unique message: refs/stash is shared by every
+# worktree of a repo, so "the newest stash" may belong to someone else.
+_rs_our_stash() { _rs_git stash list --format='%H %s' | awk -v m="$RS_STASH_MSG" 'index($0, m) {print $1; exit}'; }
 
 # Restore the recorded branch, then our stash. Uses RS_DIR, RS_ORIG, RS_STASH.
 # Returns 1 only when switching back failed (the stash is then kept and named).
@@ -51,15 +54,11 @@ _rs_restore() {
 }
 
 # On SIGTERM/SIGINT: find a stash we created but had not recorded yet (the
-# signal landed right after `stash push`), then restore everything and exit.
+# signal landed during or right after `stash push`), then restore and exit.
 _rs_on_signal() {
   RS_SIGNALED=1
   [ -n "$RS_RESTORING" ] && return 0   # the running _rs_restore exits when done
-  if [ -z "$RS_STASH" ] && [ -n "$RS_STASH_BEFORE" ]; then
-    local now
-    now=$(_rs_git rev-parse -q --verify refs/stash || echo none)
-    [ "$now" != "$RS_STASH_BEFORE" ] && RS_STASH="$now"
-  fi
+  [ -z "$RS_STASH" ] && [ -n "$RS_STASH_MSG" ] && RS_STASH=$(_rs_our_stash)
   _rs_restore || true
   trap - TERM INT
   exit 143
@@ -67,8 +66,8 @@ _rs_on_signal() {
 
 sync_on_default_branch() {
   local src="$1" strategy="$2"
-  RS_DIR="${3:-$HOME/$1}" RS_ORIG="" RS_STASH="" RS_STASH_BEFORE="" RS_RESTORING="" RS_SIGNALED=""
-  local def gitdir ready=0 after
+  RS_DIR="${3:-$HOME/$1}" RS_ORIG="" RS_STASH="" RS_STASH_MSG="" RS_RESTORING="" RS_SIGNALED=""
+  local def gitdir ready=0
 
   if ! _rs_git rev-parse --git-dir >/dev/null 2>&1; then
     echo "  skip: $RS_DIR is not a git checkout"; return 0
@@ -92,12 +91,11 @@ sync_on_default_branch() {
   trap _rs_on_signal TERM INT
 
   if [ -n "$(_rs_git status --porcelain)" ]; then
-    RS_STASH_BEFORE=$(_rs_git rev-parse -q --verify refs/stash || echo none)
-    if ! _rs_git stash push -u -q -m "gbrain-daily-resync auto-stash $(date -Iseconds)"; then
+    RS_STASH_MSG="gbrain-daily-resync auto-stash $(date -Iseconds) run-$$-$RANDOM$RANDOM"
+    if ! _rs_git stash push -u -q -m "$RS_STASH_MSG"; then
       echo "  skip: could not stash local changes in $RS_DIR"; trap - TERM INT; return 0
     fi
-    after=$(_rs_git rev-parse -q --verify refs/stash || echo none)
-    [ "$after" != "$RS_STASH_BEFORE" ] && RS_STASH="$after"
+    RS_STASH=$(_rs_our_stash)
     if [ -n "$(_rs_git status --porcelain)" ]; then
       # Changes stash could not hold (e.g. a dirty submodule): never switch
       # branches over them. Put back what we did stash and leave the repo alone.

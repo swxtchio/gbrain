@@ -124,14 +124,20 @@ describe('install.sh', () => {
   });
 
   test('installs git-tracked modes (755/644), not the checkout filesystem mode', () => {
-    const tool = join(OPS, 'tools', 'suggest-tags.py');
-    const was = Bun.spawnSync(['stat', '-c', '%a', tool]).stdout.toString().trim();
+    // The checkout disagrees with git both ways: a 100644 tool with group-write,
+    // and a 100755 script that lost its exec bit. Both install as git tracks them.
+    const tool = join(OPS, 'tools', 'suggest-tags.py'), script = join(OPS, 'scripts', 'refresh-watermark.sh');
+    const mode = (f: string) => Bun.spawnSync(['stat', '-c', '%a', f]).stdout.toString().trim();
+    const was = [mode(tool), mode(script)];
     try {
-      chmodSync(tool, 0o664); // group-write in the checkout; git still tracks 100644
+      chmodSync(tool, 0o664);
+      chmodSync(script, 0o644);
       run();
-      expect(Bun.spawnSync(['stat', '-c', '%a', join(base, '.gbrain', 'suggest-tags.py')]).stdout.toString().trim()).toBe('644');
+      expect(mode(join(base, '.gbrain', 'suggest-tags.py'))).toBe('644');
+      expect(mode(join(base, '.gbrain', 'refresh-watermark.sh'))).toBe('755');
     } finally {
-      chmodSync(tool, parseInt(was, 8));
+      chmodSync(tool, parseInt(was[0], 8));
+      chmodSync(script, parseInt(was[1], 8));
     }
   });
 
@@ -282,6 +288,21 @@ sync_on_default_branch s10 code $T/r; echo "CONTINUED BRANCH=$(g $T/r symbolic-r
   sync_on_default_branch s12 code $T/r )
 echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASHES=$(g $T/r stash list | wc -l | tr -d ' ')"`);
     expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
+  });
+
+  test("a signal before our stash exists never adopts another worktree's stash", () => {
+    // refs/stash is shared by a repo's worktrees. Another worktree stashes,
+    // then the signal lands before our own `stash push` runs.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+g $T/r worktree add -q $T/wt2 main 2>/dev/null; echo theirs >> $T/wt2/a.txt
+( export RS_TEST_PID=$BASHPID
+  eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+  _rs_git() { if [ "$1" = stash ] && [ "\${2:-}" = push ]; then git -C $T/wt2 stash push -q -m theirs; kill -TERM "$RS_TEST_PID"; fi; _rs_git_real "$@"; }
+  sync_on_default_branch s14 code $T/r )
+echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) A=$(tail -1 $T/r/a.txt) STASH=$(g $T/r stash list --format=%s)"`);
+    expect(out).toContain('RC=143 BRANCH=feature B=local');
+    expect(out).not.toContain('A=theirs');
+    expect(out).toContain('STASH=On main: theirs');
   });
 
   test('SIGTERM during the final restore neither re-enters it nor misreports the stash', () => {
