@@ -233,4 +233,22 @@ describe('gbrain-safe-update', () => {
     expect(readdirSync(join(brain, 'backups')).some((f) => f.startsWith('brain.pglite.bak-'))).toBe(true);
     expect(existsSync(join(brain, 'just-upgraded-from'))).toBe(true);
   });
+
+  test('refreshes the installed liveness probe copy when the liveness unit is installed', () => {
+    const { install } = forkLayout();
+    mkdirSync(join(install, 'deploy', 'local-http'), { recursive: true });
+    writeFileSync(join(install, 'deploy', 'local-http', 'gbrain-http-liveness.sh'), '#!/bin/sh\necho probe v2\n');
+    git(install, 'add', '-A');
+    git(install, 'commit', '-q', '-m', 'SWX: probe v2');
+    const dst = join(base, 'home', '.local', 'share', 'gbrain', 'libexec', 'gbrain-http-liveness.sh');
+    mkdirSync(join(dst, '..'), { recursive: true });
+    writeFileSync(dst, '#!/bin/sh\necho probe v1\n');
+
+    const r = runUpdate(install);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.toString()).toContain('Refreshing the gbrain-http liveness probe');
+    expect(readFileSync(dst, 'utf8')).toContain('probe v2');
+  });
 });
+

@@ -30,12 +30,12 @@ const ago = (seconds: number) =>
 // HEALTH: ok | 503 | hang (no answer). MAIN_PID: the unit's process (default 4242).
 const probe = (env: Record<string, string> = {}) =>
   Bun.spawnSync(['bash', PROBE], {
-    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base, GBRAIN_HTTP_LIVENESS_STATE: stateDir, ACTIVE_SINCE: ago(600), ...env },
+    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base, GBRAIN_HTTP_LIVENESS_STATE: stateDir, ACTIVE_SINCE: ago(600), ACTIVE_CALLS: join(base, 'active-calls'), ...env },
   });
 
 const log = () => (existsSync(calls) ? readFileSync(calls, 'utf8') : '');
 const counts = () => (existsSync(join(stateDir, 'counts')) ? readFileSync(join(stateDir, 'counts'), 'utf8').trim() : '');
-const restarts = () => (log().match(/systemctl --user restart gbrain-http\.service/g) ?? []).length;
+const restarts = () => (log().match(/systemctl --user try-restart gbrain-http\.service/g) ?? []).length;
 
 beforeEach(() => {
   base = mkdtempSync(join(tmpdir(), 'gbrain-liveness-'));
@@ -45,7 +45,9 @@ beforeEach(() => {
   mkdirSync(bin);
   stub('systemctl', [
     'case "$2" in',
-    '  is-active) exit "${UNIT_ACTIVE:-0}" ;;',
+    '  is-active) n=$(( $(cat "$ACTIVE_CALLS" 2>/dev/null || echo 0) + 1 )); echo $n > "$ACTIVE_CALLS"',
+    '    [ -n "${STOP_ON_CALL:-}" ] && [ "$n" -ge "$STOP_ON_CALL" ] && exit 3',
+    '    exit "${UNIT_ACTIVE:-0}" ;;',
     '  show) case "$4" in',
     '      ActiveEnterTimestamp) echo "$ACTIVE_SINCE" ;;',
     '      ExecStart) echo "{ path=bun ; argv[]=bun gbrain serve --http --port ${UNIT_PORT:-8787} --bind 127.0.0.1 ; }" ;;',
@@ -60,6 +62,7 @@ beforeEach(() => {
     '  ok) printf \'{"status":"ok","version":"x","engine":"postgres"}\\n200\' ;;',
     '  503) printf \'{"error":"service_unavailable"}\\n503\' ;;',
     '  hang) printf \'\\n000\'; exit 28 ;;',
+    '  partial) printf \'{"status":"ok"\\n200\'; exit 28 ;;',
     'esac',
   ].join('\n'));
 });
@@ -145,6 +148,22 @@ describe('gbrain-http-liveness.sh', () => {
     probe({ UNIT_PORT: '9000' });
     expect(log()).toContain('http://127.0.0.1:9000/health');
     expect(log()).not.toContain(':8787/health');
+  });
+  test('a 200 whose body stalls past the timeout is a hang, not healthy', () => {
+    const r = probe({ HEALTH: 'partial' });
+    expect(r.stdout.toString()).toContain('hung check failed (1/3)');
+    expect(counts()).toBe('4242 1 0');
+  });
+
+  test('a stop that lands during the final check is never undone', () => {
+    probe({ HEALTH: 'hang' });
+    probe({ HEALTH: 'hang' });
+    rmSync(join(base, 'active-calls'), { force: true });
+    // is-active passes at the start of this run, then the operator's stop lands.
+    const r = probe({ HEALTH: 'hang', STOP_ON_CALL: '2' });
+    expect(r.stdout.toString()).toContain('unit stopped during the check; not restarting it');
+    expect(restarts()).toBe(0);
+    expect(log()).not.toMatch(/systemctl --user (try-)?restart/);
   });
 });
 
