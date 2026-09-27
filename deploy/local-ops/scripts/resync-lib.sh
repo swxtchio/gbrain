@@ -155,8 +155,10 @@ sync_on_default_branch() {
   if [ "$ready" = 1 ]; then
     echo "  syncing $src @ $(_rs_git rev-parse --short HEAD) ($def)"
     # Run from the repo so any cwd-based resolution agrees with --source.
+    # Drop per-file progress lines, "[<phase>] N/M (P%) ..." with an optional
+    # "[<source>] " prefix (src/core/progress.ts); keep everything else.
     (cd "$RS_DIR" && gbrain sync --source "$src" --strategy "$strategy" --no-pull --yes) 2>&1 | \
-      grep -vE "^\[(import\.files|sync\.imports|embed)\.[a-z]+\] [0-9]+/[0-9]+ \(" || true
+      grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' || true
   fi
 
   # `|| true`: a failed switch-back is already logged with the stash to recover;

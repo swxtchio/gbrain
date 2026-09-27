@@ -467,6 +467,27 @@ echo "RC=$? BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) S
     expect(out).toContain('RC=143 BRANCH=feature B=local STASHES=0');
   });
 
+  test("sync's per-file progress lines stay out of the log; everything else stays in", () => {
+    // Format from src/core/progress.ts: "[<phase>] N/M (P%) [note]", optionally
+    // prefixed "[<source>] ".
+    const { out } = scenario(`mk r
+cat > $T/bin/gbrain <<'STUB'
+#!/usr/bin/env bash
+echo "[sync.imports] 330/343 (96%) components/blox/x.py"
+echo "[embed.pages] 424/261 (162%) done"
+echo "[swx-abbe] [import.files] 9/10 (90%)"
+echo "[gbrain] content-sanity warn: agents (99942 bytes)"
+echo "Synced 9e6fc14e..cfce6a2a:"
+echo "  +95 added, ~248 modified"
+STUB
+chmod +x $T/bin/gbrain
+sync_on_default_branch s20 code $T/r`);
+    expect(out).not.toMatch(/\d+\/\d+ \(\d+%\)/);
+    expect(out).toContain('[gbrain] content-sanity warn: agents');
+    expect(out).toContain('Synced 9e6fc14e..cfce6a2a:');
+    expect(out).toContain('+95 added, ~248 modified');
+  });
+
   test('SIGTERM mid-sync still restores the branch and the changes', () => {
     const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
 cat > $T/bin/gbrain <<'STUB'
