@@ -29,11 +29,10 @@ Environment=GBRAIN_POOL_SIZE=6
 # here) and any direct-pool op hangs (e.g. `gbrain doctor`). Secret stays in the
 # 0600 env file, not in this committed unit. The leading '-' = optional file.
 EnvironmentFile=-%h/.gbrain/http.env
-# SWX: in-process event-loop stall watchdog (SIGTERM after 60s of main-loop
-# stall, SIGKILL 30s later) so a hung loop exits and Restart= brings it back.
-# The external gbrain-http-liveness.timer covers hangs the loop can't see
-# (e.g. a stuck database pool). Floor is 15s; 60s keeps heavy synchronous work
-# from tripping it.
+# SWX: the in-process watchdog breaks synchronous event-loop stalls that stop
+# the server from answering requests. It does not track individual /mcp request
+# completion. The external probe checks /health and cannot see a stalled /mcp
+# request when that endpoint remains healthy.
 Environment=GBRAIN_SERVE_STALL_WATCHDOG_MS=60000
 ExecStart=%h/.bun/bin/bun %h/.bun/bin/gbrain serve --http --port 8787 --bind 127.0.0.1
 # always, not on-failure: the stall watchdog SIGTERMs the server, and that

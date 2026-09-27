@@ -67,31 +67,13 @@ changes like editing `~/.gbrain/config.json`.
 
 ## Hang recovery (liveness)
 
-`Restart=` only reacts to the server **exiting**. A server that hangs while
-still holding the port is never restarted by it; on 2026-09-26 one went silent
-from 19:29Z to 00:51Z and every MCP call timed out. Three layers cover that:
+`Restart=always` acts after the server process exits. The in-process watchdog detects a main event loop that stops sending worker pets; it does not track whether each MCP request completes. The September 2026 incident symptoms did not establish which failure class occurred. A subprocess reproduction against the real `gbrain serve --http` path holds an authenticated `get_page` request open after it reaches the operation handler: the client receives HTTP headers but no completed MCP response, `/health` still returns `ok`, and the serve process stays alive beyond the configured loop-stall threshold. This proves that an unanswered request with a responsive event loop and healthy `/health` is not recovered by the configured watchdog or the external probe. A request stall that also makes `/health` hang or report a degraded result follows a different probe path.
 
-- **`Restart=always`.** A stall-watchdog SIGTERM can end in a clean exit 0,
-  which `on-failure` would leave down. An explicit `systemctl stop` still stops
-  the unit.
-- **In-process stall watchdog.** The unit sets `GBRAIN_SERVE_STALL_WATCHDOG_MS=60000`.
-  After 60s of main-loop stall the server SIGTERMs itself, then SIGKILLs 30s
-  later.
-- **External liveness probe.** `gbrain-http-liveness.timer` runs the probe every
-  minute. `setup.sh` installs a copy under `~/.local/share/gbrain/libexec/`, so
-  removing a checkout can't disable it. Each check of the unit's *current*
-  MainPID falls into one of three results:
-  - **ok:** the unit's own process owns the port and `/health` answers `ok`
-    within 10s.
-  - **hung:** no answer, or another process owns the port. The unit is
-    restarted after **3** consecutive hung checks.
-  - **degraded:** `/health` answers 503 (its `SELECT 1` through the pool
-    failed), so the database may be down or the pool saturated. The unit is
-    restarted only after **10** consecutive degraded checks.
+For a synchronous main-loop stall, `GBRAIN_SERVE_STALL_WATCHDOG_MS` in `gbrain-http.service` is the detection threshold; `STALL_DEFAULT_GRACE_MS` in `src/core/process-watchdog.ts` is the additional interval before the worker sends SIGKILL if the loop has not recovered. The worker checks at its configured cadence, so detection can lag the threshold by one check. After process exit, `Restart=always` and `RestartSec` in the unit govern systemd's restart attempt. For one successful cold restart, the approximate time from stall to healthy `/health` is threshold + grace + worker-check cadence + restart delay + cold-bind time. The cold-bind sample below uses in-memory PGLite and is not a bound for the installed unit's remote Postgres startup.
 
-  Counters reset when the process changes. Restarts are capped at **3 per
-  hour**. The probe leaves an inactive unit alone and skips the first 120s after
-  a start. Knobs are `GBRAIN_HTTP_LIVENESS_*` (see the script header).
+Dated observation: on 2026-09-27, at repository commit `ca58fa3c70d522b02433e5b53c0a72f49031415f` with Bun 1.4.2, `GBRAIN_TEST_COLD_BIND_REPORT=1 bun test test/process-watchdog.serial.test.ts` measured 4861 ms from the fixture's `coldStartAt` timestamp to its first successful `/health` response after creating a fresh in-memory PGLite schema. This is one sample, not a startup bound for the remote Postgres unit; run the same command to collect a new local sample. No successful systemd restart-to-health duration has been measured for the installed backend.
+
+The external `gbrain-http-liveness.timer` checks that the unit's MainPID owns the port and that `/health` responds. A missing listener or unresponsive `/health` increments the probe's `hung` counter; an unhealthy `/health` response increments its `degraded` counter. It restarts only when the configured `GBRAIN_HTTP_LIVENESS_*` threshold is reached, as defined in `gbrain-http-liveness.sh`. A request-local stall with healthy `/health` remains invisible to this timer and needs separate incident recovery work.
 
 ```bash
 systemctl --user list-timers gbrain-http-liveness.timer
