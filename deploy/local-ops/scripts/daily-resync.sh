@@ -81,10 +81,14 @@ done
 
 echo ""
 echo "--- phase 3: embed any stale chunks ---"
-embed_out=$(mktemp)
-gbrain embed --stale >"$embed_out" 2>&1 || failed="$failed embed"
-grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' "$embed_out" || true
-rm -f "$embed_out"
+if embed_out=$(mktemp); then
+  gbrain embed --stale >"$embed_out" 2>&1 || failed="$failed embed"
+  grep -vE '^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)' "$embed_out" || true
+  rm -f "$embed_out"
+else
+  echo "  !! could not create a temp file; embed skipped"
+  failed="$failed embed"
+fi
 
 [ -n "${RS_FAILED:-}" ] && failed="$failed sync:${RS_FAILED# }"
 echo ""
