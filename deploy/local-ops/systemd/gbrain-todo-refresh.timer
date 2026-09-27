@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily TODO/ROADMAP refresh — 02:30 local
+Requires=gbrain-todo-refresh.service
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

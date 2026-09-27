@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily GBrain resync — daily 03:30 local
+Requires=gbrain-daily-resync.service
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
