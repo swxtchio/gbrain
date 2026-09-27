@@ -74,6 +74,8 @@ describe('client pools', () => {
 
   // These two pools run `SELECT 1` before returning, so they can't be built
   // offline; guard the wiring at the source instead.
+  // test-reads-source-ok: these pools execute SELECT 1 before returning, so a hermetic runtime
+  // test cannot reach this ordering; this pins max_pipeline is set before postgres().
   const code = (f: string) => readFileSync(new URL(`../src/core/${f}`, import.meta.url), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   test.each([
