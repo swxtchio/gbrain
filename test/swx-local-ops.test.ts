@@ -392,13 +392,16 @@ echo "LABELS=$(g $T/r stash list --format=%gs | tr '\\n' ,)"`);
 g $T/r worktree add -q $T/wt2 main 2>/dev/null; echo theirs >> $T/wt2/a.txt
 eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
 _rs_git() {
-  if [ "$1" = stash ] && [ "\${2:-}" = drop ] && [ ! -e $T/pushed ]; then touch $T/pushed; git -C $T/wt2 stash push -q -m theirs; fi
+  if [ "$1" = stash ] && [ "\${2:-}" = drop ] && [ ! -e $T/pushed ]; then touch $T/pushed; git -C $T/wt2 stash push -q -m "don't lose this"; fi
   [ "$1" = stash ] && [ "\${2:-}" = store ] && return 1
   _rs_git_real "$@"
 }
-sync_on_default_branch s19 code $T/r
-echo "RC=$?"`);
-    expect(out).toMatch(/could not put it back; recover it: git -C \S+ stash store -m 'On main: theirs' [0-9a-f]{40}/);
+sync_on_default_branch s19 code $T/r > $T/log; rc=$?; cat $T/log; echo "RC=$rc"
+# The printed command must be runnable as-is (the label holds an apostrophe).
+cmd=$(sed -n 's/.*recover it: //p' $T/log); bash -n -c "$cmd" && echo PARSES; eval "set -- $cmd"; echo "MSG=$7"`);
+    expect(out).toMatch(/could not put it back; recover it: git -C \S+ stash store -m .+ [0-9a-f]{40}/);
+    expect(out).toContain('PARSES');
+    expect(out).toContain("MSG=On main: don't lose this");
     expect(out).not.toContain('put back ');
     expect(out).toContain('RC=0');
   });
