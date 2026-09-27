@@ -73,11 +73,27 @@ function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
 describe('serve --http loop-stall watchdog seam (#4281)', () => {
   test('arms before runServeHttp and disposes after it resolves, before teardown', async () => {
     const h = makeHarness();
-    await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
+    let finishRunServeHttp!: () => void;
+    const heldServe = new Promise<void>(resolve => { finishRunServeHttp = resolve; });
+    h.opts.runServeHttp = async () => {
+      h.order.push('run-start');
+      await heldServe;
+      h.order.push('run-end');
+    };
+    let runSettled = false;
+    const serving = runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts).then(() => {
+      runSettled = true;
+    });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(h.order).toEqual(['install', 'run-start']);
+    expect(runSettled).toBe(false);
+    finishRunServeHttp();
+    await serving;
 
     // dispose must land BETWEEN the server lifecycle resolving and the
-    // engine teardown — the watchdog covers runServeHttp only (plan #4281);
-    // finishHttpServe has its own cleanup deadline.
+    // engine teardown — it stays armed for the entire runServeHttp lifetime
+    // (including a request that has not settled); finishHttpServe has its own
+    // cleanup deadline.
     expect(h.order).toEqual(['install', 'run-start', 'run-end', 'dispose', 'disconnect', 'exit']);
     expect(h.exits).toEqual([0]);
     expect(h.installs.length).toBe(1);
