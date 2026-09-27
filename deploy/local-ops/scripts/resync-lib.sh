@@ -87,7 +87,7 @@ _rs_drop_ours() {
     if _rs_git stash store -m "$msg" "$dropped" && _rs_git stash list --format=%H | grep -qx "$dropped"; then
       echo "  note: a concurrent stash shifted $ref; put back $dropped"
     else
-      echo "  !! dropped another worktree's stash $dropped by mistake and could not put it back; recover it: git -C $RS_DIR stash store -m '$msg' $dropped"
+      echo "  !! dropped another worktree's stash $dropped by mistake and could not put it back; recover it: $(printf '%q ' git -C "$RS_DIR" stash store -m "$msg" "$dropped")"
     fi
   fi
   echo "  note: stash $RS_STASH was applied but not dropped (git -C $RS_DIR stash list)"
