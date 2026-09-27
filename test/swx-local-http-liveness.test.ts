@@ -30,7 +30,7 @@ const ago = (seconds: number) =>
 // HEALTH: ok | 503 | hang (no answer). MAIN_PID: the unit's process (default 4242).
 const probe = (env: Record<string, string> = {}) =>
   Bun.spawnSync(['bash', PROBE], {
-    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base, GBRAIN_HTTP_LIVENESS_STATE: stateDir, ACTIVE_SINCE: ago(600), ACTIVE_CALLS: join(base, 'active-calls'), ...env },
+    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: base, GBRAIN_HTTP_LIVENESS_STATE: stateDir, ACTIVE_SINCE: ago(600), ACTIVE_CALLS: join(base, 'active-calls'), UNIT_STATE: join(base, 'unit-state'), ...env },
   });
 
 const log = () => (existsSync(calls) ? readFileSync(calls, 'utf8') : '');
@@ -47,7 +47,12 @@ beforeEach(() => {
     'case "$2" in',
     '  is-active) n=$(( $(cat "$ACTIVE_CALLS" 2>/dev/null || echo 0) + 1 )); echo $n > "$ACTIVE_CALLS"',
     '    [ -n "${STOP_ON_CALL:-}" ] && [ "$n" -ge "$STOP_ON_CALL" ] && exit 3',
+    // STOP_AFTER_CALL: the operator's stop lands right AFTER this is-active answered "active".
+    '    [ -n "${STOP_AFTER_CALL:-}" ] && [ "$n" -ge "$STOP_AFTER_CALL" ] && echo inactive > "$UNIT_STATE" && exit 0',
+    '    [ "$(cat "$UNIT_STATE" 2>/dev/null || echo active)" = inactive ] && exit 3',
     '    exit "${UNIT_ACTIVE:-0}" ;;',
+    '  restart) echo active > "$UNIT_STATE" ;;',
+    '  try-restart) [ "$(cat "$UNIT_STATE" 2>/dev/null || echo active)" = active ] && echo active > "$UNIT_STATE" ;;',
     '  show) case "$4" in',
     '      ActiveEnterTimestamp) echo "$ACTIVE_SINCE" ;;',
     '      ExecStart) echo "{ path=bun ; argv[]=bun gbrain serve --http --port ${UNIT_PORT:-8787} --bind 127.0.0.1 ; }" ;;',
@@ -164,6 +169,16 @@ describe('gbrain-http-liveness.sh', () => {
     expect(r.stdout.toString()).toContain('unit stopped during the check; not restarting it');
     expect(restarts()).toBe(0);
     expect(log()).not.toMatch(/systemctl --user (try-)?restart/);
+  });
+
+  test('a stop that lands after the final check stays stopped (try-restart, never restart)', () => {
+    probe({ HEALTH: 'hang' });
+    probe({ HEALTH: 'hang' });
+    rmSync(join(base, 'active-calls'), { force: true });
+    // Both is-active checks answer "active"; the stop lands right after the second.
+    probe({ HEALTH: 'hang', STOP_AFTER_CALL: '2' });
+    expect(log()).toContain('systemctl --user try-restart gbrain-http.service');
+    expect(readFileSync(join(base, 'unit-state'), 'utf8').trim()).toBe('inactive');
   });
 });
 
