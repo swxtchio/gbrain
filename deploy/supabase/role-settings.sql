@@ -1,0 +1,21 @@
+-- Server-side session limits for the role gbrain connects as (swxtchio/gbrain#14).
+--
+-- WHY ROLE-LEVEL: the Supabase pooler (Supavisor, ports 5432 and 6543) drops
+-- client startup parameters, so the limits gbrain sends as postgres.js
+-- `connection` options (resolveSessionTimeouts in src/core/db.ts) never reach
+-- the backend. Role defaults do; they apply to each backend when it starts, so
+-- pooled connections pick them up as Supavisor recycles them.
+--
+-- transaction_timeout (Postgres 17+) also bounds the implicit transaction of a
+-- single statement, including one stuck between postgres.js's describe and
+-- bind round trips (backend `active` / `ClientRead`). 30min stays above
+-- gbrain's longest legitimate statement limits (10min backfill batches and
+-- CREATE INDEX CONCURRENTLY).
+--
+-- idle_in_transaction_session_timeout matches gbrain's own intended default.
+--
+-- Apply / verify: bun deploy/supabase/role-settings.ts [--apply]
+-- Undo:           ALTER ROLE postgres RESET transaction_timeout;
+--                 ALTER ROLE postgres RESET idle_in_transaction_session_timeout;
+ALTER ROLE postgres SET transaction_timeout = '30min';
+ALTER ROLE postgres SET idle_in_transaction_session_timeout = '5min';
