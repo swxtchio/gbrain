@@ -67,20 +67,31 @@ changes like editing `~/.gbrain/config.json`.
 
 ## Hang recovery (liveness)
 
-`Restart=on-failure` only reacts to the server **exiting**. A server that hangs
-while still holding the port is never restarted by it; on 2026-09-26 one went
-silent from 19:29Z to 00:51Z and every MCP call timed out. Two layers cover that:
+`Restart=` only reacts to the server **exiting**. A server that hangs while
+still holding the port is never restarted by it; on 2026-09-26 one went silent
+from 19:29Z to 00:51Z and every MCP call timed out. Three layers cover that:
 
+- **`Restart=always`.** A stall-watchdog SIGTERM can end in a clean exit 0,
+  which `on-failure` would leave down. An explicit `systemctl stop` still stops
+  the unit.
 - **In-process stall watchdog.** The unit sets `GBRAIN_SERVE_STALL_WATCHDOG_MS=60000`.
   After 60s of main-loop stall the server SIGTERMs itself, then SIGKILLs 30s
-  later, and `Restart=` brings it back.
-- **External liveness probe.** `gbrain-http-liveness.timer` runs
-  `gbrain-http-liveness.sh` every minute. Healthy means the unit is active, *its
-  own* MainPID owns the port, and `/health` (a `SELECT 1` through the engine pool)
-  answers `ok` within 10s. After 3 consecutive failures it runs
-  `systemctl --user restart gbrain-http.service`. It leaves an inactive unit alone
-  and skips the first 120s after a start. Knobs are `GBRAIN_HTTP_LIVENESS_*`
-  (see the script header).
+  later.
+- **External liveness probe.** `gbrain-http-liveness.timer` runs the probe every
+  minute. `setup.sh` installs a copy under `~/.local/share/gbrain/libexec/`, so
+  removing a checkout can't disable it. Each check of the unit's *current*
+  MainPID falls into one of three results:
+  - **ok:** the unit's own process owns the port and `/health` answers `ok`
+    within 10s.
+  - **hung:** no answer, or another process owns the port. The unit is
+    restarted after **3** consecutive hung checks.
+  - **degraded:** `/health` answers 503 (its `SELECT 1` through the pool
+    failed), so the database may be down or the pool saturated. The unit is
+    restarted only after **10** consecutive degraded checks.
+
+  Counters reset when the process changes. Restarts are capped at **3 per
+  hour**. The probe leaves an inactive unit alone and skips the first 120s after
+  a start. Knobs are `GBRAIN_HTTP_LIVENESS_*` (see the script header).
 
 ```bash
 systemctl --user list-timers gbrain-http-liveness.timer

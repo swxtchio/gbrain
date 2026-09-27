@@ -36,7 +36,10 @@ EnvironmentFile=-%h/.gbrain/http.env
 # from tripping it.
 Environment=GBRAIN_SERVE_STALL_WATCHDOG_MS=60000
 ExecStart=%h/.bun/bin/bun %h/.bun/bin/gbrain serve --http --port 8787 --bind 127.0.0.1
-Restart=on-failure
+# always, not on-failure: the stall watchdog SIGTERMs the server, and that
+# shutdown can finish with a clean exit 0 (serve.ts finishHttpServe), which
+# on-failure would never restart. An explicit `systemctl stop` still stops it.
+Restart=always
 RestartSec=3
 # Cold start runs schema-init against the remote pooler; give it room.
 TimeoutStartSec=90
