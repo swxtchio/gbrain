@@ -350,6 +350,8 @@ export class PostgresEngine implements BrainEngine {
       if (typeof prepare === 'boolean') {
         opts.prepare = prepare;
       }
+      const maxPipeline = db.resolveMaxPipeline(url);
+      if (maxPipeline !== undefined) opts.max_pipeline = maxPipeline;
       this._sql = postgres(url, opts);
       await this._sql`SELECT 1`;
       await db.setSessionDefaults(this._sql);
