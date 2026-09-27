@@ -3,6 +3,8 @@ Description=GBrain TODO/ROADMAP refresh (daily, namespaced slugs per repo)
 After=network-online.target
 
 [Service]
+# oneshot inherits DefaultTimeoutStartSec (90s), which kills the import/embed tail.
+TimeoutStartSec=30min
 Type=oneshot
 ExecStart=%h/.gbrain/todo-refresh.sh
 StandardOutput=journal

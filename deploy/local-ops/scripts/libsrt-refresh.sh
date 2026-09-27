@@ -18,6 +18,12 @@ STAGE="$HOME/.gbrain-staging/libsrt"
 
 # 1. Pull upstream
 cd "$CLONE"
+# $CLONE is a dedicated shallow mirror, reset hard to origin/master below. Refuse
+# if it has become anything else, so a local edit or branch is never discarded.
+if [ "$(git symbolic-ref --short -q HEAD)" != master ] || [ -n "$(git status --porcelain)" ]; then
+  echo "  skip: $CLONE is not a clean master mirror ($(git symbolic-ref --short -q HEAD || echo detached), $(git status --porcelain | wc -l) change(s)); not resetting it"
+  exit 0
+fi
 OLD_SHA=$(git rev-parse HEAD)
 git fetch --depth 1 origin master 2>&1
 git reset --hard origin/master 2>&1
@@ -37,7 +43,9 @@ echo "  staged md files: $(find "$STAGE" -name '*.md' -o -name '*.MD' | wc -l)"
 
 # 3. Fetch OpenAI key for embeddings
 if command -v az >/dev/null 2>&1; then
-  _OPENAI_KEY=$(az keyvault secret show --vault-name swx-mr-orch-dev-kv --name openai-api-key --query value -o tsv 2>/dev/null)
+  # `|| true`: under set -e a failing az (e.g. expired login) used to abort the
+  # whole job here, silently (and, for bulk-refresh, the nightly resync with it).
+  _OPENAI_KEY=$(az keyvault secret show --vault-name swx-mr-orch-dev-kv --name openai-api-key --query value -o tsv 2>/dev/null) || true
   [ -n "$_OPENAI_KEY" ] && export OPENAI_API_KEY="$_OPENAI_KEY"
   unset _OPENAI_KEY
 fi

@@ -59,7 +59,9 @@ echo "  total staged: $count files"
 
 # Fetch OpenAI key for embeddings
 if command -v az >/dev/null 2>&1; then
-  _OPENAI_KEY=$(az keyvault secret show --vault-name swx-mr-orch-dev-kv --name openai-api-key --query value -o tsv 2>/dev/null)
+  # `|| true`: under set -e a failing az (e.g. expired login) used to abort the
+  # whole job here, silently (and, for bulk-refresh, the nightly resync with it).
+  _OPENAI_KEY=$(az keyvault secret show --vault-name swx-mr-orch-dev-kv --name openai-api-key --query value -o tsv 2>/dev/null) || true
   [ -n "$_OPENAI_KEY" ] && export OPENAI_API_KEY="$_OPENAI_KEY"
   unset _OPENAI_KEY
 fi
