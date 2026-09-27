@@ -75,7 +75,8 @@ _rs_on_signal() {
 _rs_drop_ours() {
   local ref dropped
   ref=$(_rs_stash_ref)
-  dropped=$([ -n "$ref" ] && _rs_git stash drop "$ref" 2>/dev/null | sed -n 's/^Dropped .* (\([0-9a-f]*\))$/\1/p')
+  # LC_ALL=C: the "Dropped ... (<sha>)" line is translated in other locales.
+  dropped=$([ -n "$ref" ] && LC_ALL=C _rs_git stash drop "$ref" 2>/dev/null | sed -n 's/^Dropped .* (\([0-9a-f]*\))$/\1/p')
   [ "$dropped" = "$RS_STASH" ] && return 0
   if [ -n "$dropped" ]; then
     _rs_git stash store -m "$(_rs_git log -1 --format=%s "$dropped")" "$dropped"
