@@ -100,27 +100,47 @@ fi
 
 # Import (content_hash dedup makes unchanged files no-op)
 cd "$HOME"
+# Each step's failure is recorded rather than aborting the rest; the job exits
+# nonzero at the end so systemd (and daily-resync) see it.
+failed=""
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+# Per-file progress lines, "[<phase>] N/M (P%) ..." (src/core/progress.ts).
+PROGRESS_RE='^(\[[^]]+\] )?\[[a-z0-9_.-]+\] [0-9]+/[0-9]+ \([0-9]+%\)'
+
 # Log every per-file failure. Bulk imports don't reach sync-failures.jsonl
 # (the ledger needs a git-repo import dir), and import's human output collapses
 # identical thrown errors after five, so read the complete list from --json.
-import_err=$(mktemp)
-import_json=$(gbrain import "$STAGE" --no-embed --json 2>"$import_err") || true
+# A partial import (JSON, exit 1) is logged, not a job failure; one that dies
+# without its JSON summary is.
+import_rc=0
+import_json=$(gbrain import "$STAGE" --no-embed --json 2>"$out") || import_rc=$?
 if printf '%s' "$import_json" | jq -e .status >/dev/null 2>&1; then
   printf '%s' "$import_json" | jq -r '
-    "  import: \(.status): \(.imported) imported, \(.unchanged) unchanged, \(.errors) errors (\(.duration_s)s)",
+    "  import: \(.status): \(.imported) imported, \(.unchanged) unchanged, \(.errors) errors, \(.malformed_skipped // 0) malformed (\(.duration_s)s)",
     (.failures[] | "  failed: \(.path): \(.error | gsub("\n"; " "))")'
+  # Files excluded for a malformed name are named only on stderr.
+  grep -i 'malformed' "$out" || true
 else
-  echo "  !! import printed no JSON summary; its last output:"
-  tail -5 "$import_err"
+  echo "  !! import died without its JSON summary (exit $import_rc); its output:"
+  grep -vE "$PROGRESS_RE" "$out" || true
+  failed="$failed import"
 fi
-rm -f "$import_err"
-gbrain embed --stale 2>&1 | tail -2
+
+gbrain embed --stale >"$out" 2>&1 || failed="$failed embed"
+grep -vE "$PROGRESS_RE" "$out" | tail -2
 
 # Extract links + timeline AFTER import so the graph stays current. Autopilot's
 # continuous extract is silently a no-op in v0.18.2 (verified empty links
 # table after hours of cycles), so the weekly refresh has to handle it. Use
 # --source fs which works; --source db is broken in v0.18.2.
-gbrain extract links --source fs --dir "$STAGE" --json 2>&1 | grep -E '"links_created"' | tail -1
-gbrain extract timeline --source fs --dir "$STAGE" --json 2>&1 | grep -E '"timeline_entries_created"' | tail -1
+gbrain extract links --source fs --dir "$STAGE" --json >"$out" 2>&1 || failed="$failed extract-links"
+grep -E '"links_created"' "$out" | tail -1
+gbrain extract timeline --source fs --dir "$STAGE" --json >"$out" 2>&1 || failed="$failed extract-timeline"
+grep -E '"timeline_entries_created"' "$out" | tail -1
 
 echo "  done @ $(date -Iseconds)"
+if [ -n "$failed" ]; then
+  echo "  !! failed steps:$failed"
+  exit 1
+fi
