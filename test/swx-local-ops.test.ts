@@ -89,30 +89,40 @@ describe('deploy/local-ops structure', () => {
     expect(g(clone, 'rev-parse', 'HEAD').stdout.toString().trim()).toBe(head);
   });
 
-  test("bulk-refresh logs every file import skipped, not just the summary", () => {
-    // gbrain import reports each failure as "  Skipped <path>: <reason>"; a
-    // case-sensitive filter plus `tail -5` used to drop them all.
-    mkdirSync(join(base, '.gbrain'), { recursive: true });
-    const bin = join(base, '.bun', 'bin'); // bulk-refresh.sh resets PATH to $HOME/.bun/bin first
-    mkdirSync(bin, { recursive: true });
-    Bun.spawnSync(['cp', join(OPS, 'scripts', 'refresh-watermark.sh'), join(base, '.gbrain', 'refresh-watermark.sh')]);
-    const failures = Array.from({ length: 7 }, (_, i) => `  Skipped swx-spp/doc${i}.md: Invalid YAML frontmatter`);
-    writeFileSync(join(bin, 'gbrain'), `#!/usr/bin/env bash
-if [ "$1" = import ]; then
-${failures.map(f => `  echo "${f}" >&2`).join('\n')}
-  echo "[import.files] 9/9 (100%) imported=2 skipped=7 errors=7"
-  echo "Import complete (1.0s):"
-fi
-`);
-    chmodSync(join(bin, 'gbrain'), 0o755);
-    const r = Bun.spawnSync(['bash', join(OPS, 'scripts', 'bulk-refresh.sh')], {
-      env: { PATH: '/usr/bin:/bin', HOME: base },
+  describe('bulk-refresh import logging', () => {
+    // bulk-refresh.sh resets PATH to $HOME/.bun/bin first, so stub gbrain there.
+    const runWith = (importStub: string) => {
+      const bin = join(base, '.bun', 'bin');
+      mkdirSync(join(base, '.gbrain'), { recursive: true });
+      mkdirSync(bin, { recursive: true });
+      Bun.spawnSync(['cp', join(OPS, 'scripts', 'refresh-watermark.sh'), join(base, '.gbrain', 'refresh-watermark.sh')]);
+      writeFileSync(join(bin, 'gbrain'), `#!/usr/bin/env bash\nif [ "$1" = import ]; then\n${importStub}\nfi\n`);
+      chmodSync(join(bin, 'gbrain'), 0o755);
+      const r = Bun.spawnSync(['bash', join(OPS, 'scripts', 'bulk-refresh.sh')], { env: { PATH: '/usr/bin:/bin', HOME: base } });
+      return { code: r.exitCode, log: readFileSync(join(base, '.gbrain', 'bulk-refresh.log'), 'utf8') };
+    };
+
+    test('every per-file failure from --json reaches the log, even 6+ identical ones', () => {
+      // import's stderr names only the first five identical thrown errors.
+      const failures = [
+        ...Array.from({ length: 6 }, (_, i) => ({ path: `swx-spp/same${i}.md`, error: 'connection reset' })),
+        { path: 'swx-srtx/bad.md', error: 'Invalid YAML frontmatter:\nline 3' },
+      ];
+      const json = JSON.stringify({ status: 'partial', duration_s: 1.5, imported: 2, skipped: 7, errors: 7, unchanged: 0, failures });
+      const r = runWith(`  echo "  (suppressing further errors)" >&2\n  echo '${json}'\n  exit 1`);
+      expect(r.code).toBe(0);
+      expect(r.log).toContain('import: partial: 2 imported, 0 unchanged, 7 errors (1.5s)');
+      for (const f of failures.slice(0, 6)) expect(r.log).toContain(`failed: ${f.path}: connection reset`);
+      expect(r.log).toContain('failed: swx-srtx/bad.md: Invalid YAML frontmatter: line 3');
+      expect(r.log).toContain('done @');
     });
-    expect(r.exitCode).toBe(0);
-    const log = readFileSync(join(base, '.gbrain', 'bulk-refresh.log'), 'utf8');
-    for (const f of failures) expect(log).toContain(f.trim());
-    expect(log).toContain('Import complete');
-    expect(log).toContain('done @');
+
+    test('an import that dies without JSON is reported with its last output', () => {
+      const r = runWith('  echo "fatal: database unreachable" >&2\n  exit 2');
+      expect(r.code).toBe(0);
+      expect(r.log).toContain('!! import printed no JSON summary');
+      expect(r.log).toContain('fatal: database unreachable');
+    });
   });
 
   test("every unit's ExecStart points at a script shipped in scripts/", () => {
