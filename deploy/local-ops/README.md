@@ -28,6 +28,13 @@ reports it as drift, and the next install overwrites it.
 | `gbrain-bulk-refresh.timer` | Sun 03:00 | no | `bulk-refresh.sh` on its own. It already runs inside daily-resync. |
 | `gbrain-todo-refresh.timer` | daily 02:30 | no | `todo-refresh.sh`: TODO/ROADMAP refresh (opt-in). |
 
+**Failures.** A failed step (import, embed, extract, a source's `gbrain sync`,
+or a whole phase) is logged, the remaining steps still run, and the job exits
+nonzero at the end, so `systemctl --user status` shows it. Logs:
+`~/.gbrain/daily-resync.log` and `~/.gbrain/bulk-refresh.log`. The bulk import
+logs one `failed: <path>: <error>` line per file, from `gbrain import --json`,
+because bulk imports don't reach `sync-failures.jsonl`.
+
 The daily-resync and libsrt units carry a `pool-size.conf` drop-in
 (`GBRAIN_POOL_SIZE=2`), so batch jobs never crowd the shared HTTP server out of
 the Supabase pooler.
