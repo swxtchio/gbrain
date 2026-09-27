@@ -39,17 +39,25 @@ swx-llmrouter`; the last three use `--strategy auto`). For each repo,
 `sync_on_default_branch`:
 
 1. records the current branch (or detached commit);
-2. stashes any changes, including untracked files;
+2. stashes any changes, including untracked files, and records which stash it
+   made;
 3. switches to the remote's default branch (asked via `git ls-remote --symref`,
    because a local `origin/HEAD` can be stale) and fast-forwards it;
 4. runs `gbrain sync --source <id> --strategy <s> --no-pull --yes`;
-5. always switches back to the original branch or commit and pops the stash.
+5. switches back to the original branch or commit and, only once that has
+   succeeded, restores **exactly its own stash**, with `--index` so staged
+   changes stay staged.
 
-A repo with a rebase, merge or cherry-pick in progress is skipped. A default
-branch with unpushed commits can't be fast-forwarded, so it isn't synced. If the
-default branch is checked out in another worktree, the job syncs a detached
-`origin/<default>` instead. A stash that can't be popped cleanly is kept and
-reported, never dropped.
+Step 5 also runs when the job is interrupted (SIGTERM/SIGINT) mid-sync. These
+repos are skipped:
+- a repo with a rebase, merge or cherry-pick in progress;
+- a repo whose changes `git stash` cannot hold (for example a dirty submodule
+  or an embedded repo), so an older, unrelated stash is never touched.
+
+A default branch with unpushed commits can't be fast-forwarded, so it isn't
+synced. If the default branch is checked out in another worktree, the job syncs
+a detached `origin/<default>` instead. If switching back fails, the stash is
+kept (never popped onto the wrong branch), and the log names it.
 
 ### Markdown bulk refresh (`bulk-refresh.sh`)
 

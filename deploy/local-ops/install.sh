@@ -32,11 +32,11 @@ esac
 TS="$(date +%Y%m%d-%H%M%S)"
 drift=0
 
-# pairs: "<repo source>|<installed destination>|<mode>"
+# pairs: "<repo source>|<installed destination>|<mode>". Scripts and tools
+# keep their repo mode (the tracked exec bit), units are 644.
 pairs() {
   local f rel
-  for f in "$SRC"/scripts/*; do echo "$f|$BIN_DEST/$(basename "$f")|755"; done
-  for f in "$SRC"/tools/*; do echo "$f|$BIN_DEST/$(basename "$f")|644"; done
+  for f in "$SRC"/scripts/* "$SRC"/tools/*; do echo "$f|$BIN_DEST/$(basename "$f")|$(stat -c %a "$f")"; done
   while IFS= read -r f; do
     rel="${f#"$SRC/systemd/"}"
     echo "$f|$UNIT_DEST/$rel|644"
@@ -44,10 +44,14 @@ pairs() {
 }
 
 while IFS='|' read -r src dst mode; do
-  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+  # Same bytes AND same mode: a script that lost its exec bit is drift too
+  # (its timer would fail with Permission denied).
+  if [ -f "$dst" ] && cmp -s "$src" "$dst" && [ "$(stat -c %a "$dst")" = "$mode" ]; then
     continue
   fi
-  state=$([ -f "$dst" ] && echo changed || echo missing)
+  if [ ! -f "$dst" ]; then state=missing
+  elif cmp -s "$src" "$dst"; then state="mode $(stat -c %a "$dst") != $mode"
+  else state=changed; fi
   case "$MODE" in
     check) echo "drift ($state): $dst"; drift=1 ;;
     dry-run) echo "would install ($state): $dst" ;;
