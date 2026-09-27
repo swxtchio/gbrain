@@ -1,0 +1,10 @@
+[Unit]
+Description=GBrain daily resync — markdown bulk-refresh + per-repo code sync across all owned repos
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.gbrain/daily-resync.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=2h

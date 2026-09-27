@@ -4,6 +4,8 @@ Run **one** `gbrain serve --http` on loopback as a systemd **user** service, and
 point every Claude Code session on this VM at it — instead of each session
 spawning its own `gbrain serve` stdio child.
 
+The dev box's scheduled brain jobs (nightly resync, refresh timers) and the database role settings live in [`../local-ops`](../local-ops/README.md) and [`../supabase`](../supabase/role-settings.sql).
+
 ## Why
 
 Each stdio `gbrain serve` opens its own connection pool against the remote

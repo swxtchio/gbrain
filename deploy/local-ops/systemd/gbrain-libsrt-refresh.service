@@ -1,0 +1,9 @@
+[Unit]
+Description=GBrain libsrt drift refresh (weekly)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.gbrain/libsrt-refresh.sh
+StandardOutput=journal
+StandardError=journal
