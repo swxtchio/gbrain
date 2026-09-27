@@ -70,17 +70,25 @@ _rs_on_signal() {
 
 # Drop our (already applied) stash. git can only drop by `stash@{n}`, and a
 # push from another worktree can shift that between lookup and drop, so check
-# what was actually dropped: if it wasn't ours, store it straight back (same
-# commit, same message) and leave ours listed.
+# what was actually dropped: if it wasn't ours, store it straight back under
+# its list label and leave ours listed.
 _rs_drop_ours() {
-  local ref dropped
-  ref=$(_rs_stash_ref)
+  local list ref dropped msg
+  list=$(_rs_git stash list --format='%gd %H %gs')
+  ref=$(printf '%s\n' "$list" | awk -v h="$RS_STASH" '$2 == h {print $1; exit}')
   # LC_ALL=C: the "Dropped ... (<sha>)" line is translated in other locales.
   dropped=$([ -n "$ref" ] && LC_ALL=C _rs_git stash drop "$ref" 2>/dev/null | sed -n 's/^Dropped .* (\([0-9a-f]*\))$/\1/p')
   [ "$dropped" = "$RS_STASH" ] && return 0
   if [ -n "$dropped" ]; then
-    _rs_git stash store -m "$(_rs_git log -1 --format=%s "$dropped")" "$dropped"
-    echo "  note: a concurrent stash shifted $ref; put back $dropped"
+    # Its label from the listing; a stash pushed inside the race window isn't
+    # in it, so fall back to the commit subject (the label `stash push` gives).
+    msg=$(printf '%s\n' "$list" | awk -v h="$dropped" '$2 == h {sub(/^[^ ]* [^ ]* /, ""); print; exit}')
+    [ -n "$msg" ] || msg=$(_rs_git log -1 --format=%s "$dropped")
+    if _rs_git stash store -m "$msg" "$dropped" && _rs_git stash list --format=%H | grep -qx "$dropped"; then
+      echo "  note: a concurrent stash shifted $ref; put back $dropped"
+    else
+      echo "  !! dropped another worktree's stash $dropped by mistake and could not put it back; recover it: git -C $RS_DIR stash store -m '$msg' $dropped"
+    fi
   fi
   echo "  note: stash $RS_STASH was applied but not dropped (git -C $RS_DIR stash list)"
 }

@@ -369,6 +369,40 @@ echo "BRANCH=$(g $T/r symbolic-ref --short HEAD) B=$(tail -1 $T/r/b.txt) STASH=$
     expect(out).toContain('THEIRS=theirs');
   });
 
+  test('a wrongly dropped stash comes back under its own list label', () => {
+    // A foreign stash with a custom label (stash store -m) lands mid-sync, above
+    // ours; another lands right before our drop, so stash@{n} names the first.
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+g $T/r worktree add -q $T/wt2 main 2>/dev/null
+cat > $T/bin/gbrain <<STUB
+#!/usr/bin/env bash
+echo x >> $T/wt2/a.txt; c=\\$(git -C $T/wt2 stash create); git -C $T/wt2 stash store -m checkpoint \\$c; git -C $T/wt2 checkout -q -- a.txt
+STUB
+chmod +x $T/bin/gbrain
+eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+_rs_git() { if [ "$1" = stash ] && [ "\${2:-}" = drop ] && [ ! -e $T/pushed ]; then touch $T/pushed; echo t >> $T/wt2/a.txt; git -C $T/wt2 stash push -q -m theirs2; fi; _rs_git_real "$@"; }
+sync_on_default_branch s18 code $T/r
+echo "LABELS=$(g $T/r stash list --format=%gs | tr '\\n' ,)"`);
+    expect(out).toContain('put back');
+    expect(out).toMatch(/LABELS=checkpoint,On main: theirs2,On feature: gbrain-daily-resync auto-stash [^,]*,/);
+  });
+
+  test('a put-back that fails is reported with the command to recover it', () => {
+    const { out } = scenario(`mk r; g $T/r checkout -qb feature; echo local >> $T/r/b.txt
+g $T/r worktree add -q $T/wt2 main 2>/dev/null; echo theirs >> $T/wt2/a.txt
+eval "$(declare -f _rs_git | sed '1s/_rs_git/_rs_git_real/')"
+_rs_git() {
+  if [ "$1" = stash ] && [ "\${2:-}" = drop ] && [ ! -e $T/pushed ]; then touch $T/pushed; git -C $T/wt2 stash push -q -m theirs; fi
+  [ "$1" = stash ] && [ "\${2:-}" = store ] && return 1
+  _rs_git_real "$@"
+}
+sync_on_default_branch s19 code $T/r
+echo "RC=$?"`);
+    expect(out).toMatch(/could not put it back; recover it: git -C \S+ stash store -m 'On main: theirs' [0-9a-f]{40}/);
+    expect(out).not.toContain('put back ');
+    expect(out).toContain('RC=0');
+  });
+
   test('the drop whose output is parsed runs in the C locale', () => {
     // git translates "Dropped stash@{n} (<sha>)"; the identity check parses it.
     // (No git translations are installed on the dev box, so pin the contract.)
