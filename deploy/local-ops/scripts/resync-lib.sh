@@ -23,6 +23,9 @@ _rs_head() { _rs_git symbolic-ref --short -q HEAD || _rs_git rev-parse HEAD; }
 # Our stash, found by the run-unique message: refs/stash is shared by every
 # worktree of a repo, so "the newest stash" may belong to someone else.
 _rs_our_stash() { _rs_git stash list --format='%H %s' | awk -v m="$RS_STASH_MSG" 'index($0, m) {print $1; exit}'; }
+# The current `stash@{n}` of our stash. Resolve it right before each use: the
+# index shifts whenever another worktree pushes a stash.
+_rs_stash_ref() { _rs_git stash list --format='%gd %H' | awk -v h="$RS_STASH" '$2 == h {print $1; exit}'; }
 
 # Restore the recorded branch, then our stash. Uses RS_DIR, RS_ORIG, RS_STASH.
 # Returns 1 only when switching back failed (the stash is then kept and named).
@@ -39,11 +42,16 @@ _rs_restore() {
     fi
     ok=1
   elif [ -n "$RS_STASH" ]; then
-    ref="$(_rs_git stash list --format='%gd %H' | awk -v h="$RS_STASH" '$2 == h {print $1; exit}')"
-    if [ -z "$ref" ]; then
+    # Apply by SHA, never by a selector that another worktree's push can shift;
+    # then drop it by a selector re-resolved just before the drop.
+    if [ -z "$(_rs_stash_ref)" ]; then
       echo "  !! stash $RS_STASH is no longer in $RS_DIR's stash list; nothing restored"
-    elif _rs_git stash pop -q --index "$ref"; then
+    elif _rs_git stash apply -q --index "$RS_STASH"; then
       echo "  restored local changes on $RS_ORIG"
+      ref=$(_rs_stash_ref)
+      if [ -z "$ref" ] || ! _rs_git stash drop -q "$ref"; then
+        echo "  note: stash $RS_STASH was applied but not dropped (git -C $RS_DIR stash list)"
+      fi
     else
       echo "  !! could not restore stash $RS_STASH cleanly in $RS_DIR; it is kept (git -C $RS_DIR stash list)"
     fi
