@@ -35,7 +35,7 @@ drift=0
 # pairs: "<repo source>|<installed destination>|<mode>"
 pairs() {
   local f rel
-  for f in "$SRC"/bin/*; do echo "$f|$BIN_DEST/$(basename "$f")|755"; done
+  for f in "$SRC"/scripts/*; do echo "$f|$BIN_DEST/$(basename "$f")|755"; done
   for f in "$SRC"/tools/*; do echo "$f|$BIN_DEST/$(basename "$f")|644"; done
   while IFS= read -r f; do
     rel="${f#"$SRC/systemd/"}"

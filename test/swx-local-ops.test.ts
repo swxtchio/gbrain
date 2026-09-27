@@ -22,6 +22,19 @@ beforeEach(() => { base = mkdtempSync(join(tmpdir(), 'gbrain-local-ops-')); });
 afterEach(() => { rmSync(base, { recursive: true, force: true }); });
 
 describe('deploy/local-ops structure', () => {
+  test('every file under deploy/local-ops and deploy/supabase is tracked (no .gitignore trap)', () => {
+    // upstream .gitignore ignores any bin/ directory; a shipped file it swallowed
+    // would exist in a working tree yet be missing from every clone.
+    const root = resolve(import.meta.dir, '..');
+    const tracked = new Set(Bun.spawnSync(['git', 'ls-files', 'deploy/local-ops', 'deploy/supabase'], { cwd: root }).stdout.toString().trim().split('\n'));
+    for (const dir of [OPS, resolve(import.meta.dir, '../deploy/supabase')]) {
+      for (const f of walk(dir)) {
+        const rel = f.slice(root.length + 1);
+        expect({ rel, tracked: tracked.has(rel) }).toEqual({ rel, tracked: true });
+      }
+    }
+  });
+
   test('every shipped shell script parses', () => {
     for (const f of walk(OPS).filter((p) => p.endsWith('.sh'))) {
       expect({ f, rc: Bun.spawnSync(['bash', '-n', f]).exitCode }).toEqual({ f, rc: 0 });
@@ -32,11 +45,11 @@ describe('deploy/local-ops structure', () => {
     for (const f of walk(OPS)) expect({ f, hit: readFileSync(f, 'utf8').includes('/home/byates') }).toEqual({ f, hit: false });
   });
 
-  test("every unit's ExecStart points at a script shipped in bin/", () => {
+  test("every unit's ExecStart points at a script shipped in scripts/", () => {
     for (const f of walk(join(OPS, 'systemd')).filter((p) => p.endsWith('.service'))) {
       const exec = readFileSync(f, 'utf8').match(/^ExecStart=%h\/\.gbrain\/(\S+)$/m);
       expect({ f, exec: !!exec }).toEqual({ f, exec: true });
-      expect(existsSync(join(OPS, 'bin', exec![1]!))).toBe(true);
+      expect(existsSync(join(OPS, 'scripts', exec![1]!))).toBe(true);
     }
   });
 });
@@ -55,7 +68,7 @@ describe('install.sh', () => {
 
   test('installs copies, enables only the default timers, and --check is clean afterwards', () => {
     expect(run().exitCode).toBe(0);
-    expect(readFileSync(join(base, '.gbrain', 'resync-lib.sh'), 'utf8')).toBe(readFileSync(join(OPS, 'bin', 'resync-lib.sh'), 'utf8'));
+    expect(readFileSync(join(base, '.gbrain', 'resync-lib.sh'), 'utf8')).toBe(readFileSync(join(OPS, 'scripts', 'resync-lib.sh'), 'utf8'));
     expect(existsSync(join(base, 'config', 'systemd', 'user', 'gbrain-daily-resync.service.d', 'pool-size.conf'))).toBe(true);
     expect(calls()).toContain('systemctl --user enable --now gbrain-daily-resync.timer');
     expect(calls()).toContain('systemctl --user enable --now gbrain-libsrt-refresh.timer');
@@ -74,7 +87,7 @@ describe('install.sh', () => {
     expect(check.exitCode).toBe(1);
     expect(check.stdout.toString()).toContain(`drift (changed): ${installed}`);
     expect(run().exitCode).toBe(0);
-    expect(readFileSync(installed, 'utf8')).toBe(readFileSync(join(OPS, 'bin', 'daily-resync.sh'), 'utf8'));
+    expect(readFileSync(installed, 'utf8')).toBe(readFileSync(join(OPS, 'scripts', 'daily-resync.sh'), 'utf8'));
     expect(readdirSync(join(base, '.gbrain')).some((f) => f.startsWith('daily-resync.sh.bak-'))).toBe(true);
   });
 });
@@ -90,7 +103,7 @@ echo "SYNC args=[$*] branch=$(git symbolic-ref --short -q HEAD || echo DETACHED)
     chmodSync(join(bin, 'gbrain'), 0o755);
     const script = `set -u
 T=${base}
-. ${join(OPS, 'bin', 'resync-lib.sh')}
+. ${join(OPS, 'scripts', 'resync-lib.sh')}
 g() { git -C "$@"; }
 mk() {
   git init -q -b main $T/$1.seed; echo a > $T/$1.seed/a.txt; echo b > $T/$1.seed/b.txt; g $T/$1.seed add -A; g $T/$1.seed commit -qm A
