@@ -114,7 +114,7 @@ export function resolvePrepare(url: string): boolean | undefined {
 }
 
 /** Why a read-side pool got its `max_pipeline` (#6543); `/health?deep=1` reports it beside the live value. */
-export type ReadPoolPipelineReason = 'url_max_pipeline' | 'env_pgmax_pipeline' | 'transaction_pooler_port' | 'url_prepare_false' | 'gbrain_prepare_off' | 'default';
+export type ReadPoolPipelineReason = 'gbrain_max_pipeline' | 'gbrain_prepare_on' | 'url_max_pipeline' | 'env_pgmax_pipeline' | 'transaction_pooler_port' | 'url_prepare_false' | 'gbrain_prepare_off' | 'default';
 
 /**
  * #6543: the `max_pipeline` a read-side pool (the module singleton, an engine's
@@ -131,17 +131,25 @@ export type ReadPoolPipelineReason = 'url_max_pipeline' | 'env_pgmax_pipeline' |
  * never calls this.
  */
 export function resolveReadPoolPipeline(url: string): { value: number | null; reason: ReadPoolPipelineReason } {
+  const override = process.env.GBRAIN_MAX_PIPELINE;
+  if (override && /^\d+$/.test(override)) return { value: Number(override), reason: 'gbrain_max_pipeline' };
   const [beforeFragment = ''] = url.split('#', 1);
   const queryAt = beforeFragment.indexOf('?');
   const params = new URLSearchParams(queryAt >= 0 ? beforeFragment.slice(queryAt + 1) : '');
   if (params.has('max_pipeline')) return { value: null, reason: 'url_max_pipeline' };
   if ((process.env.PGMAX_PIPELINE ?? '').trim() !== '') return { value: null, reason: 'env_pgmax_pipeline' };
+  if (process.env.GBRAIN_PREPARE === 'true' || process.env.GBRAIN_PREPARE === '1') return { value: null, reason: 'gbrain_prepare_on' };
   let port = '';
   try { port = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://')).port; } catch { /* unparseable: no port */ }
   if (AUTO_DETECT_PORTS.has(port)) return { value: 0, reason: 'transaction_pooler_port' };
   if (params.get('prepare') === 'false') return { value: 0, reason: 'url_prepare_false' };
   if (process.env.GBRAIN_PREPARE === 'false' || process.env.GBRAIN_PREPARE === '0') return { value: 0, reason: 'gbrain_prepare_off' };
   return { value: null, reason: 'default' };
+}
+
+/** Compatibility surface for fork callers; pool construction uses the shared resolver. */
+export function resolveMaxPipeline(url: string): number | undefined {
+  return resolveReadPoolPipeline(url).value ?? undefined;
 }
 
 /** The read-side pool option `resolveReadPoolPipeline` decides: `{ max_pipeline: 0 }` or nothing. */
