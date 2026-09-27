@@ -65,6 +65,32 @@ After a fork update, `scripts/gbrain-safe-update` restarts this service for you
 (it loads the rebased code), so a manual restart is only needed for out-of-band
 changes like editing `~/.gbrain/config.json`.
 
+## Hang recovery (liveness)
+
+`Restart=on-failure` only reacts to the server **exiting**. A server that hangs
+while still holding the port is never restarted by it; on 2026-09-26 one went
+silent from 19:29Z to 00:51Z and every MCP call timed out. Two layers cover that:
+
+- **In-process stall watchdog.** The unit sets `GBRAIN_SERVE_STALL_WATCHDOG_MS=60000`.
+  After 60s of main-loop stall the server SIGTERMs itself, then SIGKILLs 30s
+  later, and `Restart=` brings it back.
+- **External liveness probe.** `gbrain-http-liveness.timer` runs
+  `gbrain-http-liveness.sh` every minute. Healthy means the unit is active, *its
+  own* MainPID owns the port, and `/health` (a `SELECT 1` through the engine pool)
+  answers `ok` within 10s. After 3 consecutive failures it runs
+  `systemctl --user restart gbrain-http.service`. It leaves an inactive unit alone
+  and skips the first 120s after a start. Knobs are `GBRAIN_HTTP_LIVENESS_*`
+  (see the script header).
+
+```bash
+systemctl --user list-timers gbrain-http-liveness.timer
+journalctl --user -u gbrain-http-liveness.service -n 20
+```
+
+Restart the server with `systemctl --user restart gbrain-http.service`. Never
+kill its process and start `gbrain serve --http` by hand: the unit then
+restart-loops on `EADDRINUSE` behind an unsupervised server.
+
 ## Connection pooler topology (transaction pooler + dual-pool)
 
 `database_url` (config.json) points at the Supabase **transaction pooler (`:6543`)**

@@ -1,6 +1,6 @@
 [Unit]
 Description=gbrain HTTP MCP server (single shared local instance for all Claude Code sessions)
-Documentation=file://%h/tools/gbrain/deploy/local-http/README.md
+Documentation=file://%h/gbrain/deploy/local-http/README.md
 After=network-online.target
 Wants=network-online.target
 
@@ -29,6 +29,12 @@ Environment=GBRAIN_POOL_SIZE=6
 # here) and any direct-pool op hangs (e.g. `gbrain doctor`). Secret stays in the
 # 0600 env file, not in this committed unit. The leading '-' = optional file.
 EnvironmentFile=-%h/.gbrain/http.env
+# SWX: in-process event-loop stall watchdog (SIGTERM after 60s of main-loop
+# stall, SIGKILL 30s later) so a hung loop exits and Restart= brings it back.
+# The external gbrain-http-liveness.timer covers hangs the loop can't see
+# (e.g. a stuck database pool). Floor is 15s; 60s keeps heavy synchronous work
+# from tripping it.
+Environment=GBRAIN_SERVE_STALL_WATCHDOG_MS=60000
 ExecStart=%h/.bun/bin/bun %h/.bun/bin/gbrain serve --http --port 8787 --bind 127.0.0.1
 Restart=on-failure
 RestartSec=3
