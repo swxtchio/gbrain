@@ -130,9 +130,9 @@ export interface ServeOptions {
   runServeHttp?: (typeof import('./serve-http.ts'))['runServeHttp'];
   // Test seam (#4281): replaces installLoopStallWatchdog.
   installStallWatchdog?: (o: LoopStallWatchdogOpts) => WatchdogHandle;
-  // Test seam (#4281) for the loop-stall threshold in ms; 0 = off. Defaults
-  // to resolveServeStallWatchdogMs(GBRAIN_SERVE_STALL_WATCHDOG_MS) — opt-in,
-  // 15s floor, garbage values warn and stay off.
+  // Test seam (#4281) for the HTTP serve watchdog threshold in ms; 0 = off.
+  // Defaults to resolveServeStallWatchdogMs(GBRAIN_SERVE_STALL_WATCHDOG_MS) —
+  // opt-in, 15s floor, garbage values warn and stay off.
   stallWatchdogMs?: number;
   // Test seam (#4409): live in-flight stdio RPC count consulted by the
   // stdin-EOF drain. Defaults to mcp/server.ts's stdioRpcsInFlightCount.
@@ -282,31 +282,29 @@ export async function runServe(
     // `??` short-circuits, so the real module only loads when no seam is injected.
     const runHttp = opts.runServeHttp ?? (await import('./serve-http.ts')).runServeHttp;
 
-    // Loop-stall watchdog (#4281): opt-in via GBRAIN_SERVE_STALL_WATCHDOG_MS.
-    // A serve wedged in a synchronous spin can't answer requests OR run its
-    // own SIGTERM cleanup (process-cleanup.ts needs a live loop), so it holds
-    // the PGLite write lock hostage — the serve-shaped twin of the #1633 sync
-    // incident. The watchdog worker (own OS thread) is petted by the main
-    // loop; sustained lag ≥ stall latches one SIGTERM (graceful chance),
-    // lag ≥ stall+grace SIGKILLs. Armed around runServeHttp ONLY: the stdio
-    // lane has its own lifecycle above, and finishHttpServe below carries its
-    // own cleanup deadline.
+    // Serve watchdog (#4281): opt-in via GBRAIN_SERVE_STALL_WATCHDOG_MS. The
+    // worker terminates a starved main loop; while that worker is active, the
+    // HTTP route also bounds an MCP request that never completes even though
+    // the main loop is still petting. Armed around runServeHttp ONLY: stdio
+    // has its own lifecycle above, and finishHttpServe has its cleanup bound.
     const httpLog = opts.log ?? ((msg: string) => console.error(msg));
     const stallMs = opts.stallWatchdogMs ?? resolveServeStallWatchdogMs(process.env[SERVE_STALL_WATCHDOG_ENV], httpLog);
     let stallWatchdog: WatchdogHandle | null = null;
+    let requestStallTimeoutMs = 0;
     if (stallMs > 0) {
       const installStall = opts.installStallWatchdog ?? installLoopStallWatchdog;
       stallWatchdog = installStall({ stallMs, graceMs: STALL_DEFAULT_GRACE_MS, label: 'serve-http-stall', onWarn: httpLog });
       if (stallWatchdog.active) {
+        requestStallTimeoutMs = stallMs;
         httpLog(
-          `[serve-http-stall] loop-stall watchdog armed: SIGTERM after ${stallMs}ms of main-loop stall, ` +
+          `[serve-http-stall] watchdog armed: SIGTERM after ${stallMs}ms of main-loop stall or unfinished /mcp request, ` +
           `SIGKILL ${STALL_DEFAULT_GRACE_MS}ms later (${SERVE_STALL_WATCHDOG_ENV}; 0 disables)`,
         );
       }
     }
 
     try {
-      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface });
+      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, requestStallTimeoutMs });
     } finally {
       stallWatchdog?.dispose();
     }

@@ -228,17 +228,16 @@ export function installProcessWatchdog(opts: ProcessWatchdogOpts): WatchdogHandl
  * ———————————————————————————————————————————————————————————————————————— */
 
 /** Env knob for `gbrain serve --http` (opt-in; ms; 0/unset = off).
- * Large PGLite brains routinely hold the loop synchronously for tens of
- * seconds (WASM checkpoint, vacuum, big JSON parse) — prefer a value well
- * above the floor there (e.g. 60000+) so legitimate pauses never SIGTERM a
- * healthy server. */
+ * It bounds both main-loop starvation and an unfinished POST /mcp request.
+ * Large PGLite brains can pause synchronously for tens of seconds (WASM
+ * checkpoint, vacuum, large parse), while a legitimate MCP operation can also
+ * take time; choose a threshold above the longest expected work in this host. */
 export const SERVE_STALL_WATCHDOG_ENV = 'GBRAIN_SERVE_STALL_WATCHDOG_MS';
 
 /**
  * Floor for the env-configured stall threshold. A legitimate serve pauses the
  * loop for whole seconds under heavy synchronous work (large JSON parse, WASM
- * checkpoint); a sub-15s threshold would let a well-meant operator value turn
- * the watchdog into a hair-trigger that SIGTERMs healthy servers.
+ * checkpoint); a low value can turn ordinary pauses into restart triggers.
  */
 export const SERVE_STALL_FLOOR_MS = 15_000;
 

@@ -1,13 +1,14 @@
 /**
- * #4281 — loop-stall watchdog wiring in the `gbrain serve --http` branch.
+ * #4281 — watchdog wiring in the `gbrain serve --http` branch.
  *
  * Pins the arm/dispose ordering around runServeHttp WITHOUT booting the real
  * OAuth server or a real watchdog worker: everything routes through the
  * injectable ServeOptions seams (runServeHttp / installStallWatchdog /
  * stallWatchdogMs), the same pattern as the stdio lifecycle tests.
  *
- * The real worker mechanics are covered by test/process-watchdog.test.ts
- * (pure + env) and test/process-watchdog.serial.test.ts (spawned processes).
+ * Worker starvation and pending-request termination are covered by
+ * test/process-watchdog.serial.test.ts (spawned processes); state math is in
+ * test/process-watchdog.test.ts.
  */
 import { describe, test, expect } from 'bun:test';
 import { runServe, type ServeOptions } from '../src/commands/serve.ts';
@@ -18,6 +19,7 @@ interface Harness {
   engine: { disconnectCalls: number; disconnect: () => Promise<void> };
   order: string[];
   installs: LoopStallWatchdogOpts[];
+  requestStallTimeouts: number[];
   logs: string[];
   exits: number[];
   opts: ServeOptions;
@@ -26,6 +28,7 @@ interface Harness {
 function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
   const order: string[] = [];
   const installs: LoopStallWatchdogOpts[] = [];
+  const requestStallTimeouts: number[] = [];
   const logs: string[] = [];
   const exits: number[] = [];
 
@@ -43,7 +46,8 @@ function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
       exits.push(code ?? 0);
     },
     log: (m: string) => { logs.push(m); },
-    runServeHttp: async () => {
+    runServeHttp: async (_engine, httpOptions) => {
+      requestStallTimeouts.push(httpOptions.requestStallTimeoutMs ?? 0);
       order.push('run-start');
       // A real serve resolves only when its lifecycle ends; a tick is enough
       // to prove the watchdog stays armed across the await.
@@ -67,15 +71,16 @@ function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
     ...overrides,
   };
 
-  return { engine, order, installs, logs, exits, opts };
+  return { engine, order, installs, requestStallTimeouts, logs, exits, opts };
 }
 
-describe('serve --http loop-stall watchdog seam (#4281)', () => {
+describe('serve --http watchdog seam (#4281)', () => {
   test('arms before runServeHttp and disposes after it resolves, before teardown', async () => {
     const h = makeHarness();
     let finishRunServeHttp!: () => void;
     const heldServe = new Promise<void>(resolve => { finishRunServeHttp = resolve; });
-    h.opts.runServeHttp = async () => {
+    h.opts.runServeHttp = async (_engine, httpOptions) => {
+      h.requestStallTimeouts.push(httpOptions.requestStallTimeoutMs ?? 0);
       h.order.push('run-start');
       await heldServe;
       h.order.push('run-end');
@@ -91,15 +96,15 @@ describe('serve --http loop-stall watchdog seam (#4281)', () => {
     await serving;
 
     // dispose must land BETWEEN the server lifecycle resolving and the
-    // engine teardown — it stays armed for the entire runServeHttp lifetime
-    // (including a request that has not settled); finishHttpServe has its own
-    // cleanup deadline.
+    // engine teardown — both watchdog paths stay active for the full
+    // runServeHttp lifetime; finishHttpServe has its own cleanup deadline.
     expect(h.order).toEqual(['install', 'run-start', 'run-end', 'dispose', 'disconnect', 'exit']);
     expect(h.exits).toEqual([0]);
     expect(h.installs.length).toBe(1);
     expect(h.installs[0].stallMs).toBe(20_000);
     expect(h.installs[0].graceMs).toBe(STALL_DEFAULT_GRACE_MS);
     expect(h.installs[0].label).toContain('serve');
+    expect(h.requestStallTimeouts).toEqual([20_000]);
   });
 
   test('stallWatchdogMs 0 (opt-in off) never installs; the serve path is untouched', async () => {
@@ -107,6 +112,7 @@ describe('serve --http loop-stall watchdog seam (#4281)', () => {
     await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
 
     expect(h.installs.length).toBe(0);
+    expect(h.requestStallTimeouts).toEqual([0]);
     expect(h.order).toEqual(['run-start', 'run-end', 'disconnect', 'exit']);
   });
 
@@ -132,7 +138,8 @@ describe('serve --http loop-stall watchdog seam (#4281)', () => {
     await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
 
     const joined = h.logs.join('\n');
-    expect(joined).toContain('loop-stall watchdog armed');
+    expect(joined).toContain('watchdog armed');
+    expect(joined).toContain('unfinished /mcp request');
     expect(joined).toContain('GBRAIN_SERVE_STALL_WATCHDOG_MS');
   });
 

@@ -22,20 +22,26 @@
  *   stall-dispose  — install, dispose immediately, then genuinely starve past
  *                    stall+grace. A disposed watchdog must never kill.
  *
+ * Usage: bun watchdog-harness.ts serve-mcp-stall <requestTimeoutMs> <port>
+ *   serve-mcp-stall — start the real HTTP serve with a fresh in-memory PGLite
+ *                     brain, leave an authenticated get_page request pending,
+ *                     and require the armed request watchdog to signal death
+ *                     while /health still answers. This mode has no grace arg.
+ *
  * Safety net: the busy loop self-exits after 8s so a failed test kill can't hang CI.
  */
 import { installProcessWatchdog, installLoopStallWatchdog } from '../../src/core/process-watchdog.ts';
 
 const mode = process.argv[2] ?? 'starve-with';
 const deadlineMs = Number(process.argv[3] ?? 300);
-const graceMs = Number(process.argv[4] ?? 150);
+const graceMs = mode === 'serve-mcp-stall' ? 0 : Number(process.argv[4] ?? 150);
 
 if (mode === 'serve-mcp-stall') {
-  const port = Number(process.argv[5]);
+  const port = Number(process.argv[4]);
 
   async function reproduceLiveLoopMcpStall(): Promise<void> {
     if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new Error(`invalid serve-mcp-stall port: ${process.argv[5]}`);
+      throw new Error(`invalid serve-mcp-stall port: ${process.argv[4]}`);
     }
 
     const coldStartAt = Date.now();
@@ -118,6 +124,7 @@ if (mode === 'serve-mcp-stall') {
       async response => {
         mcpHeadersReceived = true;
         markMcpHeaders();
+        process.stdout.write('MCP_HEADERS_RECEIVED\n');
         try {
           await response.text();
           mcpResponseCompleted = true;
@@ -142,6 +149,7 @@ if (mode === 'serve-mcp-stall') {
     if (!healthDuringStall.ok || healthBody.status !== 'ok') {
       throw new Error(`/health did not stay healthy during the pending MCP request: ${healthDuringStall.status} ${healthBody.status}`);
     }
+    process.stdout.write('HEALTH_OK\n');
 
     // Keep the real HTTP server alive beyond the loop-stall threshold. The
     // unresolved operation holds only this request; timers and /health still
@@ -150,7 +158,7 @@ if (mode === 'serve-mcp-stall') {
     if (!mcpHeadersReceived || mcpResponseCompleted || mcpRequestFailed) {
       throw new Error(`/mcp did not remain unanswered: headers=${mcpHeadersReceived} completed=${mcpResponseCompleted} failed=${mcpRequestFailed}`);
     }
-    process.stdout.write('MCP_UNANSWERED\nHEALTH_OK\nWATCHDOG_ALIVE\n');
+    process.stdout.write('MCP_UNANSWERED\nWATCHDOG_ALIVE\n');
     abort.abort();
     process.exit(0);
   }
@@ -199,6 +207,7 @@ if (mode.startsWith('stall-')) {
   // the loop is starved (the #1633 premise), so death must come from SIGKILL.
   process.on('SIGTERM', () => { /* starved loop never runs this */ });
   installStall();
+  process.stdout.write('STALL_LOOP_START\n');
   const t0 = Date.now();
   while (Date.now() - t0 < 8000) { /* spin — no await, no yield */ }
   process.stdout.write('SURVIVED\n'); // must NOT print under stall-with

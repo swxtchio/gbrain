@@ -30,6 +30,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { STALL_DEFAULT_GRACE_MS } from '../core/process-watchdog.ts';
 import { createAdminLimiters } from './serve-http-admin-limits.ts';
 import { mountConfidentialOAuth, mountOAuthConsent, withBearerScopeHint } from './serve-http-oauth.ts';
 import type { BrainEngine } from '../core/engine.ts';
@@ -713,6 +714,8 @@ interface ServeHttpOptions {
    * so per-client rows can narrow below it but never widen past it.
    */
   surface?: McpSurface;
+  /** In-flight POST /mcp deadline; supplied only while the serve watchdog is armed. */
+  requestStallTimeoutMs?: number;
   /**
    * #2624: force-print the generated admin bootstrap token even on a
    * non-TTY (containerized) start. By default the raw token is only printed
@@ -865,6 +868,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // a misconfiguration; we WARN to stderr at startup in that case rather
   // than silently binding loopback only.
   const bind = options.bind ?? '127.0.0.1';
+  const requestStallTimeoutMs = options.requestStallTimeoutMs ?? 0;
   const config = loadConfig() || { engine: 'pglite' as const };
 
   if (logFullParams) {
@@ -2018,7 +2022,42 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
-  app.post('/mcp', withBearerScopeHint(
+  const mcpRequestStallWatchdog: RequestHandler = (_req, res, next) => {
+    const timeoutMs = requestStallTimeoutMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      next();
+      return;
+    }
+
+    const startedAt = Date.now();
+    const checkEveryMs = Math.min(1000, Math.max(10, Math.floor(timeoutMs / 4)));
+    const check = setInterval(() => {
+      if (res.writableEnded || res.destroyed) {
+        clearInterval(check);
+        return;
+      }
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs < timeoutMs) return;
+
+      clearInterval(check);
+      console.error(`[serve-http-request-watchdog] POST /mcp is still in flight after ${elapsedMs}ms (threshold ${timeoutMs}ms); sending SIGTERM`);
+      try { process.kill(process.pid, 'SIGTERM'); } catch { /* process is already exiting */ }
+
+      const hardKill = setTimeout(() => {
+        console.error('[serve-http-request-watchdog] graceful shutdown did not finish; sending SIGKILL');
+        try { process.kill(process.pid, 'SIGKILL'); } catch { /* process is already exiting */ }
+      }, STALL_DEFAULT_GRACE_MS);
+      (hardKill as unknown as { unref?: () => void }).unref?.();
+    }, checkEveryMs);
+    (check as unknown as { unref?: () => void }).unref?.();
+
+    const clear = () => clearInterval(check);
+    res.once('finish', clear);
+    res.once('close', clear);
+    next();
+  };
+
+  app.post('/mcp', mcpRequestStallWatchdog, withBearerScopeHint(
     requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read'],
   ), async (req: Request, res: Response) => {
     const startTime = Date.now();
