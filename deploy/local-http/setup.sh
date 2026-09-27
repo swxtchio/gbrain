@@ -20,12 +20,20 @@ mkdir -p "${DEST_DIR}"
 # so the port this script probes is the port the service actually binds.
 sed "s/--port 8787 /--port ${PORT} /" "${SRC_DIR}/${UNIT}" > "${DEST_DIR}/${UNIT}"
 
+# Liveness probe: Restart=on-failure never catches a server that hangs while
+# holding the port, so a timer restarts the unit after consecutive failed checks.
+# The script runs from this checkout; render its absolute path into the unit.
+LIVENESS="gbrain-http-liveness"
+sed "s#@LIVENESS_SCRIPT@#${SRC_DIR}/${LIVENESS}.sh#" "${SRC_DIR}/${LIVENESS}.service" > "${DEST_DIR}/${LIVENESS}.service"
+cp "${SRC_DIR}/${LIVENESS}.timer" "${DEST_DIR}/${LIVENESS}.timer"
+
 echo "==> Reloading user systemd, enabling, and (re)starting"
 systemctl --user daemon-reload
 systemctl --user enable "${UNIT}"
 # restart, not `enable --now`: --now only starts an INACTIVE unit, so re-running
 # this after editing the unit left the old process and settings running.
 systemctl --user restart "${UNIT}"
+systemctl --user enable --now "${LIVENESS}.timer"
 
 echo "==> Waiting for ${HEALTH_URL} (up to 30s)"
 for _ in $(seq 1 30); do
