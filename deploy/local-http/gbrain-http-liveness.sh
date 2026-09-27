@@ -59,7 +59,8 @@ if ! systemctl --user is-active --quiet "$UNIT"; then
 fi
 
 main_pid="$(main_pid_of)"
-read -r seen_pid hung degraded < "$COUNTS" 2>/dev/null || true
+# Guard the read: a failed `<` redirection prints to stderr even with 2>/dev/null.
+[ -f "$COUNTS" ] && read -r seen_pid hung degraded < "$COUNTS"
 if [ "${seen_pid:-}" != "$main_pid" ]; then
   hung=0 degraded=0 # a different process: its predecessor's failures don't count
 fi
