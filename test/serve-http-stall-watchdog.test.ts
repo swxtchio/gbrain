@@ -14,12 +14,14 @@ import { describe, test, expect } from 'bun:test';
 import { runServe, type ServeOptions } from '../src/commands/serve.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { STALL_DEFAULT_GRACE_MS, type LoopStallWatchdogOpts } from '../src/core/process-watchdog.ts';
+import { DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS, SERVE_MCP_REQUEST_TIMEOUT_ENV } from '../src/commands/serve-http-request-watchdog.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 interface Harness {
   engine: { disconnectCalls: number; disconnect: () => Promise<void> };
   order: string[];
   installs: LoopStallWatchdogOpts[];
-  requestStallTimeouts: number[];
+  mcpRequestTimeouts: number[];
   logs: string[];
   exits: number[];
   opts: ServeOptions;
@@ -28,7 +30,7 @@ interface Harness {
 function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
   const order: string[] = [];
   const installs: LoopStallWatchdogOpts[] = [];
-  const requestStallTimeouts: number[] = [];
+  const mcpRequestTimeouts: number[] = [];
   const logs: string[] = [];
   const exits: number[] = [];
 
@@ -47,7 +49,7 @@ function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
     },
     log: (m: string) => { logs.push(m); },
     runServeHttp: async (_engine, httpOptions) => {
-      requestStallTimeouts.push(httpOptions.requestStallTimeoutMs ?? 0);
+      mcpRequestTimeouts.push(httpOptions.mcpRequestTimeoutMs ?? 0);
       order.push('run-start');
       // A real serve resolves only when its lifecycle ends; a tick is enough
       // to prove the watchdog stays armed across the await.
@@ -68,10 +70,11 @@ function makeHarness(overrides: Partial<ServeOptions> = {}): Harness {
       };
     },
     stallWatchdogMs: 20_000,
+    mcpRequestTimeoutMs: DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS,
     ...overrides,
   };
 
-  return { engine, order, installs, requestStallTimeouts, logs, exits, opts };
+  return { engine, order, installs, mcpRequestTimeouts, logs, exits, opts };
 }
 
 describe('serve --http watchdog seam (#4281)', () => {
@@ -80,7 +83,7 @@ describe('serve --http watchdog seam (#4281)', () => {
     let finishRunServeHttp!: () => void;
     const heldServe = new Promise<void>(resolve => { finishRunServeHttp = resolve; });
     h.opts.runServeHttp = async (_engine, httpOptions) => {
-      h.requestStallTimeouts.push(httpOptions.requestStallTimeoutMs ?? 0);
+      h.mcpRequestTimeouts.push(httpOptions.mcpRequestTimeoutMs ?? 0);
       h.order.push('run-start');
       await heldServe;
       h.order.push('run-end');
@@ -104,16 +107,39 @@ describe('serve --http watchdog seam (#4281)', () => {
     expect(h.installs[0].stallMs).toBe(20_000);
     expect(h.installs[0].graceMs).toBe(STALL_DEFAULT_GRACE_MS);
     expect(h.installs[0].label).toContain('serve');
-    expect(h.requestStallTimeouts).toEqual([20_000]);
+    expect(h.mcpRequestTimeouts).toEqual([DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS]);
   });
 
-  test('stallWatchdogMs 0 (opt-in off) never installs; the serve path is untouched', async () => {
-    const h = makeHarness({ stallWatchdogMs: 0 });
-    await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
+  test('turning off the loop watchdog leaves the independent request deadline armed', async () => {
+    const h = makeHarness({ stallWatchdogMs: 0, mcpRequestTimeoutMs: undefined });
+    await withEnv({ [SERVE_MCP_REQUEST_TIMEOUT_ENV]: '45000' }, () =>
+      runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts));
 
     expect(h.installs.length).toBe(0);
-    expect(h.requestStallTimeouts).toEqual([0]);
+    expect(h.mcpRequestTimeouts).toEqual([45_000]);
     expect(h.order).toEqual(['run-start', 'run-end', 'disconnect', 'exit']);
+    expect(h.logs.join('\n')).toContain('request watchdog armed');
+    expect(h.logs.join('\n')).not.toContain('loop watchdog armed');
+  });
+
+  test('request deadline stays armed when the loop worker is inert', async () => {
+    const h = makeHarness({ mcpRequestTimeoutMs: 45_000 });
+    h.opts.installStallWatchdog = () => ({ dispose() {}, get active() { return false; } });
+    await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
+
+    expect(h.mcpRequestTimeouts).toEqual([45_000]);
+    expect(h.logs.join('\n')).toContain('request watchdog armed');
+    expect(h.logs.join('\n')).not.toContain('loop watchdog armed');
+  });
+
+  test('request deadline can be disabled without disabling the loop watchdog', async () => {
+    const h = makeHarness({ mcpRequestTimeoutMs: 0 });
+    await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
+
+    expect(h.installs.length).toBe(1);
+    expect(h.mcpRequestTimeouts).toEqual([0]);
+    expect(h.logs.join('\n')).toContain('loop watchdog armed');
+    expect(h.logs.join('\n')).not.toContain('request watchdog armed');
   });
 
   test('disposes the watchdog even when runServeHttp rejects', async () => {
@@ -138,14 +164,16 @@ describe('serve --http watchdog seam (#4281)', () => {
     await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
 
     const joined = h.logs.join('\n');
-    expect(joined).toContain('watchdog armed');
-    expect(joined).toContain('unfinished /mcp request');
+    expect(joined).toContain('loop watchdog armed');
+    expect(joined).toContain('request watchdog armed');
     expect(joined).toContain('GBRAIN_SERVE_STALL_WATCHDOG_MS');
+    expect(joined).toContain(SERVE_MCP_REQUEST_TIMEOUT_ENV);
   });
 
-  test('stays silent (no armed line) when off', async () => {
-    const h = makeHarness({ stallWatchdogMs: 0 });
+  test('stays silent when both watchdogs are off', async () => {
+    const h = makeHarness({ stallWatchdogMs: 0, mcpRequestTimeoutMs: 0 });
     await runServe(h.engine as unknown as BrainEngine, ['--http'], h.opts);
-    expect(h.logs.join('\n')).not.toContain('loop-stall watchdog armed');
+    expect(h.logs.join('\n')).not.toContain('loop watchdog armed');
+    expect(h.logs.join('\n')).not.toContain('request watchdog armed');
   });
 });

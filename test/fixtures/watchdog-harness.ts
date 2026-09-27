@@ -77,7 +77,7 @@ if (mode === 'serve-mcp-stall') {
     const serve = runServe(
       engine,
       ['--http', '--port', String(port), '--bind', '127.0.0.1', '--suppress-bootstrap-token'],
-      { stallWatchdogMs: deadlineMs, sweepEnabled: false },
+      { stallWatchdogMs: 0, mcpRequestTimeoutMs: deadlineMs, sweepEnabled: false },
     );
     void serve.catch(error => {
       process.stderr.write(`SERVE_FAILED: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -150,16 +150,23 @@ if (mode === 'serve-mcp-stall') {
       throw new Error(`/health did not stay healthy during the pending MCP request: ${healthDuringStall.status} ${healthBody.status}`);
     }
     process.stdout.write('HEALTH_OK\n');
+    abort.abort();
+    process.stdout.write('MCP_CLIENT_ABORTED\n');
+    const healthAfterAbort = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
+    const healthAfterAbortBody = await healthAfterAbort.json() as { status?: string };
+    if (!healthAfterAbort.ok || healthAfterAbortBody.status !== 'ok') {
+      throw new Error(`/health stopped answering after the MCP client disconnected: ${healthAfterAbort.status} ${healthAfterAbortBody.status}`);
+    }
+    process.stdout.write('HEALTH_OK_AFTER_ABORT\n');
 
-    // Keep the real HTTP server alive beyond the loop-stall threshold. The
-    // unresolved operation holds only this request; timers and /health still
-    // run on the main loop, so the watchdog continues to receive pets.
-    await new Promise(resolve => setTimeout(resolve, deadlineMs + 500));
+    // Keep the real HTTP server alive beyond the request deadline. The
+    // unresolved operation survives the client disconnect while /health and
+    // other main-loop activity remain available.
+    await new Promise(resolve => setTimeout(resolve, deadlineMs + 2500));
     if (!mcpHeadersReceived || mcpResponseCompleted || mcpRequestFailed) {
       throw new Error(`/mcp did not remain unanswered: headers=${mcpHeadersReceived} completed=${mcpResponseCompleted} failed=${mcpRequestFailed}`);
     }
     process.stdout.write('MCP_UNANSWERED\nWATCHDOG_ALIVE\n');
-    abort.abort();
     process.exit(0);
   }
 
@@ -207,7 +214,6 @@ if (mode.startsWith('stall-')) {
   // the loop is starved (the #1633 premise), so death must come from SIGKILL.
   process.on('SIGTERM', () => { /* starved loop never runs this */ });
   installStall();
-  process.stdout.write('STALL_LOOP_START\n');
   const t0 = Date.now();
   while (Date.now() - t0 < 8000) { /* spin — no await, no yield */ }
   process.stdout.write('SURVIVED\n'); // must NOT print under stall-with

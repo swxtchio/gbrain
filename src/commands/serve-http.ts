@@ -30,15 +30,15 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { STALL_DEFAULT_GRACE_MS } from '../core/process-watchdog.ts';
 import { createAdminLimiters } from './serve-http-admin-limits.ts';
 import { mountConfidentialOAuth, mountOAuthConsent, withBearerScopeHint } from './serve-http-oauth.ts';
+import { startServeMcpRequestWatchdog } from './serve-http-request-watchdog.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { operations, OperationError, opAllowedForBoundClient } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
 import { disabledOpsForPublishGates } from '../mcp/publish-gates.ts';
 import { resolveMcpInstructions } from '../mcp/instructions.ts';
-import { installCapabilitiesResource, mcpAdministrationGuidance } from '../mcp/capabilities.ts';
+import { installCapabilitiesResource, mcpAdministrationGuidance, type McpOperationTracker } from '../mcp/capabilities.ts';
 import { createSkillResources } from '../mcp/skill-resources.ts';
 import { resolveAuthCapabilities } from '../core/harness/capabilities.ts';
 import { publicHarnessMetadata } from '../core/harness/registry.ts';
@@ -714,8 +714,8 @@ interface ServeHttpOptions {
    * so per-client rows can narrow below it but never widen past it.
    */
   surface?: McpSurface;
-  /** In-flight POST /mcp deadline; supplied only while the serve watchdog is armed. */
-  requestStallTimeoutMs?: number;
+  /** Separate in-flight POST /mcp operation deadline; zero disables it. */
+  mcpRequestTimeoutMs?: number;
   /**
    * #2624: force-print the generated admin bootstrap token even on a
    * non-TTY (containerized) start. By default the raw token is only printed
@@ -868,7 +868,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // a misconfiguration; we WARN to stderr at startup in that case rather
   // than silently binding loopback only.
   const bind = options.bind ?? '127.0.0.1';
-  const requestStallTimeoutMs = options.requestStallTimeoutMs ?? 0;
+  const mcpRequestTimeoutMs = options.mcpRequestTimeoutMs ?? 0;
   const config = loadConfig() || { engine: 'pglite' as const };
 
   if (logFullParams) {
@@ -2022,44 +2022,80 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
+  type McpRequestWatchdogState = {
+    serverHandlerStarted: boolean;
+    transportCompleted: boolean;
+    activeServerOperations: number;
+    stop: () => void;
+  };
+  const mcpRequestWatchdogs = new WeakMap<Response, McpRequestWatchdogState>();
+  const stopMcpRequestWatchdogIfSettled = (state: McpRequestWatchdogState): void => {
+    if (state.transportCompleted && state.activeServerOperations === 0) state.stop();
+  };
   const mcpRequestStallWatchdog: RequestHandler = (_req, res, next) => {
-    const timeoutMs = requestStallTimeoutMs;
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      next();
-      return;
+    if (mcpRequestTimeoutMs > 0) {
+      const state: McpRequestWatchdogState = {
+        serverHandlerStarted: false,
+        transportCompleted: false,
+        activeServerOperations: 0,
+        stop: startServeMcpRequestWatchdog(mcpRequestTimeoutMs),
+      };
+      mcpRequestWatchdogs.set(res, state);
+      // Auth failures finish before the operation handler starts. A socket
+      // close alone is deliberately NOT completion: the server operation can
+      // keep running after its client gives up.
+      res.once('finish', () => { if (!state.serverHandlerStarted) state.stop(); });
     }
-
-    const startedAt = Date.now();
-    const checkEveryMs = Math.min(1000, Math.max(10, Math.floor(timeoutMs / 4)));
-    const check = setInterval(() => {
-      if (res.writableEnded || res.destroyed) {
-        clearInterval(check);
-        return;
-      }
-      const elapsedMs = Date.now() - startedAt;
-      if (elapsedMs < timeoutMs) return;
-
-      clearInterval(check);
-      console.error(`[serve-http-request-watchdog] POST /mcp is still in flight after ${elapsedMs}ms (threshold ${timeoutMs}ms); sending SIGTERM`);
-      try { process.kill(process.pid, 'SIGTERM'); } catch { /* process is already exiting */ }
-
-      const hardKill = setTimeout(() => {
-        console.error('[serve-http-request-watchdog] graceful shutdown did not finish; sending SIGKILL');
-        try { process.kill(process.pid, 'SIGKILL'); } catch { /* process is already exiting */ }
-      }, STALL_DEFAULT_GRACE_MS);
-      (hardKill as unknown as { unref?: () => void }).unref?.();
-    }, checkEveryMs);
-    (check as unknown as { unref?: () => void }).unref?.();
-
-    const clear = () => clearInterval(check);
-    res.once('finish', clear);
-    res.once('close', clear);
     next();
   };
-
-  app.post('/mcp', mcpRequestStallWatchdog, withBearerScopeHint(
+  const mcpBearerAuth = withBearerScopeHint(
     requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read'],
-  ), async (req: Request, res: Response) => {
+  );
+  const trackMcpBearerAuth: RequestHandler = (req, res, next) => {
+    const watchdog = mcpRequestWatchdogs.get(res);
+    if (!watchdog) {
+      return mcpBearerAuth(req, res, next);
+    }
+    watchdog.activeServerOperations += 1;
+    let authorized = false;
+    const authNext: NextFunction = error => {
+      if (!error) authorized = true;
+      next(error);
+    };
+    void Promise.resolve(mcpBearerAuth(req, res, authNext)).then(
+      () => {
+        watchdog.activeServerOperations -= 1;
+        if (!authorized) watchdog.transportCompleted = true;
+        stopMcpRequestWatchdogIfSettled(watchdog);
+      },
+      error => {
+        watchdog.activeServerOperations -= 1;
+        watchdog.transportCompleted = true;
+        stopMcpRequestWatchdogIfSettled(watchdog);
+        next(error);
+      },
+    );
+  };
+  let handleMcpPost!: (req: Request, res: Response) => Promise<void>;
+
+  app.post('/mcp', mcpRequestStallWatchdog, trackMcpBearerAuth, (req: Request, res: Response, next: NextFunction) => {
+    const watchdog = mcpRequestWatchdogs.get(res);
+    if (watchdog) watchdog.serverHandlerStarted = true;
+    const completeTransport = () => {
+      if (!watchdog) return;
+      watchdog.transportCompleted = true;
+      stopMcpRequestWatchdogIfSettled(watchdog);
+    };
+    void handleMcpPost(req, res).then(
+      completeTransport,
+      error => {
+        completeTransport();
+        next(error);
+      },
+    );
+  });
+
+  handleMcpPost = async (req: Request, res: Response): Promise<void> => {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
@@ -2119,6 +2155,17 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         instructions: resolveMcpInstructions(config, process.env, { writeback: writebackOpts }),
       },
     );
+    const trackMcpServerOperation: McpOperationTracker = async operation => {
+      const watchdog = mcpRequestWatchdogs.get(res);
+      if (!watchdog) return operation();
+      watchdog.activeServerOperations += 1;
+      try {
+        return await operation();
+      } finally {
+        watchdog.activeServerOperations -= 1;
+        stopMcpRequestWatchdogIfSettled(watchdog);
+      }
+    };
     installCapabilitiesResource(server, async () => {
       return { transport: authInfo.clientId.startsWith('gbrain_cl_') ? 'oauth' : 'legacy', client_id: authInfo.clientId,
         ...await resolveAuthCapabilities(authInfo, engine, config), administration: mcpAdministrationGuidance(mcpResourceUrl.toString()) };
@@ -2128,8 +2175,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       return { remote: true, transport: 'http', sourceId, auth: authInfo, config,
         localFederatedSourceIds: await noGrantFederatedScope(engine, authInfo.hasSourceGrant, sourceId),
         allowedOps: surfaceAllowedOps, surface, surfaceCeiling };
-    }));
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    }), trackMcpServerOperation);
+
+    server.setRequestHandler(ListToolsRequestSchema, () => trackMcpServerOperation(async () => {
       // WP1 honest catalog: the advertised list is exactly what THIS token
       // can call. Three per-request filters, cheapest first:
       //   1. token scope — a read-only token never sees admin/write tools;
@@ -2190,9 +2238,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         timestamp: new Date().toISOString(),
       });
       return { tools };
-    });
+    }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, (request) => trackMcpServerOperation(async () => {
       const { name, arguments: params } = request.params;
       const op = mcpOperations.find(o => o.name === name);
       if (!op) {
@@ -2450,7 +2498,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         timestamp: new Date().toISOString(),
       });
       return toolResult;
-    });
+    }));
 
     // F14: wrap transport setup + handleRequest in try/catch. Without this,
     // an SDK-level throw (e.g., schema parse failure on a malformed request)
@@ -2473,7 +2521,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         });
       }
     }
-  });
+  };
 
   // ---------------------------------------------------------------------------
   // v0.38 ingestion substrate — POST /ingest (webhook source)

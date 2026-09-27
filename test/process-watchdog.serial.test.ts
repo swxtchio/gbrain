@@ -119,7 +119,7 @@ describe('serve watchdog integration (Bun-pinned, #4281)', () => {
     expect(r.exitCode).toBe(0);
   }, 15000);
 
-  test('a stalled /mcp request triggers the armed watchdog while /health remains healthy', async () => {
+  test('a disconnected /mcp client does not disarm the server operation deadline', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-watchdog-serve-home-'));
     const port = await unusedLoopbackPort();
     const env = Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)) as Record<string, string>;
@@ -145,13 +145,15 @@ describe('serve watchdog integration (Bun-pinned, #4281)', () => {
       expect(r.stdout).toContain('MCP_HEADERS_RECEIVED');
       expect(r.stdout).toContain('WATCHDOG_SIGTERM');
       expect(r.stdout).toContain('HEALTH_OK');
+      expect(r.stdout).toContain('MCP_CLIENT_ABORTED');
+      expect(r.stdout).toContain('HEALTH_OK_AFTER_ABORT');
       expect(r.stdout).not.toContain('MCP_UNANSWERED');
       const coldBindMs = /COLD_BIND_MS=(\d+)/.exec(r.stdout)?.[1];
       expect(coldBindMs).toBeDefined();
       if (process.env.GBRAIN_TEST_COLD_BIND_REPORT === '1') {
         console.log(`isolated PGLite cold start to /health 200: ${coldBindMs}ms`);
       }
-      expect(r.stderr).toContain('[serve-http-request-watchdog] POST /mcp is still in flight');
+      expect(r.stderr).toContain('[serve-http-request-watchdog] POST /mcp operation is still unresolved');
       expect(r.stderr).not.toContain('main loop unresponsive for');
     } finally {
       rmSync(home, { recursive: true, force: true });
