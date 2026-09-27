@@ -78,7 +78,9 @@ afterEach(() => {
 
 describe('gbrain-http-liveness.sh', () => {
   test('a healthy unit is left alone', () => {
-    expect(probe().exitCode).toBe(0);
+    const first = probe(); // no state file yet
+    expect(first.exitCode).toBe(0);
+    expect(first.stderr.toString()).toBe(''); // no "No such file" noise in the journal
     expect(counts()).toBe('4242 0 0');
     expect(restarts()).toBe(0);
     expect(log()).toContain('http://127.0.0.1:8787/health');
