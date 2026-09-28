@@ -22,13 +22,160 @@
  *   stall-dispose  — install, dispose immediately, then genuinely starve past
  *                    stall+grace. A disposed watchdog must never kill.
  *
+ * Usage: bun watchdog-harness.ts serve-mcp-stall <requestTimeoutMs> <port>
+ *   serve-mcp-stall — start the real HTTP serve with a fresh in-memory PGLite
+ *                     brain, leave an authenticated get_page request pending,
+ *                     and require the armed request watchdog to signal death
+ *                     while /health still answers. This mode has no grace arg.
+ *
  * Safety net: the busy loop self-exits after 8s so a failed test kill can't hang CI.
  */
 import { installProcessWatchdog, installLoopStallWatchdog } from '../../src/core/process-watchdog.ts';
 
 const mode = process.argv[2] ?? 'starve-with';
 const deadlineMs = Number(process.argv[3] ?? 300);
-const graceMs = Number(process.argv[4] ?? 150);
+const graceMs = mode === 'serve-mcp-stall' ? 0 : Number(process.argv[4] ?? 150);
+
+if (mode === 'serve-mcp-stall') {
+  const port = Number(process.argv[4]);
+
+  async function reproduceLiveLoopMcpStall(): Promise<void> {
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error(`invalid serve-mcp-stall port: ${process.argv[4]}`);
+    }
+
+    const coldStartAt = Date.now();
+    const [{ PGLiteEngine }, { runServe }, { generateToken, hashToken }] = await Promise.all([
+      import('../../src/core/pglite-engine.ts'),
+      import('../../src/commands/serve.ts'),
+      import('../../src/core/utils.ts'),
+    ]);
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+
+    const token = generateToken('gbrain_');
+    await engine.executeRaw(
+      `INSERT INTO access_tokens (id, name, token_hash, permissions)
+       VALUES (gen_random_uuid(), $1, $2, $3::text::jsonb)`,
+      ['watchdog-live-mcp-stall', hashToken(token), JSON.stringify({ takes_holders: ['world'] })],
+    );
+
+    let markMcpEntered!: () => void;
+    const mcpEntered = new Promise<void>(resolve => { markMcpEntered = resolve; });
+    (engine as unknown as { readPageSnapshot: (...args: unknown[]) => Promise<never> }).readPageSnapshot = async () => {
+      process.stdout.write('MCP_HANDLER_ENTERED\n');
+      markMcpEntered();
+      return await new Promise<never>(() => {});
+    };
+
+    process.once('SIGTERM', () => {
+      process.stdout.write('WATCHDOG_SIGTERM\n');
+      process.exit(23);
+    });
+
+    const serve = runServe(
+      engine,
+      ['--http', '--port', String(port), '--bind', '127.0.0.1', '--suppress-bootstrap-token'],
+      { stallWatchdogMs: 0, mcpRequestTimeoutMs: deadlineMs, sweepEnabled: false },
+    );
+    void serve.catch(error => {
+      process.stderr.write(`SERVE_FAILED: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exit(1);
+    });
+
+    const base = `http://127.0.0.1:${port}`;
+    const bindDeadline = Date.now() + 30_000;
+    let coldHealth: Response | undefined;
+    while (Date.now() < bindDeadline) {
+      try {
+        const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
+        if (response.ok && (await response.json() as { status?: string }).status === 'ok') {
+          coldHealth = response;
+          break;
+        }
+      } catch { /* the HTTP listener is still starting */ }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!coldHealth) throw new Error('cold serve did not answer /health within 30s');
+    process.stdout.write(`COLD_BIND_MS=${Date.now() - coldStartAt}\n`);
+
+    const abort = new AbortController();
+    let mcpHeadersReceived = false;
+    let mcpResponseCompleted = false;
+    let mcpRequestFailed = false;
+    let markMcpHeaders!: () => void;
+    const mcpHeaders = new Promise<void>(resolve => { markMcpHeaders = resolve; });
+    void fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'get_page', arguments: { slug: 'watchdog-live-stall' } },
+      }),
+      signal: abort.signal,
+    }).then(
+      async response => {
+        mcpHeadersReceived = true;
+        markMcpHeaders();
+        process.stdout.write('MCP_HEADERS_RECEIVED\n');
+        try {
+          await response.text();
+          mcpResponseCompleted = true;
+        } catch {
+          if (!abort.signal.aborted) mcpRequestFailed = true;
+        }
+      },
+      () => { if (!abort.signal.aborted) mcpRequestFailed = true; },
+    );
+
+    await Promise.race([
+      mcpEntered,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('/mcp did not reach the operation handler within 10s')), 10_000)),
+    ]);
+    await Promise.race([
+      mcpHeaders,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('/mcp did not accept the request within 10s')), 10_000)),
+    ]);
+
+    const healthDuringStall = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
+    const healthBody = await healthDuringStall.json() as { status?: string };
+    if (!healthDuringStall.ok || healthBody.status !== 'ok') {
+      throw new Error(`/health did not stay healthy during the pending MCP request: ${healthDuringStall.status} ${healthBody.status}`);
+    }
+    process.stdout.write('HEALTH_OK\n');
+    abort.abort();
+    process.stdout.write('MCP_CLIENT_ABORTED\n');
+    const healthAfterAbort = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
+    const healthAfterAbortBody = await healthAfterAbort.json() as { status?: string };
+    if (!healthAfterAbort.ok || healthAfterAbortBody.status !== 'ok') {
+      throw new Error(`/health stopped answering after the MCP client disconnected: ${healthAfterAbort.status} ${healthAfterAbortBody.status}`);
+    }
+    process.stdout.write('HEALTH_OK_AFTER_ABORT\n');
+
+    // Keep the real HTTP server alive beyond the request deadline. The
+    // unresolved operation survives the client disconnect while /health and
+    // other main-loop activity remain available.
+    await new Promise(resolve => setTimeout(resolve, deadlineMs + 2500));
+    if (!mcpHeadersReceived || mcpResponseCompleted || mcpRequestFailed) {
+      throw new Error(`/mcp did not remain unanswered: headers=${mcpHeadersReceived} completed=${mcpResponseCompleted} failed=${mcpRequestFailed}`);
+    }
+    process.stdout.write('MCP_UNANSWERED\nWATCHDOG_ALIVE\n');
+    process.exit(0);
+  }
+
+  void reproduceLiveLoopMcpStall().catch(error => {
+    process.stderr.write(`REPRO_FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+  await new Promise<void>(() => {});
+}
 
 if (mode.startsWith('stall-')) {
   const installStall = () => installLoopStallWatchdog({

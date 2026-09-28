@@ -31,7 +31,8 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelconte
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { createAdminLimiters } from './serve-http-admin-limits.ts';
-import { mountConfidentialOAuth, mountOAuthConsent, withBearerScopeHint } from './serve-http-oauth.ts';
+import { mountConfidentialOAuth, mountOAuthConsent } from './serve-http-oauth.ts';
+import { mountServeMcpRequestRoutes } from './serve-http-request-watchdog.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { operations, OperationError, opAllowedForBoundClient } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
@@ -713,6 +714,8 @@ interface ServeHttpOptions {
    * so per-client rows can narrow below it but never widen past it.
    */
   surface?: McpSurface;
+  /** Separate in-flight POST /mcp operation deadline; zero disables it. */
+  mcpRequestTimeoutMs?: number;
   /**
    * #2624: force-print the generated admin bootstrap token even on a
    * non-TTY (containerized) start. By default the raw token is only printed
@@ -2007,20 +2010,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   }
 
-  // v0.36.x #1076: MCP Streamable HTTP spec — GET /mcp opens an optional SSE
-  // backchannel for server-initiated messages. gbrain's transport is stateless
-  // and doesn't push server-initiated messages, so per spec we MUST return 405
-  // (not 404) so probing clients (claude.ai, etc.) recognize this as an MCP
-  // endpoint, not a missing route. Without this, clients display "endpoint not
-  // found" instead of "endpoint exists but no SSE channel."
-  app.get('/mcp', (_req: Request, res: Response) => {
-    res.set('Allow', 'POST, DELETE');
-    res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
-  });
+  const mcpRequestWatchdog = mountServeMcpRequestRoutes(
+    app, options.mcpRequestTimeoutMs ?? 0, { verifier: resourceVerifier, resourceMetadataUrl }, handleMcpPost,
+  );
 
-  app.post('/mcp', withBearerScopeHint(
-    requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read'],
-  ), async (req: Request, res: Response) => {
+  async function handleMcpPost(req: Request, res: Response): Promise<void> {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
@@ -2080,6 +2074,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         instructions: resolveMcpInstructions(config, process.env, { writeback: writebackOpts }),
       },
     );
+    const trackMcpServerOperation = <T>(operation: () => Promise<T>): Promise<T> =>
+      mcpRequestWatchdog.trackServerOperation(res, operation);
     installCapabilitiesResource(server, async () => {
       return { transport: authInfo.clientId.startsWith('gbrain_cl_') ? 'oauth' : 'legacy', client_id: authInfo.clientId,
         ...await resolveAuthCapabilities(authInfo, engine, config), administration: mcpAdministrationGuidance(mcpResourceUrl.toString()) };
@@ -2089,8 +2085,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       return { remote: true, transport: 'http', sourceId, auth: authInfo, config,
         localFederatedSourceIds: await noGrantFederatedScope(engine, authInfo.hasSourceGrant, sourceId),
         allowedOps: surfaceAllowedOps, surface, surfaceCeiling };
-    }));
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    }), trackMcpServerOperation);
+
+    server.setRequestHandler(ListToolsRequestSchema, () => trackMcpServerOperation(async () => {
       // WP1 honest catalog: the advertised list is exactly what THIS token
       // can call. Three per-request filters, cheapest first:
       //   1. token scope — a read-only token never sees admin/write tools;
@@ -2151,9 +2148,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         timestamp: new Date().toISOString(),
       });
       return { tools };
-    });
+    }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, (request) => trackMcpServerOperation(async () => {
       const { name, arguments: params } = request.params;
       const op = mcpOperations.find(o => o.name === name);
       if (!op) {
@@ -2411,7 +2408,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         timestamp: new Date().toISOString(),
       });
       return toolResult;
-    });
+    }));
 
     // F14: wrap transport setup + handleRequest in try/catch. Without this,
     // an SDK-level throw (e.g., schema parse failure on a malformed request)
@@ -2434,7 +2431,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         });
       }
     }
-  });
+  }
 
   // ---------------------------------------------------------------------------
   // v0.38 ingestion substrate — POST /ingest (webhook source)

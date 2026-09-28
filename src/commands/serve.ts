@@ -12,6 +12,11 @@ import {
   type LoopStallWatchdogOpts,
   type WatchdogHandle,
 } from '../core/process-watchdog.ts';
+import {
+  DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS,
+  resolveServeMcpRequestTimeoutMs,
+  SERVE_MCP_REQUEST_TIMEOUT_ENV,
+} from './serve-http-request-watchdog.ts';
 // #4409: serve-sync-runner is deliberately NOT imported statically. The #4362
 // static import put its 370-line module (plus dependency graph) on EVERY serve
 // boot — heavy enough for a one-shot client's stdin EOF to win the race against
@@ -130,10 +135,13 @@ export interface ServeOptions {
   runServeHttp?: (typeof import('./serve-http.ts'))['runServeHttp'];
   // Test seam (#4281): replaces installLoopStallWatchdog.
   installStallWatchdog?: (o: LoopStallWatchdogOpts) => WatchdogHandle;
-  // Test seam (#4281) for the loop-stall threshold in ms; 0 = off. Defaults
-  // to resolveServeStallWatchdogMs(GBRAIN_SERVE_STALL_WATCHDOG_MS) — opt-in,
-  // 15s floor, garbage values warn and stay off.
+  // Test seam (#4281) for the HTTP serve watchdog threshold in ms; 0 = off.
+  // Defaults to resolveServeStallWatchdogMs(GBRAIN_SERVE_STALL_WATCHDOG_MS) —
+  // opt-in, 15s floor, garbage values warn and stay off.
   stallWatchdogMs?: number;
+  // Separate POST /mcp operation deadline; 0 disables it without changing the
+  // main-loop watchdog. Defaults to GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_MS.
+  mcpRequestTimeoutMs?: number;
   // Test seam (#4409): live in-flight stdio RPC count consulted by the
   // stdin-EOF drain. Defaults to mcp/server.ts's stdioRpcsInFlightCount.
   pendingRpcs?: () => number;
@@ -282,31 +290,45 @@ export async function runServe(
     // `??` short-circuits, so the real module only loads when no seam is injected.
     const runHttp = opts.runServeHttp ?? (await import('./serve-http.ts')).runServeHttp;
 
-    // Loop-stall watchdog (#4281): opt-in via GBRAIN_SERVE_STALL_WATCHDOG_MS.
-    // A serve wedged in a synchronous spin can't answer requests OR run its
-    // own SIGTERM cleanup (process-cleanup.ts needs a live loop), so it holds
-    // the PGLite write lock hostage — the serve-shaped twin of the #1633 sync
-    // incident. The watchdog worker (own OS thread) is petted by the main
-    // loop; sustained lag ≥ stall latches one SIGTERM (graceful chance),
-    // lag ≥ stall+grace SIGKILLs. Armed around runServeHttp ONLY: the stdio
-    // lane has its own lifecycle above, and finishHttpServe below carries its
-    // own cleanup deadline.
+    // Serve watchdogs: the worker's loop-stall threshold and the POST /mcp
+    // operation deadline have separate settings and remain independent. The
+    // HTTP request timer does not need the worker to be active. These guards
+    // cover runServeHttp only; stdio has its own lifecycle above.
     const httpLog = opts.log ?? ((msg: string) => console.error(msg));
     const stallMs = opts.stallWatchdogMs ?? resolveServeStallWatchdogMs(process.env[SERVE_STALL_WATCHDOG_ENV], httpLog);
+    const mcpRequestTimeoutMs = opts.mcpRequestTimeoutMs ??
+      resolveServeMcpRequestTimeoutMs(process.env[SERVE_MCP_REQUEST_TIMEOUT_ENV], httpLog);
     let stallWatchdog: WatchdogHandle | null = null;
     if (stallMs > 0) {
       const installStall = opts.installStallWatchdog ?? installLoopStallWatchdog;
       stallWatchdog = installStall({ stallMs, graceMs: STALL_DEFAULT_GRACE_MS, label: 'serve-http-stall', onWarn: httpLog });
       if (stallWatchdog.active) {
         httpLog(
-          `[serve-http-stall] loop-stall watchdog armed: SIGTERM after ${stallMs}ms of main-loop stall, ` +
+          `[serve-http-stall] loop watchdog armed: SIGTERM after ${stallMs}ms of main-loop stall, ` +
           `SIGKILL ${STALL_DEFAULT_GRACE_MS}ms later (${SERVE_STALL_WATCHDOG_ENV}; 0 disables)`,
         );
       }
     }
+    if (mcpRequestTimeoutMs > 0) {
+      httpLog(
+        `[serve-http-request-watchdog] request watchdog armed for POST /mcp: ${mcpRequestTimeoutMs}ms ` +
+          `(${SERVE_MCP_REQUEST_TIMEOUT_ENV}; unset/invalid defaults to ${DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS}ms; 0 disables)`,
+      );
+      httpLog(
+        '[serve-http-request-watchdog] expiry terminates this process; if configured to restart after clean exits, a ' +
+          'supervisor such as this systemd unit (Restart=always) brings it back. An unsupervised foreground/manual ' +
+          'invocation exits and stays down. Raise or disable for ' +
+          'long-blocking RPCs when running unsupervised.',
+      );
+    } else {
+      httpLog(
+        `[serve-http-request-watchdog] request watchdog disabled (${SERVE_MCP_REQUEST_TIMEOUT_ENV}=0); ` +
+          'unresolved POST /mcp requests do not trigger this request-deadline exit.',
+      );
+    }
 
     try {
-      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface });
+      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, mcpRequestTimeoutMs });
     } finally {
       stallWatchdog?.dispose();
     }
