@@ -130,10 +130,12 @@ describe('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)'
     expect(r.sinceArmedMs).toBeGreaterThanOrEqual(WATCHDOG_DEADLINE_MS - 500);
     expect(r.sinceArmedMs).toBeLessThan(11_000);
 
-    // Attribution: the worker's stderr lines carry the label and fire even
-    // while the main thread is starved (worker_threads = separate OS thread).
-    expect(r.stderr).toContain('pglite-disconnect-watchdog');
-    expect(r.stderr).toContain('grace expired');
+    // The main-thread armed breadcrumb survives SIGKILL; Bun may drop the
+    // worker's final stderr writes when its grace-expiry signal kills the process.
+    expect(r.stderr).toContain(
+      `[pglite] disconnect watchdog armed: SIGTERM at ${WATCHDOG_DEADLINE_MS}ms, ` +
+        `SIGKILL at ${WATCHDOG_DEADLINE_MS + WATCHDOG_GRACE_MS}ms (out-of-band worker thread).`,
+    );
 
     // ADVISORY (not asserted — OV-4): under starvation the in-loop warn should
     // never appear; a future Bun that services timers under microtask pressure
@@ -158,7 +160,7 @@ describe('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)'
     // Only the test's cap ends it: the wedge holds past 5x the in-loop bound.
     expect(r.killedByTest).toBe(true);
     expect(r.stdout).not.toContain('DISCONNECTED');
-    expect(r.stderr).not.toContain('pglite-disconnect-watchdog'); // off = off
+    expect(r.stderr).not.toContain('disconnect watchdog armed'); // off = off
 
     // HARD assert — the direct pin of #4284's measured claim: the in-loop
     // close-timeout warn NEVER appears while the loop is starved, because the

@@ -20,8 +20,8 @@ mkdir -p "${DEST_DIR}"
 # so the port this script probes is the port the service actually binds.
 sed "s/--port 8787 /--port ${PORT} /" "${SRC_DIR}/${UNIT}" > "${DEST_DIR}/${UNIT}"
 
-# Liveness probe: Restart=on-failure never catches a server that hangs while
-# holding the port, so a timer restarts the unit after consecutive failed checks.
+# Liveness probe: systemd restarts an exited process, while this timer checks
+# whether the unit still owns the port and whether its /health endpoint responds.
 # Install a COPY of the probe script: running it from this checkout would break
 # silently the moment the checkout (e.g. a worktree) is removed.
 LIVENESS="gbrain-http-liveness"

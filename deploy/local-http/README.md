@@ -69,31 +69,15 @@ changes like editing `~/.gbrain/config.json`.
 
 ## Hang recovery (liveness)
 
-`Restart=` only reacts to the server **exiting**. A server that hangs while
-still holding the port is never restarted by it; on 2026-09-26 one went silent
-from 19:29Z to 00:51Z and every MCP call timed out. Three layers cover that:
+`Restart=always` restarts the process after it exits, including a clean exit from the watchdog's SIGTERM path. The watchdog covers two failure signals: a worker detects a starved main event loop, and an in-process request deadline detects a POST `/mcp` that remains open while that loop is responsive. A subprocess reproduction against the real `gbrain serve --http` path holds an authenticated `get_page` request open after it reaches the operation handler: the client receives HTTP headers but no completed MCP response, disconnects, `/health` still returns `ok`, and the request watchdog sends SIGTERM because the server handler is still unresolved. The September 2026 incident symptoms did not establish which failure class occurred, so this reproduction proves coverage of one possible cause, not the incident's root cause.
 
-- **`Restart=always`.** A stall-watchdog SIGTERM can end in a clean exit 0,
-  which `on-failure` would leave down. An explicit `systemctl stop` still stops
-  the unit.
-- **In-process stall watchdog.** The unit sets `GBRAIN_SERVE_STALL_WATCHDOG_MS=60000`.
-  After 60s of main-loop stall the server SIGTERMs itself, then SIGKILLs 30s
-  later.
-- **External liveness probe.** `gbrain-http-liveness.timer` runs the probe every
-  minute. `setup.sh` installs a copy under `~/.local/share/gbrain/libexec/`, so
-  removing a checkout can't disable it. Each check of the unit's *current*
-  MainPID falls into one of three results:
-  - **ok:** the unit's own process owns the port and `/health` answers `ok`
-    within 10s.
-  - **hung:** no answer, or another process owns the port. The unit is
-    restarted after **3** consecutive hung checks.
-  - **degraded:** `/health` answers 503 (its `SELECT 1` through the pool
-    failed), so the database may be down or the pool saturated. The unit is
-    restarted only after **10** consecutive degraded checks.
+The request deadline is on by default for every `gbrain serve --http` process, including foreground runs and `gbrain mcp expose`'s manual wrapper. Unset or invalid `GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_MS` uses 300 seconds; set the variable to raise or lower the deadline, and set it to `0` to disable it. Expiry terminates the gbrain process. The local systemd unit (`Restart=always`) and restart supervisors configured to restart after clean exits bring it back; foreground and manual-wrapper runs terminate and stay down. Operators running long-blocking RPCs without a restart supervisor should raise the deadline or set it to `0`.
 
-  Counters reset when the process changes. Restarts are capped at **3 per
-  hour**. The probe leaves an inactive unit alone and skips the first 120s after
-  a start. Knobs are `GBRAIN_HTTP_LIVENESS_*` (see the script header).
+`GBRAIN_SERVE_STALL_WATCHDOG_MS` remains the main-loop lag threshold. Its floor leaves headroom for large PGLite synchronous work such as WASM checkpoints, vacuum, and large parses; the unit sets it to 60 seconds. The process worker checks at its configured cadence, so loop-stall detection can lag the threshold by one check. `GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_MS` separately bounds each POST `/mcp` until its HTTP transport and all active server-handler promises resolve, regardless of client disconnect. The `DEFAULT_SERVE_MCP_REQUEST_TIMEOUT_MS` in [the request watchdog source](../../src/commands/serve-http-request-watchdog.ts) is 300 seconds: [`runThinClientRouted`](../../src/cli.ts) allows 180 seconds for `think`, and [`synthesize` in the tool catalog](../../docs/TOOL_CATALOG.md#memory-verbs) is documented as seconds-to-minutes, so the default adds two minutes beyond the think allowance. Raise it for longer legitimate calls; zero disables only the request deadline. `STALL_DEFAULT_GRACE_MS` in `src/core/process-watchdog.ts` is the time allowed for graceful shutdown before SIGKILL. For one successful cold restart, approximate time from a loop stall is loop threshold + worker-check delay + grace + `RestartSec` + cold-bind time; from an unfinished request it is request timeout + request-check delay + grace + `RestartSec` + cold-bind time. The cold-bind sample below uses in-memory PGLite and is not a bound for the installed unit's remote Postgres startup.
+
+Dated observation: on 2026-09-27, at repository commit `ca58fa3c70d522b02433e5b53c0a72f49031415f` with Bun 1.4.2, `GBRAIN_TEST_COLD_BIND_REPORT=1 bun test test/process-watchdog.serial.test.ts` measured 4861 ms from the fixture's `coldStartAt` timestamp to its first successful `/health` response after creating a fresh in-memory PGLite schema. This is one sample, not a startup bound for the remote Postgres unit; run the same command to collect a new local sample. No successful systemd restart-to-health duration has been measured for the installed backend.
+
+The external `gbrain-http-liveness.timer` runs once per minute and checks that the unit's MainPID owns the port and that `/health` responds. A healthy probe requires `/health` to return `ok` within 10 seconds. A missing listener or an unanswered `/health` check is `hung`; the unit restarts after 3 consecutive hung checks. A 503 from `/health` is `degraded`; the unit restarts after 10 consecutive degraded checks. The liveness script is installed as a copy under `~/.local/share/gbrain/libexec/`, so removing the checkout does not disable it. Counters are keyed to MainPID and reset when the process changes or `/health` recovers. Restarts are capped at 3 per hour; an inactive unit is left alone, and checks are skipped during the 120-second startup grace. `GBRAIN_HTTP_LIVENESS_*` variables in `gbrain-http-liveness.sh` own these settings. A request-local stall with healthy `/health` is invisible to this timer; the in-process request deadline handles it.
 
 ```bash
 systemctl --user list-timers gbrain-http-liveness.timer

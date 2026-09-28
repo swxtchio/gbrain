@@ -44,6 +44,7 @@ import { serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
 import { withBearerScopeHint } from './serve-http-oauth.ts';
+import { createServeMcpRequestWatchdogLifecycle } from './serve-http-request-watchdog.ts';
 import type { ServeHttpContext } from './serve-http.ts';
 
 /** Per-request state shared by the tools/list and tools/call handlers of one POST /mcp. */
@@ -118,9 +119,10 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
   // #5277: hint every scope a connector may need. Clients that request exactly
   // the hinted scope and never step up (claude.ai connectors) otherwise stay
   // read-only; grantScopes still caps each grant to the client row's scope.
-  app.post('/mcp', withBearerScopeHint(
+  const watchdog = createServeMcpRequestWatchdogLifecycle(ctx.mcpRequestTimeoutMs ?? 0);
+  app.post('/mcp', watchdog.requestWatchdog, watchdog.trackAuthorization(withBearerScopeHint(
     requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read', 'write'],
-  ), async (req: Request, res: Response) => {
+  )), watchdog.trackTransport(async (req: Request, res: Response) => {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
@@ -162,15 +164,17 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
     const surfaceAllowedOps: ReadonlySet<string> | undefined =
       surface === 'full' && authInfo.allowedOperations == null ? undefined : new Set(mcpOperations.map(o => o.name));
     const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows };
-    const server = createMcpRequestServer(ctx, state, writeback);
+    const trackOperation = <T>(operation: () => Promise<T>): Promise<T> => watchdog.trackServerOperation(res, operation);
+    const server = createMcpRequestServer(ctx, state, writeback, trackOperation);
     await serveMcpRequest(server, req, res);
-  });
+  }));
 }
 
 function createMcpRequestServer(
   ctx: ServeHttpContext,
   state: McpRequestState,
   writeback: Awaited<ReturnType<typeof resolveWritebackConfig>> | null,
+  trackOperation: <T>(operation: () => Promise<T>) => Promise<T>,
 ): Server {
   const { engine, config, mcpResourceUrl } = ctx;
   const { authInfo, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps } = state;
@@ -197,10 +201,10 @@ function createMcpRequestServer(
     },
   );
   // F1: the contract for THIS token's callable set + readiness tail, resolved at initialize.
-  installInstructionsResolver(server, async () => resolveMcpInstructions(config, process.env, {
+  installInstructionsResolver(server, () => trackOperation(async () => resolveMcpInstructions(config, process.env, {
     writeback: writebackOpts,
     tools: await httpInstructionTools(engine, config, { ops: mcpOperations, surface, auth: authInfo, allowedOps: surfaceAllowedOps, cache: ctx.readinessCache }),
-  }));
+  })));
   installCapabilitiesResource(server, async () => {
     return { transport: authTransport(authInfo), client_id: authInfo.clientId,
       ...await resolveAuthCapabilities(authInfo, engine, config), administration: mcpAdministrationGuidance(mcpResourceUrl.toString()) };
@@ -210,9 +214,9 @@ function createMcpRequestServer(
     return { remote: true, transport: 'http', sourceId, auth: authInfo, config,
       localFederatedSourceIds: await noGrantFederatedScope(engine, authInfo.hasSourceGrant, sourceId),
       allowedOps: surfaceAllowedOps, surface, surfaceCeiling };
-  }));
-  server.setRequestHandler(ListToolsRequestSchema, async () => listMcpTools(ctx, state));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => callMcpTool(ctx, state, request));
+  }), trackOperation);
+  server.setRequestHandler(ListToolsRequestSchema, () => trackOperation(() => listMcpTools(ctx, state)));
+  server.setRequestHandler(CallToolRequestSchema, (request) => trackOperation(() => callMcpTool(ctx, state, request)));
   return server;
 }
 

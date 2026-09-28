@@ -396,6 +396,8 @@ interface ServeHttpOptions {
    * so per-client rows can narrow below it but never widen past it.
    */
   surface?: McpSurface;
+  /** In-flight MCP deadline; zero disables it. */
+  mcpRequestTimeoutMs?: number;
   /**
    * #2624: force-print the generated admin bootstrap token even on a
    * non-TTY (containerized) start. By default the raw token is only printed
@@ -474,6 +476,7 @@ export interface ServeHttpContext {
   logFullParams: boolean | undefined;
   /** --surface: the server tool-surface ceiling. */
   surface: McpSurface | undefined;
+  mcpRequestTimeoutMs?: number;
   /** Every non-localOnly operation: the only op list the network surface sees. */
   mcpOperationsBase: Operation[];
   issuerUrl: URL;
@@ -815,7 +818,7 @@ export async function buildServeHttpApp(app: express.Express, engine: BrainEngin
   const requireAdmin = createRequireAdmin(adminSessions);
   const { ingestRateLimiter, githubWebhookLimiter } = createWebhookLimiters();
   const ctx: ServeHttpContext = {
-    noticeLedger: new NoticeLedger(), readinessCache: createReadinessCache(), engine, config, sql, bind, enableDcr, logFullParams, surface: options.surface, mcpOperationsBase,
+    noticeLedger: new NoticeLedger(), readinessCache: createReadinessCache(), engine, config, sql, bind, enableDcr, logFullParams, surface: options.surface, mcpRequestTimeoutMs: options.mcpRequestTimeoutMs, mcpOperationsBase,
     issuerUrl, mcpResourceUrl, resourceMetadataUrl, oauthProvider, resourceVerifier,
     bootstrapHash, adminSessions, adminCookie,
     magicLinkNonces: new Map<string, number>(),
