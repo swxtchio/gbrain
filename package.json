@@ -232,6 +232,7 @@
   "engines": {
     "bun": ">=1.4.0"
   },
+  "packageManager": "bun@1.4.2",
   "license": "MIT",
   "version": "0.60.207.0",
   "overrides": {

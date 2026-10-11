@@ -5,6 +5,7 @@
 
 import type { BrainEngine } from '../core/engine.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
+import { findUnconsumedJobsArg } from './jobs-args.ts';
 import { MinionWorker } from '../core/minions/worker.ts';
 import { withFactsAbsorbHaltCooldown } from '../core/minions/llm-halt-cooldown.ts';
 import type { MinionHandler } from '../core/minions/types.ts';
@@ -462,6 +463,12 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
     // Object.prototype function instead of falling back to the full help.
     console.log(Object.hasOwn(JOBS_SUBCOMMAND_HELP, sub) ? JOBS_SUBCOMMAND_HELP[sub] : JOBS_HELP);
     return;
+  }
+  // #6: a mutating subcommand never runs with an argument it would ignore.
+  const refusal = findUnconsumedJobsArg(args);
+  if (refusal) {
+    console.error(`Error: ${refusal.message} for 'gbrain jobs ${sub}'.\nUsage: ${refusal.usage}`);
+    process.exit(1);
   }
 
   // Thin-client dispatch (cli.ts) passes engine=null for the subcommands
