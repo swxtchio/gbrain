@@ -12,6 +12,7 @@ import { ALLOWED_TYPES, type AllowedType } from '../core/facts/conversation-type
 import { assertEmbedNotStalled } from '../core/embed-stall.ts';
 import { assertEmbedBackfillQueueAdmission } from '../core/minions/embed-backfill-admission.ts';
 import { isProtectedJobName } from '../core/minions/protected-names.ts';
+import { findUnconsumedJobsArg } from './jobs-args.ts';
 import { MinionQueue, deriveWedgeSignal } from '../core/minions/queue.ts';
 import { MinionWorker } from '../core/minions/worker.ts';
 import {
@@ -639,6 +640,12 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
     // Object.prototype function instead of falling back to the full help.
     console.log(Object.hasOwn(JOBS_SUBCOMMAND_HELP, sub) ? JOBS_SUBCOMMAND_HELP[sub] : JOBS_HELP);
     return;
+  }
+  // #6: a mutating subcommand never runs with an argument it would ignore.
+  const refusal = findUnconsumedJobsArg(args);
+  if (refusal) {
+    console.error(`Error: ${refusal.message} for 'gbrain jobs ${sub}'.\nUsage: ${refusal.usage}`);
+    process.exit(1);
   }
 
   // Thin-client dispatch (cli.ts) passes engine=null for the subcommands
