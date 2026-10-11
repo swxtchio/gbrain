@@ -36,9 +36,10 @@ const STRICT_JOBS_SUBCOMMANDS: Record<string, SubcommandArgSpec> = {
  * would not consume, plus its usage line), or null when every token is
  * accounted for (or the subcommand has no strict spec). `args` is the full
  * jobs argv: args[0] is the subcommand name. A `--name=v` token is
- * unconsumed because parseFlag only reads the space-separated form, and a
- * value flag with no value is refused because parseFlag would return
- * undefined and the default would run.
+ * unconsumed because parseFlag only reads the space-separated form; a value
+ * flag with no value is refused because parseFlag would return undefined and
+ * the default would run; a repeated value flag is refused because parseFlag
+ * reads only its first occurrence.
  */
 export function findUnconsumedJobsArg(
   args: readonly string[],
@@ -47,10 +48,15 @@ export function findUnconsumedJobsArg(
   if (sub === undefined || !Object.hasOwn(STRICT_JOBS_SUBCOMMANDS, sub)) return null;
   const spec = STRICT_JOBS_SUBCOMMANDS[sub];
   const refuse = (message: string) => ({ message, usage: spec.usage });
+  const seenValueFlags = new Set<string>();
   let positionals = 0;
   for (let i = 1; i < args.length; i++) {
     const a = args[i];
     if (spec.valueFlags.includes(a)) {
+      // parseFlag reads only the first occurrence, so a repeat (and whatever
+      // token it would swallow as its value) would be silently ignored.
+      if (seenValueFlags.has(a)) return refuse(`${a} given more than once`);
+      seenValueFlags.add(a);
       if (i + 1 >= args.length) return refuse(`${a} requires a value`);
       i++; // parseFlag consumes the next token as the value
       continue;

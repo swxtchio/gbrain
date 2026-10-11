@@ -6,9 +6,11 @@
  * refuse any argument their parser would not consume — exit 1, nothing
  * deleted — while the documented forms keep working.
  *
- * Each case seeds a terminal job aged 60 days, which a default prune (30d)
- * WOULD delete, so "the job survives" proves the refusal happened before any
- * queue work rather than the window happening to miss it.
+ * Prune/delete cases seed a terminal job aged 60 days, which a default prune
+ * (30d) WOULD delete, so "the job survives" proves the refusal happened
+ * before any queue work rather than the window happening to miss it. The
+ * cancel/retry cases seed a waiting/dead job the documented form DOES mutate
+ * (pinned by the controls below), so "status unchanged" means refused.
  *
  * Serial: patches process.exit / console.error / console.log around runJobs.
  */
@@ -70,6 +72,25 @@ async function seedOldCompletedJob(): Promise<number> {
   return job.id;
 }
 
+/** A freshly queued job — `jobs cancel <id>` would cancel it. */
+async function seedWaitingJob(): Promise<number> {
+  return (await queue.add('sync', {})).id;
+}
+
+/** A dead job — `jobs retry <id>` would re-queue it. */
+async function seedDeadJob(): Promise<number> {
+  const job = await queue.add('sync', {});
+  await engine.executeRaw(
+    `UPDATE minion_jobs SET status = 'dead', finished_at = now() WHERE id = $1`,
+    [job.id],
+  );
+  return job.id;
+}
+
+async function jobStatus(id: number): Promise<string | undefined> {
+  return (await queue.getJob(id))?.status;
+}
+
 async function jobExists(id: number): Promise<boolean> {
   return (await queue.getJob(id)) !== null;
 }
@@ -125,13 +146,33 @@ describe('jobs mutating subcommands refuse unconsumed arguments (#6)', () => {
     expect(await jobExists(id)).toBe(true);
   });
 
-  test('cancel/retry <id> <extra>: a second positional is refused', async () => {
+  test('prune --older-than 7d --older-than --days: a repeated value flag is refused, nothing deleted', async () => {
     const id = await seedOldCompletedJob();
-    for (const sub of ['cancel', 'retry']) {
-      stderr = [];
-      expect(await run([sub, String(id), '99'])).toBe(1);
-      expect(stderr.join('\n')).toContain(`unexpected argument 99 for 'gbrain jobs ${sub}'`);
-    }
+    expect(await run(['prune', '--older-than', '7d', '--older-than', '--days'])).toBe(1);
+    expect(stderr.join('\n')).toContain('--older-than given more than once');
+    expect(stdout.join('\n')).not.toContain('Pruned');
+    expect(await jobExists(id)).toBe(true);
+  });
+
+  test('prune --older-than 7d --older-than 1d: conflicting windows are refused, not first-wins', async () => {
+    const id = await seedOldCompletedJob();
+    expect(await run(['prune', '--older-than', '7d', '--older-than', '1d'])).toBe(1);
+    expect(stderr.join('\n')).toContain('--older-than given more than once');
+    expect(await jobExists(id)).toBe(true);
+  });
+
+  test('cancel <id> <extra>: refused, and a cancellable job stays waiting', async () => {
+    const id = await seedWaitingJob();
+    expect(await run(['cancel', String(id), '99'])).toBe(1);
+    expect(stderr.join('\n')).toContain(`unexpected argument 99 for 'gbrain jobs cancel'`);
+    expect(await jobStatus(id)).toBe('waiting');
+  });
+
+  test('retry <id> <extra>: refused, and a retryable dead job stays dead', async () => {
+    const id = await seedDeadJob();
+    expect(await run(['retry', String(id), '99'])).toBe(1);
+    expect(stderr.join('\n')).toContain(`unexpected argument 99 for 'gbrain jobs retry'`);
+    expect(await jobStatus(id)).toBe('dead');
   });
 });
 
@@ -161,5 +202,19 @@ describe('documented forms keep working (#6)', () => {
     const id = await seedOldCompletedJob();
     expect(await run(['delete', String(id)])).toBe(0);
     expect(await jobExists(id)).toBe(false);
+  });
+
+  // Controls for the cancel/retry refusal cases: the same fixtures DO mutate
+  // when the documented form runs, so "status unchanged" above is the refusal.
+  test('cancel <id> cancels the waiting fixture', async () => {
+    const id = await seedWaitingJob();
+    expect(await run(['cancel', String(id)])).toBe(0);
+    expect(await jobStatus(id)).toBe('cancelled');
+  });
+
+  test('retry <id> re-queues the dead fixture', async () => {
+    const id = await seedDeadJob();
+    expect(await run(['retry', String(id)])).toBe(0);
+    expect(await jobStatus(id)).toBe('waiting');
   });
 });
