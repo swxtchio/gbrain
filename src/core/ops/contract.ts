@@ -648,7 +648,8 @@ export interface OperationContext {
    * `config.federated = true` source, so an unqualified read/search spans
    * federated sources as docs/guides/multi-source-brains.md promises.
    *
-   * Consumed exclusively by `federatedSearchScope` and the graph-four
+   * Consumed by `federatedSearchScope` (which also scopes code_def/code_refs
+   * for remote callers), the explicit-read admission set, and the graph-four
    * re-route `routeCodeIntelScope` (#4011). Fail-closed remains:
    * a grant (`ctx.auth.allowedSources`) or a per-call `source_id` always
    * wins, and a context without this field never widens.
@@ -668,8 +669,8 @@ export interface OperationContext {
    * explicit tier (`GBRAIN_SOURCE` or a `.gbrain-source` pin). Set ONLY by
    * the stdio transport (src/mcp/server.ts), never from caller params and
    * never for an HTTP token. Unlike `localFederatedSourceIds` it never widens
-   * an unqualified read; `federatedSearchScope` only uses it to admit an
-   * explicit per-call `source_id` inside `sourceIds`.
+   * an unqualified read; `federatedSearchScope` and `resolveCodeIntelScope`
+   * only use it to admit an explicit per-call `source_id` inside `sourceIds`.
    */
   explicitReadBinding?: ExplicitReadBinding;
 }

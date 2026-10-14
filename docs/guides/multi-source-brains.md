@@ -122,7 +122,8 @@ directory pinned by `.gbrain-source`) is bound to that source. Its
 unqualified reads stay on the bound source. It may still name another
 source in an explicit `source_id` read (`search`, `query`, `get_page`,
 `list_pages`, `resolve_slugs`, `recall`, `get_links`, `get_backlinks`,
-`traverse_graph`) when that source is
+`traverse_graph`, and on this fork the code-intel tools `code_callers`,
+`code_callees`, `code_blast`, `code_flow`) when that source is
 `federated=true`; the result holds only the named source's rows. Writes
 still go to the bound source only.
 
@@ -133,9 +134,10 @@ still go to the bound source only.
 | `<bound> opted out of federation …, so it reads no other source` | The bound source itself is isolated (`federated=false`), so it never reads another source. | `gbrain sources federate <bound>`, or start the connection without the binding. |
 | `Your token is not granted <id>` | An HTTP token or OAuth client whose grant does not include the source. | `gbrain auth rescope-client <client_id> --federated-read <ids>` for an OAuth client; `gbrain auth rescope-token <name> --sources <ids>` for a legacy bearer token. |
 
-`search_by_image`, `open_loops` and the code-intel tools keep their stricter
-rule: an explicit `source_id` must be inside the connection's own source or
-grant.
+`search_by_image` and `open_loops` keep their stricter rule: an explicit
+`source_id` must be inside the connection's own source or grant. On this fork
+`code_def` and `code_refs` read the same sources an unqualified `search` reads
+for the connection; a token or client grant still governs alone.
 
 ### Links, backlinks and the graph across sources
 

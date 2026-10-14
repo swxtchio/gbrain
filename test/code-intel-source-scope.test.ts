@@ -2,8 +2,10 @@
  * SWX fork policy (captain's order, 2026-10-14: "ALL agents on this box are
  * allowed to fully read every repo"): remote callers reach the six code reads
  * — upstream suspends them (garrytan/gbrain#5052); this fork intentionally
- * does not — and the existing per-caller source resolver plus codeReadFilter
- * still confine what they return. Trusted local behavior is unchanged.
+ * does not — within the sources search/query already admit for the caller
+ * (a grant governs alone; otherwise the federated / explicit-read set), and
+ * codeReadFilter still withholds ineligible rows. Trusted local behavior is
+ * unchanged.
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -234,6 +236,58 @@ describe('SWX fork policy: remote code reads return results within the caller gr
     const callers = await operationsByName.code_callers.handler(ctx, { symbol: 'alphaTargetFn' }) as Edges;
     expect(callerNames(callers)).toEqual(['betaCallerFn']);
     expect((await denied(() => operationsByName.code_blast.handler(ctx, { symbol: 'alphaTargetFn', source_id: 'srcalpha' }))).code).toBe('permission_denied');
+  });
+
+  // The live agent shape: an HTTP legacy token with no source grant, bound to
+  // one source, whose transport computed the federated set (as search sees it).
+  const federatedNoGrant = (extra: Partial<OperationContext> = {}) => ctxOf({
+    transport: 'http', sourceId: 'srcalpha', localFederatedSourceIds: ['srcalpha', 'srcbeta'],
+    auth: { token: '', clientId: 'legacy', scopes: ['read'], sourceId: 'srcalpha', hasSourceGrant: false },
+    ...extra,
+  } as unknown as Partial<OperationContext>);
+
+  test('a no-grant caller reads code in every federated source, like search does', async () => {
+    await seedTwoSourceCodeGraph();
+    await registerSource('srcgamma');
+    const gammaPage = await insertCodePage('srcgamma', 'src/gamma-lib.ts');
+    await insertChunk(gammaPage, 0, 'gammaOnlyFn', 'function');
+    await engine.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision, chunker_version=$1', [String(SAFE_FENCE_CHUNKER_VERSION)]);
+    const ctx = federatedNoGrant();
+
+    const beta = await operationsByName.code_def.handler(ctx, { symbol: 'betaSecretFn' }) as Defs;
+    expect(beta.defs.map(d => d.slug)).toEqual(['src/beta-lib.ts']);
+    const betaRefs = await operationsByName.code_refs.handler(ctx, { symbol: 'betaSecretFn' }) as Refs;
+    expect(betaRefs.refs.map(r => r.slug)).toContain('src/beta-lib.ts');
+    // srcgamma is not federated: outside what search admits, so outside code reads too.
+    expect((await operationsByName.code_def.handler(ctx, { symbol: 'gammaOnlyFn' }) as Defs).count).toBe(0);
+
+    const callers = await operationsByName.code_callers.handler(ctx, { symbol: 'betaSecretFn', source_id: 'srcbeta' }) as Edges;
+    expect(callerNames(callers).sort()).toEqual(['betaCallerFn', 'sharedCallerFn']);
+    const callees = await operationsByName.code_callees.handler(ctx, { symbol: 'betaCallerFn', source_id: 'srcbeta' }) as Edges;
+    expect(calleeNames(callees).sort()).toEqual(['alphaTargetFn', 'betaSecretFn']);
+    const blast = await operationsByName.code_blast.handler(ctx, { symbol: 'betaSecretFn', exact: true, source_id: 'srcbeta' }) as Walk;
+    expect(walkSymbols(blast).sort()).toEqual(['betaCallerFn', 'sharedCallerFn']);
+    const flow = await operationsByName.code_flow.handler(ctx, { entry_point: 'betaCallerFn', exact: true, source_id: 'srcbeta' }) as Walk;
+    expect(walkSymbols(flow).sort()).toEqual(['alphaTargetFn', 'betaSecretFn']);
+    // Unqualified traversal stays on the bound source (it holds code), never spans.
+    const own = await operationsByName.code_callers.handler(ctx, { symbol: 'alphaTargetFn' }) as Edges;
+    expect(callerNames(own).sort()).toEqual(['alphaCallerFn', 'sharedCallerFn']);
+    for (const [name, params] of [
+      ['code_callers', { symbol: 'gammaOnlyFn' }],
+      ['code_blast', { symbol: 'gammaOnlyFn' }],
+    ] as const) {
+      expect((await denied(() => operationsByName[name].handler(ctx, { ...params, source_id: 'srcgamma' }))).code).toBe('permission_denied');
+    }
+  });
+
+  test('a grant still governs alone even when the transport computed a federated set', async () => {
+    await seedTwoSourceCodeGraph();
+    const ctx = federatedNoGrant({
+      auth: { token: '', clientId: 'oauth', scopes: ['read'], allowedSources: ['srcalpha'] },
+    } as unknown as Partial<OperationContext>);
+    expect((await operationsByName.code_def.handler(ctx, { symbol: 'betaSecretFn' }) as Defs).count).toBe(0);
+    expect((await operationsByName.code_refs.handler(ctx, { symbol: 'betaSecretFn' }) as Refs).count).toBe(0);
+    expect((await denied(() => operationsByName.code_callers.handler(ctx, { symbol: 'betaSecretFn', source_id: 'srcbeta' }))).code).toBe('permission_denied');
   });
 
   test('a remote caller with no readable source is refused by every read, not widened', async () => {

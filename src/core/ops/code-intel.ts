@@ -9,7 +9,7 @@
  */
 
 import type { Operation, OperationContext } from './contract.ts';
-import { routeCodeIntelScope, readPolicyOpts } from './context.ts';
+import { federatedSearchScope, routeCodeIntelScope, readPolicyOpts } from './context.ts';
 import type { WalkResult } from '../code-intel/recursive-walk.ts';
 import {
   CODE_CALLERS_DESCRIPTION,
@@ -128,7 +128,8 @@ const code_def: Operation = {
   scope: 'read',
   handler: async (ctx, p) => {
     const { findCodeDef } = await import('../../commands/code-def.ts');
-    const policy = await readPolicyOpts(ctx, ctx.remote === false ? {} : undefined);
+    // SWX fork policy: remote callers read the same sources search/query do.
+    const policy = await readPolicyOpts(ctx, ctx.remote === false ? {} : federatedSearchScope(ctx));
     const defs = await findCodeDef(ctx.engine, p.symbol as string, {
       ...policy,
       limit: (p.limit as number) ?? 20,
@@ -155,7 +156,8 @@ const code_refs: Operation = {
   scope: 'read',
   handler: async (ctx, p) => {
     const { findCodeRefs } = await import('../../commands/code-refs.ts');
-    const policy = await readPolicyOpts(ctx, ctx.remote === false ? {} : undefined);
+    // SWX fork policy: remote callers read the same sources search/query do.
+    const policy = await readPolicyOpts(ctx, ctx.remote === false ? {} : federatedSearchScope(ctx));
     const refs = await findCodeRefs(ctx.engine, p.symbol as string, {
       ...policy,
       limit: (p.limit as number) ?? 50,
@@ -308,10 +310,12 @@ const code_traversal_cache_clear: Operation = {
 // allowed to fully read every repo. Limiting gbrain is not useful. Change that
 // policy." Upstream suspends these six reads for every remote caller
 // (garrytan/gbrain#5052); this single-tenant fork intentionally does not.
-// Remote callers reach the real handlers, which still confine results through
-// the per-caller source resolver (routeCodeIntelScope / readPolicyOpts) and
-// codeReadFilter's row policy. Re-apply this divergence on every upstream
-// rebase; test/code-intel-source-scope.test.ts and
+// Remote callers reach the real handlers and read the sources search/query
+// already admit for them: definitions and references span federatedSearchScope,
+// and the graph four admit an explicit source_id in the explicit-read set
+// (resolveCodeIntelScope). Grants still govern alone, and codeReadFilter's row
+// policy is unchanged. Re-apply this divergence on every upstream rebase;
+// test/code-intel-source-scope.test.ts and
 // test/code-intel-remote-read-dispatch.test.ts pin it.
 export const codeIntelOperations: Operation[] = [
   code_callers, code_callees, code_def, code_refs,

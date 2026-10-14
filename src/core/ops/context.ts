@@ -798,10 +798,10 @@ export function linkReadScopeOpts(
  *       otherwise                                        → `{ sourceId }`
  *   - neither → the caller's grant (sourceScopeOpts).
  *
- * `explicitReads` (#5081) is the explicit-read admission set; only
- * `federatedSearchScope` passes it. The other callers (image, loops,
- * code-intel) pass nothing and keep denying every id outside the scope, with
- * the original hint.
+ * `explicitReads` (#5081) is the explicit-read admission set;
+ * `federatedSearchScope` and (SWX fork policy) `resolveCodeIntelScope` pass
+ * it. The other callers (image, loops) pass nothing and keep denying every id
+ * outside the scope, with the original hint.
  *
  * `code_traversal_cache_clear` is intentionally NOT a caller — it is localOnly
  * and carries its own destructive D8 all_sources guard.
@@ -1136,7 +1136,13 @@ export function resolveCodeIntelScope(
   allSourcesParam = false,
   opName = 'code_callers',
 ): { allSources: boolean; sourceId?: string } {
-  const scope = resolveRequestedScope(ctx, sourceIdParam, allSourcesParam);
+  // SWX: fork policy (captain's order, 2026-10-14: "ALL agents on this box are
+  // allowed to fully read every repo"). An explicit per-call source_id is
+  // admitted inside the same explicit-read set search/query use
+  // (explicitReadAdmission): a grant governs alone; otherwise the stdio
+  // binding's set or the transport-computed federated set. Upstream admits
+  // nothing beyond the scope here. Re-apply on every upstream rebase.
+  const scope = resolveRequestedScope(ctx, sourceIdParam, allSourcesParam, explicitReadAdmission(ctx));
   if (scope.sourceId) return { allSources: false, sourceId: scope.sourceId };
   if (scope.sourceIds && scope.sourceIds.length === 1) {
     return { allSources: false, sourceId: scope.sourceIds[0] };

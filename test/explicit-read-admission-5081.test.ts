@@ -7,9 +7,10 @@
  * for the explicit tiers. The fix (ENG-O6): the stdio transport computes
  * `explicitReadBinding` (bound source + non-archived `federated === true`
  * sources; just the bound source when it opted out, E-T2) and
- * `federatedSearchScope` alone passes it to `resolveRequestedScope` as the
- * explicit-read admission set. Unqualified reads stay scalar; image, loops
- * and code-intel keep denying; `requireWritablePage` is unchanged.
+ * `federatedSearchScope` passes it to `resolveRequestedScope` as the
+ * explicit-read admission set. Unqualified reads stay scalar; image and
+ * loops keep denying, code-intel admits the set too (SWX fork policy), and
+ * `requireWritablePage` is unchanged.
  *
  * Contexts are built by the real stdio scope resolver
  * (`resolveMcpStdioSourceScope`) and calls go through `dispatchToolCall`, the
@@ -233,20 +234,25 @@ describe('#5081 — callers that pass no admission set keep denying (ENG-O6 pins
     expect(body.suggestion).toContain(ORIGINAL_HINT);
   });
 
-  test('code-intel scope resolution still denies an explicit federated source', async () => {
-    // The code_* ops are closed to agent callers outright, so pin the resolver they share.
-    const ctx = buildOperationContext(engine, {}, await bound()) as OperationContext;
-    expect(() => resolveCodeIntelScope(ctx, 'notes')).toThrow(expect.objectContaining({
-      code: 'permission_denied', suggestion: ORIGINAL_HINT,
-    }));
-  });
-
   test('requireWritablePage is unchanged: a page in an admitted source is still not writable or disclosed', async () => {
     const opts = await bound();
     const ctx = buildOperationContext(engine, {}, opts) as OperationContext;
     await expect(requireWritablePage(ctx, 'topics/notes-topic', 'add_link', 'from')).rejects.toMatchObject({
       code: 'page_not_found',
     });
+  });
+});
+
+describe('SWX fork policy — code-intel admits the explicit-read set', () => {
+  // SWX fork policy (captain's order, 2026-10-14: "ALL agents on this box are
+  // allowed to fully read every repo"): code-intel joins the readers that
+  // admit the explicit-read set. Upstream keeps denying here; re-apply on rebase.
+  test('code-intel scope resolution admits an explicit federated source and still denies the rest', async () => {
+    const ctx = buildOperationContext(engine, {}, await bound()) as OperationContext;
+    expect(resolveCodeIntelScope(ctx, 'notes')).toEqual({ allSources: false, sourceId: 'notes' });
+    for (const outside of ['private', 'iso']) {
+      expect(() => resolveCodeIntelScope(ctx, outside)).toThrow(expect.objectContaining({ code: 'permission_denied' }));
+    }
   });
 });
 

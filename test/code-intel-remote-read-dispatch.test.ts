@@ -6,7 +6,8 @@
  * (dispatch's remote default) too. Upstream suspends these reads
  * (garrytan/gbrain#5052); this fork intentionally does not, so re-apply on
  * rebase. Each verb must return the seeded, granted-source result as a
- * successful tool result; code-intel-source-scope owns confinement detail.
+ * successful tool result, and a no-grant HTTP token reads every federated
+ * source as search does; code-intel-source-scope owns confinement detail.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -42,11 +43,11 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
-  // granted: grantedEntry → grantedTarget; ungranted mirrors it with the same target name.
+  // granted: grantedEntry → grantedTarget; other mirrors it with the same target name.
   await seedCode('granted', 'src/target.ts', 'grantedTarget');
   await seedCode('granted', 'src/entry.ts', 'grantedEntry', 'grantedTarget');
-  await seedCode('ungranted', 'src/other-target.ts', 'grantedTarget');
-  await seedCode('ungranted', 'src/other-entry.ts', 'ungrantedEntry', 'grantedTarget');
+  await seedCode('other', 'src/other-target.ts', 'grantedTarget');
+  await seedCode('other', 'src/other-entry.ts', 'otherEntry', 'grantedTarget');
 }, 60_000);
 afterAll(async () => { await engine.disconnect(); });
 
@@ -83,10 +84,24 @@ describe('SWX fork policy: agent callers read code through MCP dispatch', () => 
     });
   }
 
-  test('an HTTP traversal naming an ungranted source is refused through dispatch', async () => {
-    const result = await dispatchToolCall(engine, 'code_callers', { symbol: 'grantedTarget', source_id: 'ungranted' },
+  test('an HTTP traversal naming a source outside the token grant is refused through dispatch', async () => {
+    const result = await dispatchToolCall(engine, 'code_callers', { symbol: 'grantedTarget', source_id: 'other' },
       { remote: true, transport: 'http', sourceId: 'granted', auth: { allowedSources: ['granted'] } as never });
     expect(result.isError).toBe(true);
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({ code: 'permission_denied', message: 'Requested source is outside your granted sources' });
+  });
+
+  test('a no-grant HTTP token reads code in the other federated source, as search does', async () => {
+    const opts = {
+      remote: true, transport: 'http' as const, sourceId: 'granted', localFederatedSourceIds: ['granted', 'other'],
+      auth: { token: '', clientId: 'legacy', scopes: ['read'], sourceId: 'granted', hasSourceGrant: false } as never,
+    };
+    const defs = await dispatchToolCall(engine, 'code_def', { symbol: 'grantedTarget' }, opts);
+    expect(defs.isError).toBeFalsy();
+    expect(JSON.parse(defs.content[0]!.text).defs.map((d: any) => d.slug).sort())
+      .toEqual(['src/other-target.ts', 'src/target.ts']);
+    const callers = await dispatchToolCall(engine, 'code_callers', { symbol: 'grantedTarget', source_id: 'other' }, opts);
+    expect(callers.isError).toBeFalsy();
+    expect(JSON.parse(callers.content[0]!.text).callers.map((e: any) => e.from_symbol_qualified)).toEqual(['otherEntry']);
   });
 });
