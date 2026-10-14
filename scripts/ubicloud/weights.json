@@ -1243,7 +1243,7 @@
   "unit:test/code-def-refs.test.ts": 1644,
   "unit:test/code-edges.test.ts": 2069,
   "unit:test/code-graph-readiness.test.ts": 2666,
-  "unit:test/code-intel-remote-suspension-message.test.ts": 1613,
+  "unit:test/code-intel-remote-read-dispatch.test.ts": 1613,
   "unit:test/code-intel-source-scope.test.ts": 2404,
   "unit:test/code-intel/edge-densification.test.ts": 213,
   "unit:test/code-intel/n13-edge-resolution.test.ts": 1955,

@@ -130,14 +130,6 @@ describe('op handlers (B2/B6/B8)', () => {
     expect(cli.suggestion).toContain('--stats');
   });
 
-  test('remote code reads name the trusted local call with the symbol and source', async () => {
-    const e = await caught(() => opNamed('code_callers').handler(ctxOf(), { symbol: 'parseMarkdown', source_id: 'work' }));
-    expect(e.code).toBe('permission_denied');
-    expect(e.fix).toMatchObject({ argv: ['gbrain', 'call', '--source', 'work', 'code_callers', '{"symbol":"parseMarkdown"}'], actor: 'host_admin' });
-    const odd = await caught(() => opNamed('code_flow').handler(ctxOf(), { entry_point: '$(rm -rf)' }));
-    expect(odd.fix).toBeUndefined();
-  });
-
   test('migrate_embeddings refusal routes to the caller brain explicitly', async () => {
     const e = await caught(() => opNamed('migrate_embeddings').handler(ctxOf({ transport: 'stdio', brainId: 'work-brain' }), { to: 'openai:text-embedding-3-small' }));
     expect(e.fix).toMatchObject({

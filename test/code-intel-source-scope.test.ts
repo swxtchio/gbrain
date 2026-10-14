@@ -1,9 +1,17 @@
-/** Temporary remote code-read suspension: no raw/cached storage access; trusted local controls remain available. */
+/**
+ * SWX fork policy (captain's order, 2026-10-14: "ALL agents on this box are
+ * allowed to fully read every repo"): remote callers reach the six code reads
+ * — upstream suspends them (garrytan/gbrain#5052); this fork intentionally
+ * does not — and the existing per-caller source resolver plus codeReadFilter
+ * still confine what they return. Trusted local behavior is unchanged.
+ */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { SAFE_FENCE_CHUNKER_VERSION } from '../src/core/search/safe-chunks.ts';
+import { NO_SOURCES } from '../src/core/source-id.ts';
 
 let engine: PGLiteEngine;
 
@@ -107,35 +115,187 @@ async function seedTwoSourceCodeGraph(): Promise<void> {
   await insertUnresolvedEdge(betaCallerChunk, 'betaCallerFn', 'betaSecretFn', 'srcbeta');
   await insertUnresolvedEdge(betaSharedChunk, 'sharedCallerFn', 'betaSecretFn', 'srcbeta');
   await insertUnresolvedEdge(betaCallerChunk, 'betaCallerFn', 'alphaTargetFn', 'srcbeta');
-  await engine.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision');
+  // Current projection + chunks sealed at the safe-fence chunker version: the
+  // provenance remote reads require (codeReadFilter / safeChunksFilter).
+  await engine.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision, chunker_version=$1', [String(SAFE_FENCE_CHUNKER_VERSION)]);
 }
 
 // Trusted local reads retain their historical source behavior.
 
 
-const readOps = ['code_callers', 'code_callees', 'code_def', 'code_refs', 'code_blast', 'code_flow'] as const;
-const parameters = { symbol: 'betaOnlyFunction', entry_point: 'betaOnlyFunction', exact: true };
+type Defs = { count: number; status: string; defs: Array<{ slug: string; symbol_name: string }> };
+type Refs = { count: number; status: string; refs: Array<{ slug: string }> };
+type Edges = { count: number; callers?: Array<{ from_symbol_qualified: string; source_id: string | null }>; callees?: Array<{ to_symbol_qualified: string; source_id: string | null }> };
+type Walk = { result: string; status?: string; depth_groups?: Array<{ nodes: Array<{ symbol: string }> }> };
+const walkSymbols = (walk: Walk) => (walk.depth_groups ?? []).flatMap(group => group.nodes.map(node => node.symbol));
+const callerNames = (edges: Edges) => (edges.callers ?? []).map(edge => edge.from_symbol_qualified);
+const calleeNames = (edges: Edges) => (edges.callees ?? []).map(edge => edge.to_symbol_qualified);
 
-describe('code reads require trusted local context while remote authorization is suspended', () => {
-  for (const name of readOps) {
-    test(`${name}: remote and omitted trust fail before accessing storage for every source grant`, async () => {
-      let accesses = 0;
-      const inaccessibleEngine = new Proxy({}, { get() { accesses++; throw new Error('storage must not be accessed'); } });
-      for (const remote of [true, undefined]) {
-        for (const scope of [{ sourceId: 'srcalpha' }, { auth: { allowedSources: ['srcalpha', 'srcbeta'] } }, { auth: { allowedSources: [] } }, {}]) {
-          const ctx = ctxOf({ ...scope, remote, engine: inaccessibleEngine } as any);
-          let caught: unknown;
-          try { await operationsByName[name].handler(ctx, parameters); } catch (error) { caught = error; }
-          expect(caught).toBeInstanceOf(OperationError);
-          expect((caught as OperationError).code).toBe('permission_denied');
-          expect((caught as Error).message).toContain('temporarily unavailable');
+async function denied(run: () => Promise<unknown>): Promise<OperationError> {
+  let caught: unknown;
+  try { await run(); } catch (error) { caught = error; }
+  expect(caught).toBeInstanceOf(OperationError);
+  return caught as OperationError;
+}
+
+describe('SWX fork policy: remote code reads return results within the caller grant', () => {
+  // remote:true is what both MCP transports set; undefined is dispatch's
+  // fail-closed default for omitted trust. Both must read, both stay confined.
+  for (const remote of [true, undefined]) {
+    for (const transport of ['stdio', 'http'] as const) {
+      const remoteAlpha = () => ctxOf({ remote, transport, sourceId: 'srcalpha' });
+
+      test(`remote=${remote} ${transport}: all six reads return srcalpha hits and never srcbeta's`, async () => {
+        await seedTwoSourceCodeGraph();
+        const ctx = remoteAlpha();
+
+        const defs = await operationsByName.code_def.handler(ctx, { symbol: 'alphaTargetFn' }) as Defs;
+        expect(defs.status).toBe('ready');
+        expect(defs.defs.map(d => d.slug)).toEqual(['src/alpha-lib.ts']);
+        const hiddenDefs = await operationsByName.code_def.handler(ctx, { symbol: 'betaSecretFn' }) as Defs;
+        expect(hiddenDefs.count).toBe(0);
+
+        const refs = await operationsByName.code_refs.handler(ctx, { symbol: 'alphaTargetFn' }) as Refs;
+        expect(refs.refs.map(r => r.slug)).toContain('src/alpha-lib.ts');
+        const hiddenRefs = await operationsByName.code_refs.handler(ctx, { symbol: 'betaSecretFn' }) as Refs;
+        expect(hiddenRefs.count).toBe(0);
+
+        // betaCallerFn → alphaTargetFn is owned by srcbeta: the cross-source trap.
+        const callers = await operationsByName.code_callers.handler(ctx, { symbol: 'alphaTargetFn' }) as Edges;
+        expect(callerNames(callers).sort()).toEqual(['alphaCallerFn', 'sharedCallerFn']);
+        const callees = await operationsByName.code_callees.handler(ctx, { symbol: 'sharedCallerFn' }) as Edges;
+        expect(calleeNames(callees)).toEqual(['alphaTargetFn']);
+
+        const blast = await operationsByName.code_blast.handler(ctx, { symbol: 'alphaTargetFn', exact: true }) as Walk;
+        expect(blast.result).toBe('ok');
+        expect(walkSymbols(blast).sort()).toEqual(['alphaCallerFn', 'sharedCallerFn']);
+        const flow = await operationsByName.code_flow.handler(ctx, { entry_point: 'sharedCallerFn', exact: true }) as Walk;
+        expect(flow.result).toBe('ok');
+        expect(walkSymbols(flow)).toEqual(['alphaTargetFn']);
+      });
+
+      test(`remote=${remote} ${transport}: an explicit source_id outside the scalar grant is refused`, async () => {
+        await seedTwoSourceCodeGraph();
+        for (const [name, params] of [
+          ['code_callers', { symbol: 'betaSecretFn' }],
+          ['code_callees', { symbol: 'betaCallerFn' }],
+          ['code_blast', { symbol: 'betaSecretFn' }],
+          ['code_flow', { entry_point: 'betaCallerFn' }],
+        ] as const) {
+          const error = await denied(() => operationsByName[name].handler(remoteAlpha(), { ...params, source_id: 'srcbeta' }));
+          expect(error.code).toBe('permission_denied');
         }
-      }
-      expect(accesses).toBe(0);
-      expect(operationsByName[name].description).toContain('agent-facing code reads are suspended');
-    });
+        // __all__ collapses to the grant, never the brain.
+        const spanned = await operationsByName.code_callers.handler(remoteAlpha(), { symbol: 'alphaTargetFn', all_sources: true }) as Edges;
+        expect(callerNames(spanned).sort()).toEqual(['alphaCallerFn', 'sharedCallerFn']);
+      });
+    }
   }
 
+  test('a federated grant reads both granted sources, and traversal requires a selected granted source', async () => {
+    await seedTwoSourceCodeGraph();
+    await registerSource('srcgamma');
+    const gammaPage = await insertCodePage('srcgamma', 'src/gamma-lib.ts');
+    await insertChunk(gammaPage, 0, 'gammaOnlyFn', 'function');
+    await engine.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision, chunker_version=$1', [String(SAFE_FENCE_CHUNKER_VERSION)]);
+    const ctx = ctxOf({ auth: { allowedSources: ['srcalpha', 'srcbeta'] } } as unknown as Partial<OperationContext>);
+
+    const beta = await operationsByName.code_def.handler(ctx, { symbol: 'betaSecretFn' }) as Defs;
+    expect(beta.defs.map(d => d.slug)).toEqual(['src/beta-lib.ts']);
+    const gamma = await operationsByName.code_def.handler(ctx, { symbol: 'gammaOnlyFn' }) as Defs;
+    expect(gamma.count).toBe(0);
+
+    for (const [name, params] of [
+      ['code_callers', { symbol: 'betaSecretFn' }],
+      ['code_callees', { symbol: 'betaCallerFn' }],
+      ['code_blast', { symbol: 'betaSecretFn' }],
+      ['code_flow', { entry_point: 'betaCallerFn' }],
+    ] as const) {
+      const unselected = await denied(() => operationsByName[name].handler(ctx, params));
+      expect(unselected.code).toBe('invalid_params');
+      const ungranted = await denied(() => operationsByName[name].handler(ctx, { ...params, source_id: 'srcgamma' }));
+      expect(ungranted.code).toBe('permission_denied');
+    }
+    const callers = await operationsByName.code_callers.handler(ctx, { symbol: 'betaSecretFn', source_id: 'srcbeta' }) as Edges;
+    expect(callerNames(callers).sort()).toEqual(['betaCallerFn', 'sharedCallerFn']);
+    const blast = await operationsByName.code_blast.handler(ctx, { symbol: 'betaSecretFn', exact: true, source_id: 'srcbeta' }) as Walk;
+    expect(walkSymbols(blast).sort()).toEqual(['betaCallerFn', 'sharedCallerFn']);
+    const flow = await operationsByName.code_flow.handler(ctx, { entry_point: 'betaCallerFn', exact: true, source_id: 'srcbeta' }) as Walk;
+    expect(walkSymbols(flow).sort()).toEqual(['alphaTargetFn', 'betaSecretFn']);
+  });
+
+  test('a single-source federated grant confines definitions and traversal to that source', async () => {
+    await seedTwoSourceCodeGraph();
+    const ctx = ctxOf({ auth: { allowedSources: ['srcbeta'] } } as unknown as Partial<OperationContext>);
+    const beta = await operationsByName.code_def.handler(ctx, { symbol: 'betaSecretFn' }) as Defs;
+    expect(beta.count).toBe(1);
+    const alpha = await operationsByName.code_def.handler(ctx, { symbol: 'alphaTargetFn' }) as Defs;
+    expect(alpha.count).toBe(0);
+    const callers = await operationsByName.code_callers.handler(ctx, { symbol: 'alphaTargetFn' }) as Edges;
+    expect(callerNames(callers)).toEqual(['betaCallerFn']);
+    expect((await denied(() => operationsByName.code_blast.handler(ctx, { symbol: 'alphaTargetFn', source_id: 'srcalpha' }))).code).toBe('permission_denied');
+  });
+
+  test('a remote caller with no readable source is refused by every read, not widened', async () => {
+    await seedTwoSourceCodeGraph();
+    const noGrant = [
+      ctxOf({ auth: { allowedSources: [] } } as unknown as Partial<OperationContext>),
+      ctxOf({ sourceId: NO_SOURCES }),
+    ];
+    for (const ctx of noGrant) {
+      for (const [name, params] of [
+        ['code_def', { symbol: 'alphaTargetFn' }],
+        ['code_refs', { symbol: 'alphaTargetFn' }],
+        ['code_callers', { symbol: 'alphaTargetFn' }],
+        ['code_callees', { symbol: 'alphaCallerFn' }],
+        ['code_blast', { symbol: 'alphaTargetFn' }],
+        ['code_flow', { entry_point: 'alphaCallerFn' }],
+      ] as const) {
+        expect((await denied(() => operationsByName[name].handler(ctx, params))).code).toBe('permission_denied');
+      }
+    }
+  });
+
+  test('remote definitions and references keep the row policy: private, unsealed, stale, deleted and archived rows are withheld', async () => {
+    await seedTwoSourceCodeGraph();
+    const ctx = ctxOf({ sourceId: 'srcalpha' });
+    const read = async () => ({
+      defs: (await operationsByName.code_def.handler(ctx, { symbol: 'alphaTargetFn' }) as Defs),
+      refs: (await operationsByName.code_refs.handler(ctx, { symbol: 'alphaTargetFn' }) as Refs),
+    });
+    const lib = "slug='src/alpha-lib.ts'";
+    // Two statements: the revision trigger bumps knowledge_revision on the
+    // first, so the projection is re-sealed against the bumped value.
+    const restore = [
+      `UPDATE pages SET frontmatter='{}'::jsonb, chunker_version='${SAFE_FENCE_CHUNKER_VERSION}', deleted_at=NULL WHERE ${lib}`,
+      `UPDATE pages SET text_projection_revision=knowledge_revision WHERE ${lib}`,
+      "UPDATE sources SET archived=false WHERE id='srcalpha'",
+    ];
+    expect((await read()).defs.count).toBe(1);
+    // Every break except the stale one re-seals the projection, so each case
+    // is withheld by its own filter rather than by a bumped revision.
+    const reseal = `UPDATE pages SET text_projection_revision=knowledge_revision WHERE ${lib}`;
+    for (const [label, breakIt, extra] of [
+      ['private', [`UPDATE pages SET frontmatter='{"visibility":"private"}'::jsonb WHERE ${lib}`, reseal], undefined],
+      ['below the safe-chunk fence', [`UPDATE pages SET chunker_version='${SAFE_FENCE_CHUNKER_VERSION - 1}' WHERE ${lib}`, reseal], undefined],
+      ['stale projection', [`UPDATE pages SET text_projection_revision=NULL WHERE ${lib}`], 'projection_pending'],
+      ['deleted', [`UPDATE pages SET deleted_at=NOW() WHERE ${lib}`, reseal], undefined],
+      ['archived source', ["UPDATE sources SET archived=true WHERE id='srcalpha'"], undefined],
+    ] as const) {
+      for (const statement of breakIt) await engine.executeRaw(statement);
+      const { defs, refs } = await read();
+      expect({ label, defs: defs.count, refs: refs.refs.filter(r => r.slug === 'src/alpha-lib.ts').length }).toEqual({ label, defs: 0, refs: 0 });
+      if (extra) expect(defs.status).toBe(extra);
+      for (const statement of restore) await engine.executeRaw(statement);
+      expect((await read()).defs.count).toBe(1);
+    }
+    // The trusted local CLI still reads the unsealed row (no safe-chunk requirement).
+    await engine.executeRaw(`UPDATE pages SET chunker_version='${SAFE_FENCE_CHUNKER_VERSION - 1}' WHERE ${lib}`);
+    expect((await operationsByName.code_def.handler(localAlpha(), { symbol: 'alphaTargetFn' }) as Defs).count).toBe(1);
+  });
+});
+
+describe('trusted local code reads keep their historical source behavior', () => {
   test('trusted local definitions and references retain the brain-wide public contract', async () => {
     await seedTwoSourceCodeGraph();
     const ctx = localAlpha();

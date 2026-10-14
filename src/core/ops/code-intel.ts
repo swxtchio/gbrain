@@ -9,10 +9,7 @@
  */
 
 import type { Operation, OperationContext } from './contract.ts';
-import { opError, type OperationError } from './contract.ts';
 import { routeCodeIntelScope, readPolicyOpts } from './context.ts';
-import { hostOnlyError } from './op-fix.ts';
-import { isValidSourceId } from '../source-id.ts';
 import type { WalkResult } from '../code-intel/recursive-walk.ts';
 import {
   CODE_CALLERS_DESCRIPTION,
@@ -307,45 +304,17 @@ const code_traversal_cache_clear: Operation = {
   cliHints: { name: 'code_traversal_cache_clear', hidden: true },
 };
 
-const SYMBOL_ARG = /^[A-Za-z_$][\w$.:/-]{0,199}$/;
-
-/**
- * B6: remote code reads are suspended; the same read runs through the
- * trusted local `gbrain call` lane on the brain host. The symbol and source
- * are interpolated only when they match strict id shapes.
- */
-const CODE_READ_FOLLOW_UP = 'garrytan/gbrain#5052';
-
-function codeReadRefusal(ctx: OperationContext, op: Operation, params: Record<string, unknown>): OperationError {
-  const message = `${op.name} is temporarily unavailable to agent callers: remote code reads stay suspended until they support the remote read policy (follow-up: ${CODE_READ_FOLLOW_UP}). `
-    + 'Code search (search, query) still works here.';
-  const key = 'entry_point' in op.params ? 'entry_point' : 'symbol';
-  const symbol = params[key];
-  if (typeof symbol !== 'string' || !SYMBOL_ARG.test(symbol)) {
-    return opError('permission_denied', message,
-      `Use search or query for code text now, or ask the user to run ${op.name} with the trusted local CLI on the brain host (gbrain call ${op.name} '<params_json>').`);
-  }
-  const source = typeof params.source_id === 'string' && isValidSourceId(params.source_id) ? ['--source', params.source_id] : [];
-  return hostOnlyError(ctx, 'permission_denied', message,
-    ['gbrain', 'call', ...source, op.name, JSON.stringify({ [key]: symbol })],
-    `Symbol definitions, references, callers, callees, blast radius and flow run only through the trusted local CLI on the brain host until remote code reads return (${CODE_READ_FOLLOW_UP}).`);
-}
-
-const codeReadOperations: Operation[] = [
+// SWX: fork policy (captain's order, 2026-10-14): "ALL agents on this box are
+// allowed to fully read every repo. Limiting gbrain is not useful. Change that
+// policy." Upstream suspends these six reads for every remote caller
+// (garrytan/gbrain#5052); this single-tenant fork intentionally does not.
+// Remote callers reach the real handlers, which still confine results through
+// the per-caller source resolver (routeCodeIntelScope / readPolicyOpts) and
+// codeReadFilter's row policy. Re-apply this divergence on every upstream
+// rebase; test/code-intel-source-scope.test.ts and
+// test/code-intel-remote-read-dispatch.test.ts pin it.
+export const codeIntelOperations: Operation[] = [
   code_callers, code_callees, code_def, code_refs,
   code_blast, code_flow,
-];
-
-// Raw code fragments and cached traversals do not yet support the complete
-// remote read policy. Suspend this optional surface before touching storage.
-export const codeIntelOperations: Operation[] = [
-  ...codeReadOperations.map((op): Operation => ({
-    ...op,
-    description: `${op.description} Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.`,
-    handler: async (ctx, params) => {
-      if (ctx.remote !== false) throw codeReadRefusal(ctx, op, params);
-      return op.handler(ctx, params);
-    },
-  })),
   code_traversal_cache_clear,
 ];

@@ -5356,7 +5356,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "BEFORE editing any function, run code_callers with the symbol name to find every caller (the people who'd be affected by your change). Returns direct callers from the tree-sitter call graph. Use during plan-mode to size the change. Defaults to source-scoped; for multi-source brains pass source_id or all_sources=true. Returns: `{symbol, count, callers: [{from_symbol_qualified, to_symbol_qualified, edge_type, resolved}]}`. Example: `{symbol:'parseMarkdown', count:4, callers:[{from_symbol_qualified:'callerInA', to_symbol_qualified:'parseMarkdown', edge_type:'calls', resolved:true}]}`. Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+    "description": "BEFORE editing any function, run code_callers with the symbol name to find every caller (the people who'd be affected by your change). Returns direct callers from the tree-sitter call graph. Use during plan-mode to size the change. Defaults to source-scoped; for multi-source brains pass source_id or all_sources=true. Returns: `{symbol, count, callers: [{from_symbol_qualified, to_symbol_qualified, edge_type, resolved}]}`. Example: `{symbol:'parseMarkdown', count:4, callers:[{from_symbol_qualified:'callerInA', to_symbol_qualified:'parseMarkdown', edge_type:'calls', resolved:true}]}`.",
     "params": {
       "symbol": {
         "type": "string",
@@ -5388,7 +5388,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "When tracing how a function flows to its dependencies (DB calls, HTTP calls, file I/O), run code_callees from the entry point. Forward view of the call graph: what does this symbol call? Use this when debugging unexpected behavior or when planning to extract / inline a function. Same shape as code_callers but the field is `callees` and the edge direction is reversed. Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+    "description": "When tracing how a function flows to its dependencies (DB calls, HTTP calls, file I/O), run code_callees from the entry point. Forward view of the call graph: what does this symbol call? Use this when debugging unexpected behavior or when planning to extract / inline a function. Same shape as code_callers but the field is `callees` and the edge direction is reversed.",
     "params": {
       "symbol": {
         "type": "string",
@@ -5420,7 +5420,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "Where is this symbol defined? Returns one row per definition site (function, class, type, interface, enum, struct, trait, module, contract). Use this BEFORE reaching for grep when you want to read a definition. Single-result is the common case; multiple results indicate same-name symbols across files (which is information in itself). Returns: `{symbol, count, defs: [{slug, file, language, symbol_type, start_line, end_line, snippet}]}`. Filter by --lang to scope a polyglot brain (e.g., lang='typescript'). Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+    "description": "Where is this symbol defined? Returns one row per definition site (function, class, type, interface, enum, struct, trait, module, contract). Use this BEFORE reaching for grep when you want to read a definition. Single-result is the common case; multiple results indicate same-name symbols across files (which is information in itself). Returns: `{symbol, count, defs: [{slug, file, language, symbol_type, start_line, end_line, snippet}]}`. Filter by --lang to scope a polyglot brain (e.g., lang='typescript').",
     "params": {
       "symbol": {
         "type": "string",
@@ -5448,7 +5448,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "Find every reference to a symbol across the codebase (every file, every line). Differs from code_callers in two ways: (1) catches references in comments, strings, imports, type annotations — not just call sites; (2) returns line numbers, not symbol-qualified edges. Use this when planning a rename or deprecation where you need to touch every literal mention. Returns: `{symbol, count, refs: [{slug, file, language, line, context}]}`. Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+    "description": "Find every reference to a symbol across the codebase (every file, every line). Differs from code_callers in two ways: (1) catches references in comments, strings, imports, type annotations — not just call sites; (2) returns line numbers, not symbol-qualified edges. Use this when planning a rename or deprecation where you need to touch every literal mention. Returns: `{symbol, count, refs: [{slug, file, language, line, context}]}`.",
     "params": {
       "symbol": {
         "type": "string",
@@ -5476,7 +5476,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "BEFORE editing any function, run code_blast with the symbol name to surface every transitive caller grouped by depth (direct → 2-hop → 3-hop). Use this during plan-mode to size the change. Returns up to 200 nodes. Trust an empty/not_found result only when ready=true; ready=false means impact is unknown and requires a safe fallback. Returns: {result, status, ready, depth_groups?, truncation?, cycles_detected?, did_you_mean?, candidates?}. Example ok: {result:\"ok\", status:\"ready\", ready:true, depth_groups:[{depth:1, nodes:[{symbol,chunk_id}], confidence:0.77}], truncation:\"none\"}. Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+    "description": "BEFORE editing any function, run code_blast with the symbol name to surface every transitive caller grouped by depth (direct → 2-hop → 3-hop). Use this during plan-mode to size the change. Returns up to 200 nodes. Trust an empty/not_found result only when ready=true; ready=false means impact is unknown and requires a safe fallback. Returns: {result, status, ready, depth_groups?, truncation?, cycles_detected?, did_you_mean?, candidates?}. Example ok: {result:\"ok\", status:\"ready\", ready:true, depth_groups:[{depth:1, nodes:[{symbol,chunk_id}], confidence:0.77}], truncation:\"none\"}.",
     "params": {
       "symbol": {
         "type": "string",
@@ -5512,7 +5512,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "When tracing how a request flows through the codebase from entry point to side effect (DB write, HTTP call, file I/O), run code_flow from the entry point. Returns ordered execution chain with terminal-node tags. Returns: same envelope as code_blast plus terminal_nodes: [{symbol, sink_kind}] where sink_kind ∈ \"db_call\"|\"http_call\"|\"file_io\"|\"process_exec\"|\"unknown\". Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+    "description": "When tracing how a request flows through the codebase from entry point to side effect (DB write, HTTP call, file I/O), run code_flow from the entry point. Returns ordered execution chain with terminal-node tags. Returns: same envelope as code_blast plus terminal_nodes: [{symbol, sink_kind}] where sink_kind ∈ \"db_call\"|\"http_call\"|\"file_io\"|\"process_exec\"|\"unknown\".",
     "params": {
       "entry_point": {
         "type": "string",

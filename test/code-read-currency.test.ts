@@ -200,16 +200,22 @@ describe('code definition and reference currency', () => {
     expect(unknown.ready).toBe(false);
   });
 
+  // SWX fork policy (captain's order, 2026-10-14): remote callers read code
+  // (upstream suspends it, garrytan/gbrain#5052) and get only current rows.
   for (const name of ['code_def', 'code_refs', 'code_callers', 'code_callees']) {
-    test(`${name} remains suspended for remote and omitted trust before touching storage`, async () => {
-      let reads = 0;
-      const inaccessible = new Proxy({}, { get() { reads++; throw new Error('storage access'); } });
-      for (const remote of [true, undefined]) {
-        await expect(operationsByName[name].handler({ engine: inaccessible, remote,
-          sourceId: 'source-a', auth: { allowedSources: ['source-a'] } } as unknown as OperationContext,
-        { symbol: 'sampleSymbol' })).rejects.toThrow('temporarily unavailable');
-      }
-      expect(reads).toBe(0);
+    test(`${name} serves current rows to remote and omitted trust, then withholds them once stale`, async () => {
+      const id = await seed();
+      const [chunk] = await engine.executeRaw<{ id: number }>('SELECT id FROM content_chunks WHERE page_id=$1', [id]);
+      await engine.addCodeEdges([{
+        from_chunk_id: chunk.id, to_chunk_id: chunk.id, from_symbol_qualified: 'sampleSymbol', to_symbol_qualified: 'sampleSymbol',
+        edge_type: 'calls', source_id: 'source-a',
+      }]);
+      const read = (remote: boolean | undefined) => operationsByName[name].handler({ engine, remote,
+        sourceId: 'source-a', auth: { allowedSources: ['source-a'] } } as unknown as OperationContext,
+      { symbol: 'sampleSymbol' }) as Promise<{ count: number }>;
+      for (const remote of [true, undefined]) expect((await read(remote)).count).toBe(1);
+      await engine.executeRaw('UPDATE pages SET text_projection_revision=NULL WHERE id=$1', [id]);
+      for (const remote of [true, undefined]) expect((await read(remote)).count).toBe(0);
     });
   }
 });

@@ -446,7 +446,7 @@
   "test/code-def-refs.test.ts": 490,
   "test/code-edges.test.ts": 1044,
   "test/code-graph-readiness.test.ts": 1039,
-  "test/code-intel-remote-suspension-message.test.ts": 332,
+  "test/code-intel-remote-read-dispatch.test.ts": 332,
   "test/code-intel-source-scope.test.ts": 1457,
   "test/code-intel/edge-densification.test.ts": 31,
   "test/code-intel/n13-edge-resolution.test.ts": 1064,

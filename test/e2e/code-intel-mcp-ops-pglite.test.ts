@@ -177,11 +177,13 @@ describe('v0.34 W3 — code_callers source scoping', () => {
 });
 
 describe('#4011 — graph ops re-route to the code-bearing federated source', () => {
-  test('remote code_callers is temporarily suspended before federated rerouting', async () => {
+  test('remote code_callers re-routes to the code-bearing federated source (SWX fork policy)', async () => {
     // Vault+code brain: the caller's scalar scope ('default') holds no code;
     // the graph lives entirely in 'code-src'. Pre-#4011 the traversal stayed
     // on 'default' and readiness honestly reported not_built — masking a
-    // fully built graph that code_def / code_refs could already see.
+    // fully built graph that code_def / code_refs could already see. The fork
+    // lets remote callers read code (captain's order, 2026-10-14; upstream
+    // suspends it, garrytan/gbrain#5052), so the re-route applies to them.
     await registerSource(engine, 'default');
     await registerSource(engine, 'code-src');
     const defPage = await insertCodePage(engine, 'code-src', 'src/foo.ts');
@@ -194,9 +196,12 @@ describe('#4011 — graph ops re-route to the code-bearing federated source', ()
       remote: true,
       localFederatedSourceIds: ['default', 'code-src'],
     };
-    await expect(operationsByName.code_callers!.handler(ctx, { symbol: 'parseMarkdown' })).rejects.toMatchObject({
-      code: 'permission_denied', message: expect.stringContaining('temporarily unavailable'),
-    });
+    const result = (await operationsByName.code_callers!.handler(ctx, { symbol: 'parseMarkdown' })) as {
+      status: string;
+      callers: Array<{ from_symbol_qualified: string; source_id: string | null }>;
+    };
+    expect(result.callers.map((c) => [c.from_symbol_qualified, c.source_id])).toEqual([['callerInCode', 'code-src']]);
+    expect(result.status).toBe('ready');
   });
 });
 
