@@ -1,5 +1,6 @@
 import { mockEmbedProjectionEngine as mockEngine, embeddingUpdates } from './helpers/embed-projection-mock.ts';
-import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
+import { withEnv } from './helpers/with-env.ts';
 import * as realEmbedding from '../src/core/embedding.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { DbLockHandle } from '../src/core/db-lock.ts';
@@ -76,6 +77,79 @@ afterEach(() => {
   delete process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS;
   delete process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS;
   delete process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
+});
+
+describe('#9 real bulk producer pacing capacity', () => {
+  const cases = [
+    { name: 'binding actual pool', kind: 'postgres', pool: 2, configuredPool: '17', workers: undefined, effective: 2, knownPool: 2, warning: true },
+    { name: 'nonbinding actual pool', kind: 'postgres', pool: 17, configuredPool: '2', workers: undefined, effective: 8, knownPool: 17, warning: false },
+    { name: 'independent worker ceiling', kind: 'postgres', pool: 2, configuredPool: '17', workers: '1', effective: 1, knownPool: 2, warning: false },
+    { name: 'missing diagnostics', kind: 'postgres', pool: null, configuredPool: '2', workers: undefined, effective: 2, knownPool: null, warning: false },
+    { name: 'throwing diagnostics', kind: 'postgres', pool: 'throws', configuredPool: '2', workers: undefined, effective: 2, knownPool: null, warning: false },
+    { name: 'poolless PGLite', kind: 'pglite', pool: 2, configuredPool: '2', workers: undefined, effective: 8, knownPool: null, warning: false },
+  ] as const;
+  for (const target of ['all', 'stale'] as const) {
+    for (const fixture of cases) {
+      test(`${target}: ${fixture.name} emits attainable JSON telemetry and uses that worker policy`, async () => {
+        await withEnv({ GBRAIN_POOL_SIZE: fixture.configuredPool, GBRAIN_EMBED_CONCURRENCY: fixture.workers,
+          GBRAIN_PACE_MODE: undefined, GBRAIN_PACE_ENABLED: undefined }, async () => {
+          const pages = Array.from({ length: 10 }, (_, i) => ({ slug: `paced-${i}`, source_id: 'default' }));
+          const chunks = (slug: string) => [{ chunk_index: 0, chunk_text: `text for ${slug}`, chunk_source: 'compiled_truth', embedded_at: null, token_count: 4 }];
+          const stale = pages.map((page, i) => ({ ...page, ...chunks(page.slug)[0], chunk_source: 'compiled_truth' as const,
+            model: null, token_count: null, page_id: i + 1 }));
+          const err = spyOn(process.stderr, 'write').mockImplementation(() => true);
+          const paceLines = () => err.mock.calls.map(c => String(c[0])).filter(line => line.includes('[pace]'));
+          let sawAdmission = false;
+          let poolProbes = 0;
+          embedBatchBehavior = async texts => {
+            if (fixture.warning) {
+              expect(paceLines().join('')).toContain('effectiveCap=2');
+              sawAdmission = true;
+            }
+            await new Promise<void>(resolve => setImmediate(resolve));
+            return texts.map(() => new Float32Array(1536));
+          };
+          const engine = mockEngine({ kind: fixture.kind,
+            getPoolDiagnostics: () => { poolProbes++; if (fixture.pool === 'throws') throw new Error('diagnostics unavailable'); return { poolMax: fixture.pool }; },
+            listPages: async () => pages, countStaleChunks: async () => Math.max(0, stale.length - embeddingUpdates(engine).length), listStaleChunks: async () => stale,
+            getChunks: async (slug: string) => chunks(slug), upsertChunks: async () => {},
+          });
+          try {
+            const result = await runEmbedCore(engine, { [target]: true, quiet: true, takes: false,
+              pace: { perCallMode: 'balanced', perCall: { maxSleepMs: 0 } } });
+            const serialized = JSON.parse(JSON.stringify(result));
+            expect(result.failures).toBe(0);
+            expect(result.embedded).toBe(10);
+            expect(totalEmbedCalls).toBe(10);
+            expect(maxConcurrentEmbedCalls).toBe(fixture.effective);
+            expect(serialized.pacing).toMatchObject({ maxConcurrency: 8, effectiveCap: fixture.effective, poolCapacity: fixture.knownPool,
+              totalSleptMs: 0, sleeps: 0, maxWaiters: 0 });
+            expect(serialized.pacing.samples).toBeGreaterThan(0);
+            expect(paceLines()).toHaveLength(fixture.warning ? 1 : 0);
+            if (fixture.warning) expect(sawAdmission).toBe(true);
+            expect(poolProbes).toBe(fixture.kind === 'postgres' ? 1 : 0);
+            expect(process.env.GBRAIN_POOL_SIZE).toBe(fixture.configuredPool);
+          } finally { err.mockRestore(); }
+        });
+      }, 5000);
+    }
+  }
+
+  test('dry-run and off mode do not admit a paced run or issue a pool diagnosis', async () => {
+    await withEnv({ GBRAIN_POOL_SIZE: '2', GBRAIN_EMBED_CONCURRENCY: undefined }, async () => {
+      const err = spyOn(process.stderr, 'write').mockImplementation(() => true);
+      let probes = 0;
+      const engine = mockEngine({ kind: 'postgres', listPages: async () => [],
+        getPoolDiagnostics: () => { probes++; return { poolMax: 2 }; } });
+      try {
+        expect((await runEmbedCore(engine, { all: true, dryRun: true, pace: { perCallMode: 'balanced' } })).pacing).toBeUndefined();
+        expect((await runEmbedCore(engine, { all: true, pace: { perCallMode: 'off' } })).pacing).toBeUndefined();
+        expect(probes).toBe(0);
+        expect(totalEmbedCalls).toBe(0);
+        expect(err.mock.calls.filter(c => String(c[0]).includes('[pace]'))).toHaveLength(0);
+      } finally { err.mockRestore(); }
+    });
+  }, 5000);
 });
 
 describe('runEmbed --all (parallel)', () => {

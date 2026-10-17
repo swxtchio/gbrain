@@ -15,12 +15,13 @@
  * The kill-resume contract is covered by test/embed-stale.test.ts at the
  * helper layer; the handler just routes through.
  */
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { makeEmbedBackfillHandler } from '../src/core/minions/handlers/embed-backfill.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { tryAcquireDbLock } from '../src/core/db-lock.ts';
 import type { MinionJobContext } from '../src/core/minions/types.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { configureGateway, getCurrentBudgetTracker, resetGateway } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
@@ -87,6 +88,57 @@ describe('embed-backfill handler — happy path', () => {
     const handler = makeEmbedBackfillHandler(engine);
     await expect(handler(fakeJob({ sourceId: '' }))).rejects.toThrow(/sourceId is required/);
   });
+});
+
+describe('#9 queued backfill paced admission', () => {
+  for (const fixture of [
+    { name: 'binding instance pool', kind: 'postgres', pool: 2, mode: 'balanced', concurrency: 8, warning: true },
+    { name: 'nonbinding pool', kind: 'postgres', pool: 17, mode: 'balanced', concurrency: 8, warning: false },
+    { name: 'missing diagnostics', kind: 'postgres', pool: null, mode: 'balanced', concurrency: 8, warning: false },
+    { name: 'throwing diagnostics', kind: 'postgres', pool: 'throws', mode: 'balanced', concurrency: 8, warning: false },
+    { name: 'poolless PGLite', kind: 'pglite', pool: 2, mode: 'balanced', concurrency: 8, warning: false },
+    { name: 'worker env overrides queued mode', kind: 'postgres', pool: 2, mode: 'off', concurrency: undefined, warning: false },
+  ] as const) {
+    test(`${fixture.name}: diagnoses before the drain and preserves its explicit paced workers`, async () => {
+      await withEnv({ GBRAIN_POOL_SIZE: '17', GBRAIN_EMBED_CONCURRENCY: '1', GBRAIN_PACE_MODE: fixture.mode }, async () => {
+        const err = spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const warnings = () => err.mock.calls.map(c => String(c[0])).filter(line => line.includes('[pace]'));
+        const jobEngine = new Proxy(engine, {
+          get(target, key) {
+            if (key === 'kind') return fixture.kind;
+            if (key === 'sql' && fixture.kind === 'postgres') return (parts: TemplateStringsArray, ...params: unknown[]) =>
+              engine.executeRaw(parts.map((part, i) => `${i ? `$${i}` : ''}${part}`).join(''), params);
+            if (key === 'getPoolDiagnostics') return () => {
+              if (fixture.pool === 'throws') throw new Error('diagnostics unavailable');
+              return { poolMax: fixture.pool };
+            };
+            const value = Reflect.get(target, key);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }) as BrainEngine;
+        let drained = false;
+        const handler = makeEmbedBackfillHandler(jobEngine, {
+          runStale: async (_engine, _source, opts) => {
+            drained = true;
+            expect(opts?.concurrency).toBe(fixture.concurrency);
+            expect(opts?.pacer?.snapshot().enabled).toBe(fixture.mode !== 'off');
+            expect(warnings()).toHaveLength(fixture.warning ? 1 : 0);
+            if (fixture.warning) {
+              const line = warnings()[0];
+              for (const info of ['mode=balanced', 'maxConcurrency=8', 'poolCapacity=2', 'effectiveCap=2', 'GBRAIN_POOL_SIZE']) expect(line).toContain(info);
+              expect(line).toMatch(/keep.*small pool/i);
+            }
+            return { embedded: 1, chunksProcessed: 1, pagesProcessed: 1, invalidated: 0, lastCursor: null, done: true, aborted: false };
+          },
+        });
+        try {
+          expect((await handler(fakeJob({ sourceId: 'default', pace: { perCallMode: 'gentle' } }))).status).toBe('success');
+          expect(drained).toBe(true);
+          expect(process.env.GBRAIN_POOL_SIZE).toBe('17');
+        } finally { err.mockRestore(); }
+      });
+    }, 5000);
+  }
 });
 
 describe('embed-backfill handler — D2 lock contract', () => {
