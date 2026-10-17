@@ -719,7 +719,11 @@ export function generateSelfDisableGuard(repoPath: string, target: InstallTarget
         ? `  systemctl --user disable --now ${job.systemdUnit} 2>/dev/null || true\n`
         : '';
   const strikes = autopilotDisableStrikesPath();
-  return `# Self-disable if the captured checkout is gone (rename / relocation / deletion).
+  return `# A self-disable remains terminal until a deliberate reinstall clears it.
+if [ -f '${q(marker)}' ]; then
+  exit 0
+fi
+# Self-disable if the captured checkout is gone (rename / relocation / deletion).
 # Tests the repo DIRECTORY: --repo may be a subdirectory of the checkout, and
 # .git is a FILE in worktrees and submodules, so [ ! -d "$repo/.git" ] would
 # false-positive on healthy installs.
@@ -736,7 +740,6 @@ if [ ! -d '${q(repoPath)}' ]; then
   fi
   echo "$(date -u +%FT%TZ) [autopilot] repo path gone, disabling:" '${q(repoPath)}'
   printf '%s\\n' 'repo path gone: ${q(repoPath)}' > '${q(marker)}' 2>/dev/null || true
-  rm -f '${q(strikes)}' 2>/dev/null || true
 ${disableCmd}  exit 0
 fi
 rm -f '${q(strikes)}' 2>/dev/null || true

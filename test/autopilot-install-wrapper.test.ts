@@ -19,12 +19,13 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 
-import { writeWrapperScript } from '../src/commands/autopilot.ts';
+import { runAutopilot, writeWrapperScript } from '../src/commands/autopilot.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const NO_GBRAIN_PATH = '/usr/bin:/bin';
@@ -169,4 +170,35 @@ describe('self-disabled wrapper dispatch boundary', () => {
       });
     }
   }
+
+  test('deliberate reinstall recovers dispatch after a generated self-disable', async () => {
+    await withRig(async rig => {
+      const marker = join(dirname(rig.wrapperPath), 'autopilot-disabled');
+      const strikes = join(dirname(rig.wrapperPath), 'autopilot-disable-strikes');
+      rmSync(rig.repoDir, { recursive: true });
+      for (const miss of [1, 2, 3]) {
+        const result = rig.run(NO_GBRAIN_PATH);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.stdout).not.toContain('BAKED_RAN');
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+      }
+      const reason = readFileSync(marker, 'utf8');
+      expect(reason).toBe(`repo path gone: ${rig.repoDir}\n`);
+      mkdirSync(rig.repoDir);
+      expect(rig.run(NO_GBRAIN_PATH).stdout).toBe('');
+      expect(readFileSync(marker, 'utf8')).toBe(reason);
+      // Only the installer runs in-process. The engine supplies consent config;
+      // the container target emits files without starting a service or a daemon.
+      const engine = { kind: 'pglite', getConfig: async () => null } as unknown as BrainEngine;
+      await runAutopilot(engine, ['--install', '--force', '--yes', '--target', 'ephemeral-container', '--no-inject', '--repo', rig.repoDir]);
+      expect(existsSync(marker)).toBe(false);
+      const recovered = rig.run(NO_GBRAIN_PATH);
+      expect(recovered.error).toBeUndefined();
+      expect(recovered.status).toBe(0);
+      expect(recovered.stdout).toContain(`BAKED_RAN autopilot --repo ${rig.repoDir}`);
+      expect(recovered.stderr).toBe('');
+      expect(existsSync(strikes)).toBe(false);
+    });
+  });
 });
