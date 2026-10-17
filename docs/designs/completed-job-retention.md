@@ -1,0 +1,12 @@
+# Completed-job retention plan
+
+Authority: this plan selects the automatic policy within swxtchio/gbrain#3's suggested retention range and the captain's completed-history-only assignment.
+
+- Baseline: `dcaf5c1cf5d33d0dde89bd65899e14036799e778`; verified `origin/swxtch` is the same commit and the fork default is `swxtch`. Integrate any later fork changes by merge, preserving upstream-merge ancestry; leave fork/upstream convergence to `scripts/gbrain-safe-update`.
+- Root cause: `makeAutopilotGlobalMaintenanceHandler` runs `MAINTENANCE_PHASES` through `runCycle`, whose purge dispatch reaches `runPhasePurge`; that phase never invokes `MinionQueue.prune`. The only production queue-prune caller is `runJobsPrune`.
+- Automatic policy: `minions.completed_retention_days`, absent default 14 days, positive whole days with a representable cutoff. Purge only `completed` rows older than that cutoff, based on `finished_at` (legacy missing completion timestamps fall back to `updated_at`). Keep manual prune's default statuses and preview; share its atomic synthesis-completion archive.
+- Preserve execution: keep nonterminal/retryable jobs; retain expired terminal parents/private-queue owners with outstanding nonterminal dependents. Completed children may be reclaimed because `completeJob` publishes their results to the surviving parent's inbox before completion commits; verify real aggregator readback.
+- Reporting: add actual job deletion count and effective retention to the purge phase; report zero on a clean no-op, skip all history mutation on dry-run, and surface cleanup errors through the existing failed-phase contract.
+- Verification: producer-driven jobs (`add` → `claim` → `completeJob`), only timestamp backdating for aging, production `runCycle` purge on real PGLite and PostgreSQL. Assert default/override, repeated/new expiry, recent completion despite old creation, live/retryable survivors, parent outcomes and synthesis eligibility, dry-run snapshots, and cleanup failure. Keep existing queue preview and synthesis-preservation tests.
+- Discrimination: establish bounded baseline red for automatic cleanup, and independent mutations for any new age/dependency protection; restore repair and repeat focused green. Preserve commands, immutable pins, full logs and actual exit codes under `.context/`.
+- Handoff: one draft PR on `fm/gbrain-3`, focused tests and mandatory identity/lint gates, clean committed head pushed and verified. Firstmate owns review, release numbering and the final suite of record.
