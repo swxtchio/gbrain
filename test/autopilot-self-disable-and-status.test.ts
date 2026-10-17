@@ -9,6 +9,17 @@
  * Both are pure, so no daemon is installed here.
  */
 import { describe, test, expect } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { spawnSync } from 'child_process';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import {
+  autopilotDisabledMarkerPath,
+  autopilotDisableStrikesPath,
+  resolveAutopilotJob,
+  type AutopilotJob,
+} from '../src/core/autopilot-paths.ts';
+import { withEnv } from './helpers/with-env.ts';
 import {
   generateSelfDisableGuard,
   crontabIndicatesAutopilotInstall,
@@ -19,17 +30,71 @@ import {
   AUTOPILOT_SYSTEMD_UNIT,
 } from '../src/commands/autopilot.ts';
 
+interface GuardRig {
+  repo: string;
+  marker: string;
+  strikes: string;
+  job: AutopilotJob;
+  requests: () => string;
+  run: (target: Parameters<typeof generateSelfDisableGuard>[1], supervisorExit?: number) => string;
+}
+
+async function withGuardRig(fn: (rig: GuardRig) => void): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'gbrain-self-disable-'));
+  const home = join(root, 'os-home');
+  const brainHome = join(root, "brain's home");
+  const bin = join(root, 'bin');
+  const log = join(root, 'supervisor.log');
+  const otherMarker = join(home, '.gbrain', 'autopilot-disabled');
+  const otherStrikes = join(home, '.gbrain', 'autopilot-disable-strikes');
+  mkdirSync(join(home, '.gbrain'), { recursive: true });
+  mkdirSync(bin);
+  writeFileSync(otherMarker, 'another brain is disabled\n');
+  writeFileSync(otherStrikes, '17\n');
+  for (const command of ['systemctl', 'launchctl']) {
+    writeFileSync(join(bin, command), `#!/bin/sh\nprintf '%s\\n' "${command} $*" >> "$SUPERVISOR_LOG"\nexit "$SUPERVISOR_EXIT"\n`, { mode: 0o755 });
+  }
+  writeFileSync(join(bin, 'id'), '#!/bin/sh\nprintf "4242\\n"\n', { mode: 0o755 });
+  try {
+    await withEnv({ HOME: home, GBRAIN_HOME: brainHome, GBRAIN_AUTOPILOT_LABEL: undefined }, () => {
+      const job = resolveAutopilotJob({ mint: true });
+      const repo = join(root, "captured repo's checkout");
+      const marker = autopilotDisabledMarkerPath();
+      const strikes = autopilotDisableStrikesPath();
+      const requests = () => existsSync(log) ? readFileSync(log, 'utf8') : '';
+      const run: GuardRig['run'] = (target, supervisorExit = 0) => {
+        const shell = generateSelfDisableGuard(repo, target, job) + 'printf "GUARD_DISPATCH\\n"\n';
+        const result = spawnSync('bash', ['-c', shell], {
+          env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, SUPERVISOR_LOG: log, SUPERVISOR_EXIT: String(supervisorExit) },
+          encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL',
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe('');
+        expect(readFileSync(otherMarker, 'utf8')).toBe('another brain is disabled\n');
+        expect(readFileSync(otherStrikes, 'utf8')).toBe('17\n');
+        return result.stdout;
+      };
+      fn({ repo, marker, strikes, job, requests, run });
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 describe('generateSelfDisableGuard', () => {
-  test('tests the repo DIRECTORY, never $repo/.git', () => {
-    const guard = generateSelfDisableGuard('/data/brain', 'macos');
-    expect(guard).toContain("[ ! -d '/data/brain' ]");
-    // .git is a FILE in worktrees and submodules, and --repo may be a
-    // subdirectory of the checkout — either shape would false-positive and
-    // disable a healthy install. Assert on the executable line only; the
-    // surrounding comment mentions .git precisely to explain the trap.
-    const testLine = guard.split('\n').find((l) => l.startsWith('if [ '))!;
-    expect(testLine).toBe("if [ ! -d '/data/brain' ]; then");
-    expect(testLine).not.toContain('.git');
+  test('healthy checkout directories dispatch with a .git file or from a checkout subdirectory', async () => {
+    for (const shape of ['git-file', 'subdirectory']) {
+      await withGuardRig(rig => {
+        mkdirSync(rig.repo);
+        if (shape === 'git-file') writeFileSync(join(rig.repo, '.git'), 'gitdir: /some/checkout\n');
+        else mkdirSync(join(rig.repo, '..', '.git'));
+        expect(rig.run('linux-systemd')).toBe('GUARD_DISPATCH\n');
+        expect(existsSync(rig.marker)).toBe(false);
+        expect(existsSync(rig.strikes)).toBe(false);
+        expect(rig.requests()).toBe('');
+      });
+    }
   });
 
   test('macOS actually boots the job out — exit 0 alone is a respawn loop', () => {
@@ -64,24 +129,68 @@ describe('generateSelfDisableGuard', () => {
     expect(guard).toContain("'/data/o'\\''brien/brain'");
   });
 
-  test('one missed probe is a strike, not a disable — three consecutive misses required', () => {
-    // Repos on external volumes, NFS, or cloud-synced folders are routinely
-    // absent for the first launch after login. A single-probe guard would
-    // permanently bootout a healthy install on one transient miss (adversarial
-    // review catch); the counter makes disable require persistence.
-    const guard = generateSelfDisableGuard('/data/brain', 'macos');
-    expect(guard).toContain('autopilot-disable-strikes');
-    expect(guard).toContain('-lt 3');
-    // Below the threshold the guard exits WITHOUT writing the disabled marker
-    // or booting the job out: the early-exit line precedes both.
-    const strikeExit = guard.indexOf('exit 0');
-    expect(strikeExit).toBeGreaterThan(-1);
-    expect(strikeExit).toBeLessThan(guard.indexOf('autopilot-disabled'));
-    expect(strikeExit).toBeLessThan(guard.indexOf('launchctl bootout'));
-    // A successful probe resets the counter, or three misses spread over
-    // months would accumulate into a false disable.
-    expect(guard.trimEnd().endsWith("2>/dev/null || true")).toBe(true);
-    expect(guard.split('rm -f').length).toBeGreaterThanOrEqual(3);
+  test('recorded disable is terminal for missing and restored repos on every target', async () => {
+    for (const target of ['macos', 'linux-systemd', 'linux-cron', 'ephemeral-container'] as const) {
+      await withGuardRig(rig => {
+        const reason = 'repo path gone: previously captured checkout\n';
+        writeFileSync(rig.marker, reason);
+        writeFileSync(rig.strikes, '3\n');
+        const request = target === 'macos' ? `launchctl bootout gui/4242/${rig.job.launchdLabel}\n`
+          : target === 'linux-systemd' ? `systemctl --user disable --now ${rig.job.systemdUnit}\n` : '';
+        let expectedRequests = '';
+        for (const restored of [false, true]) {
+          if (restored) mkdirSync(rig.repo);
+          expect(rig.run(target)).toBe('');
+          expect(readFileSync(rig.marker, 'utf8')).toBe(reason);
+          expect(readFileSync(rig.strikes, 'utf8')).toBe('3\n');
+          expectedRequests += request;
+          expect(rig.requests()).toBe(expectedRequests);
+        }
+      });
+    }
+  });
+
+  test('consecutive misses retain threshold history and remove only the installed job even if the supervisor fails', async () => {
+    for (const target of ['macos', 'linux-systemd'] as const) {
+      for (const supervisorExit of [0, 1]) {
+        await withGuardRig(rig => {
+          expect(rig.job.kind).toBe('suffixed');
+          for (const strike of [1, 2]) {
+            expect(rig.run(target, supervisorExit)).not.toContain('GUARD_DISPATCH');
+            expect(readFileSync(rig.strikes, 'utf8')).toBe(`${strike}\n`);
+            expect(existsSync(rig.marker)).toBe(false);
+            expect(rig.requests()).toBe('');
+          }
+          expect(rig.run(target, supervisorExit)).not.toContain('GUARD_DISPATCH');
+          expect(readFileSync(rig.marker, 'utf8')).toBe(`repo path gone: ${rig.repo}\n`);
+          expect(readFileSync(rig.strikes, 'utf8')).toBe('3\n');
+          const expectedRequest = target === 'macos'
+            ? `launchctl bootout gui/4242/${rig.job.launchdLabel}\n`
+            : `systemctl --user disable --now ${rig.job.systemdUnit}\n`;
+          expect(rig.requests()).toBe(expectedRequest);
+          expect(rig.run(target, supervisorExit)).toBe('');
+          expect(readFileSync(rig.strikes, 'utf8')).toBe('3\n');
+          expect(readFileSync(rig.marker, 'utf8')).toBe(`repo path gone: ${rig.repo}\n`);
+          expect(rig.requests()).toBe(expectedRequest + expectedRequest);
+        });
+      }
+    }
+  });
+
+  test('an unmarked successful probe resets misses before the next missing launch', async () => {
+    await withGuardRig(rig => {
+      rig.run('linux-systemd');
+      rig.run('linux-systemd');
+      expect(readFileSync(rig.strikes, 'utf8')).toBe('2\n');
+      mkdirSync(rig.repo);
+      expect(rig.run('linux-systemd')).toBe('GUARD_DISPATCH\n');
+      expect(existsSync(rig.strikes)).toBe(false);
+      rmSync(rig.repo, { recursive: true });
+      expect(rig.run('linux-systemd')).not.toContain('GUARD_DISPATCH');
+      expect(readFileSync(rig.strikes, 'utf8')).toBe('1\n');
+      expect(existsSync(rig.marker)).toBe(false);
+      expect(rig.requests()).toBe('');
+    });
   });
 });
 

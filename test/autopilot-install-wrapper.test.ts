@@ -19,12 +19,13 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 
-import { writeWrapperScript } from '../src/commands/autopilot.ts';
+import { runAutopilot, writeWrapperScript } from '../src/commands/autopilot.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const NO_GBRAIN_PATH = '/usr/bin:/bin';
@@ -139,6 +140,134 @@ describe('#4728 wrapper falls back when the baked CLI path is gone', () => {
       expect(src.slice(src.indexOf("exec '")).trimEnd()).toBe(last);
       // The guard sits after the repo-cwd pin (#3696 ordering) and before the exec.
       expect(src.indexOf(`\ncd '`)).toBeLessThan(src.indexOf('exec '));
+    });
+  });
+});
+
+describe('self-disabled wrapper dispatch boundary', () => {
+  for (const cliPath of ['baked', 'fallback']) {
+    for (const repoState of ['missing', 'restored']) {
+      test(`recorded disable blocks ${cliPath} dispatch with a ${repoState} repo`, async () => {
+        await withRig(rig => {
+          const marker = join(dirname(rig.wrapperPath), 'autopilot-disabled');
+          const strikes = join(dirname(rig.wrapperPath), 'autopilot-disable-strikes');
+          const reason = 'repo path gone: original captured checkout\n';
+          writeFileSync(marker, reason);
+          writeFileSync(strikes, '3\n');
+          if (repoState === 'missing') rmSync(rig.repoDir, { recursive: true });
+          const fallbackDir = join(rig.home, 'fallback-bin');
+          mkdirSync(fallbackDir);
+          writeFileSync(join(fallbackDir, 'gbrain'), '#!/bin/sh\necho "FALLBACK_RAN $@"\nexit 0\n', { mode: 0o755 });
+          if (cliPath === 'fallback') rmSync(join(rig.bakedBinDir, 'gbrain'));
+          const result = rig.run(`${fallbackDir}:${NO_GBRAIN_PATH}`);
+          expect(result.error).toBeUndefined();
+          expect(result.status).toBe(0);
+          expect(result.stdout).toBe('');
+          expect(result.stderr).toBe('');
+          expect(readFileSync(marker, 'utf8')).toBe(reason);
+          expect(readFileSync(strikes, 'utf8')).toBe('3\n');
+        });
+      });
+    }
+  }
+
+  test('deliberate reinstall recovers dispatch after a generated self-disable', async () => {
+    await withRig(async rig => {
+      const marker = join(dirname(rig.wrapperPath), 'autopilot-disabled');
+      const strikes = join(dirname(rig.wrapperPath), 'autopilot-disable-strikes');
+      rmSync(rig.repoDir, { recursive: true });
+      for (const miss of [1, 2, 3]) {
+        const result = rig.run(NO_GBRAIN_PATH);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.stdout).not.toContain('BAKED_RAN');
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+      }
+      const reason = readFileSync(marker, 'utf8');
+      expect(reason).toBe(`repo path gone: ${rig.repoDir}\n`);
+      mkdirSync(rig.repoDir);
+      expect(rig.run(NO_GBRAIN_PATH).stdout).toBe('');
+      expect(readFileSync(marker, 'utf8')).toBe(reason);
+      // Only the installer runs in-process. The engine supplies consent config;
+      // the container target emits files without starting a service or a daemon.
+      const engine = { kind: 'pglite', getConfig: async () => null } as unknown as BrainEngine;
+      await runAutopilot(engine, ['--install', '--force', '--yes', '--target', 'ephemeral-container', '--no-inject', '--repo', rig.repoDir]);
+      expect(existsSync(marker)).toBe(false);
+      const recovered = rig.run(NO_GBRAIN_PATH);
+      expect(recovered.error).toBeUndefined();
+      expect(recovered.status).toBe(0);
+      expect(recovered.stdout).toContain(`BAKED_RAN autopilot --repo ${rig.repoDir}`);
+      expect(recovered.stderr).toBe('');
+      expect(existsSync(strikes)).toBe(false);
+    });
+  });
+
+  test('reinstall against an absent repo starts a fresh consecutive-miss cycle', async () => {
+    await withRig(async rig => {
+      const marker = join(dirname(rig.wrapperPath), 'autopilot-disabled');
+      const strikes = join(dirname(rig.wrapperPath), 'autopilot-disable-strikes');
+      rmSync(rig.repoDir, { recursive: true });
+      for (const miss of [1, 2, 3]) {
+        expect(rig.run(NO_GBRAIN_PATH).status).toBe(0);
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+      }
+      expect(readFileSync(marker, 'utf8')).toBe(`repo path gone: ${rig.repoDir}\n`);
+      const newRepo = join(rig.home, 'still-absent-repo');
+      const engine = { kind: 'pglite', getConfig: async () => null } as unknown as BrainEngine;
+      await runAutopilot(engine, ['--install', '--force', '--yes', '--target', 'ephemeral-container', '--no-inject', '--repo', newRepo]);
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(newRepo)).toBe(false);
+      for (const miss of [1, 2, 3]) {
+        const result = rig.run(NO_GBRAIN_PATH);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe('');
+        expect(result.stdout).not.toContain('BAKED_RAN');
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+        expect(existsSync(marker)).toBe(miss === 3);
+      }
+      expect(readFileSync(marker, 'utf8')).toBe(`repo path gone: ${newRepo}\n`);
+    });
+  });
+
+  test('uninstall clears retained miss history before the next absent-repo install', async () => {
+    await withRig(async rig => {
+      const marker = join(dirname(rig.wrapperPath), 'autopilot-disabled');
+      const strikes = join(dirname(rig.wrapperPath), 'autopilot-disable-strikes');
+      const otherStrikes = join(rig.home, '.gbrain', 'autopilot-disable-strikes');
+      mkdirSync(dirname(otherStrikes), { recursive: true });
+      writeFileSync(otherStrikes, '17\n');
+      rmSync(rig.repoDir, { recursive: true });
+      for (const miss of [1, 2, 3]) {
+        expect(rig.run(NO_GBRAIN_PATH).status).toBe(0);
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+      }
+      expect(existsSync(marker)).toBe(true);
+      const bin = join(rig.home, 'supervisor-shims');
+      mkdirSync(bin);
+      for (const command of ['crontab', 'systemctl', 'launchctl']) {
+        writeFileSync(join(bin, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      }
+      const moduleUrl = new URL('../src/commands/autopilot.ts', import.meta.url).href;
+      const uninstalled = spawnSync(process.execPath, ['--no-env-file', '--eval', `import { runAutopilot } from ${JSON.stringify(moduleUrl)}; await runAutopilot({}, ['--uninstall']);`], {
+        env: { HOME: rig.home, GBRAIN_HOME: dirname(dirname(rig.wrapperPath)), PATH: `${bin}:${NO_GBRAIN_PATH}`, TMPDIR: tmpdir() },
+        encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL',
+      });
+      expect(uninstalled.error).toBeUndefined();
+      expect(uninstalled.status).toBe(0);
+      expect(existsSync(rig.wrapperPath)).toBe(false);
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(strikes)).toBe(false);
+      expect(readFileSync(otherStrikes, 'utf8')).toBe('17\n');
+      const engine = { kind: 'pglite', getConfig: async () => null } as unknown as BrainEngine;
+      await runAutopilot(engine, ['--install', '--force', '--yes', '--target', 'ephemeral-container', '--no-inject', '--repo', rig.repoDir]);
+      const firstMiss = rig.run(NO_GBRAIN_PATH);
+      expect(firstMiss.error).toBeUndefined();
+      expect(firstMiss.status).toBe(0);
+      expect(firstMiss.stdout).not.toContain('BAKED_RAN');
+      expect(readFileSync(strikes, 'utf8')).toBe('1\n');
+      expect(existsSync(marker)).toBe(false);
+      expect(readFileSync(otherStrikes, 'utf8')).toBe('17\n');
     });
   });
 });

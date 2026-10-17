@@ -75,6 +75,7 @@ let shimDir: string;
 let cronState: string; // the fake crontab "table"
 let cronArgvLog: string; // one line per fake-crontab invocation ("$*")
 let sysctlLog: string; // one line per fake-systemctl invocation ("$*")
+let dispatchLog: string;
 let runEnv: NodeJS.ProcessEnv;
 
 // Foreign crontab content seeded BEFORE any install. Deliberately awkward
@@ -136,6 +137,7 @@ beforeAll(() => {
   cronState = join(tmpRoot, 'cron-state.txt');
   cronArgvLog = join(tmpRoot, 'cron-argv.log');
   sysctlLog = join(tmpRoot, 'systemctl-argv.log');
+  dispatchLog = join(tmpRoot, 'daemon-dispatch.log');
   mkdirSync(home, { recursive: true });
   mkdirSync(repoDir, { recursive: true });
   mkdirSync(shimDir, { recursive: true });
@@ -165,10 +167,8 @@ exit 0
 `,
   );
 
-  // Fake gbrain: writeWrapperScript resolves the CLI via `which gbrain` and
-  // bakes the resolved path into the wrapper; it is never EXECUTED by these
-  // tests, it just has to resolve deterministically.
-  writeShim(join(shimDir, 'gbrain'), '#!/bin/sh\nexit 0\n');
+  // A dispatch breadcrumb proves the wrapper reached its CLI exec boundary.
+  writeShim(join(shimDir, 'gbrain'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${dispatchLog}'\nexit 0\n`);
 
   runEnv = {
     ...process.env,
@@ -213,7 +213,7 @@ exit 0
   // engine-free by contract.
   const init = spawnSync(
     process.execPath,
-    ['run', CLI, 'init', '--pglite', '--no-embedding', '--non-interactive'],
+    ['run', CLI, 'init', '--pglite', '--no-embedding', '--non-interactive', '--git'],
     { cwd: REPO_ROOT, env: runEnv, encoding: 'utf-8', timeout: 120_000 },
   );
   if (init.status !== 0) {
@@ -337,6 +337,106 @@ describe('autopilot linux lifecycle (PATH-shimmed crontab/systemctl)', () => {
     // status reports linux-systemd (detectInstalledTarget checks it first).
     const s = runCli(['autopilot', '--status', '--json'], 60_000);
     expect(parseStatusJson(s.stdout).install_target).toBe('linux-systemd');
+  }, 120_000);
+
+  test('systemd self-disable preserves history and status until reinstall recovers wrapper dispatch', () => {
+    const installed = runCli(['autopilot', '--install', '--force', '--yes', '--target', 'linux-systemd', '--repo', repoDir]);
+    expect(installed.status, installed.stderr).toBe(0);
+    const marker = join(home, '.gbrain', 'autopilot-disabled');
+    const strikes = join(home, '.gbrain', 'autopilot-disable-strikes');
+    const bashrc = join(home, '.bashrc');
+    // Pin the supervisor dependency even after the wrapper prepends its runtime
+    // directory to PATH. The function invokes only this fixture's recorder.
+    writeFileSync(bashrc, `systemctl() { '${join(shimDir, 'systemctl')}' "$@"; }\n`);
+    const runWrapper = () => {
+      const result = spawnSync('bash', [wrapperPath()], { env: runEnv, encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL' });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+      return result;
+    };
+    try {
+      rmSync(sysctlLog, { force: true });
+      rmSync(dispatchLog, { force: true });
+      rmSync(repoDir, { recursive: true });
+      for (const miss of [1, 2, 3]) {
+        runWrapper();
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+        expect(existsSync(marker)).toBe(miss === 3);
+        expect(readLines(dispatchLog)).toEqual([]);
+        expect(readLines(sysctlLog)).toEqual(miss === 3 ? ['--user disable --now gbrain-autopilot.service'] : []);
+      }
+      const reason = readFileSync(marker, 'utf8');
+      expect(reason).toBe(`repo path gone: ${repoDir}\n`);
+      const disabled = runCli(['autopilot', '--status', '--json'], 60_000);
+      expect(disabled.status).toBe(2);
+      expect(parseStatusJson(disabled.stdout).state).toBe('disabled');
+      expect(parseStatusJson(disabled.stdout).disabled_reason).toBe(reason.trim());
+      for (const restored of [false, true]) {
+        if (restored) mkdirSync(repoDir);
+        expect(runWrapper().stdout).toBe('');
+        expect(readFileSync(marker, 'utf8')).toBe(reason);
+        expect(readFileSync(strikes, 'utf8')).toBe('3\n');
+        expect(readLines(dispatchLog)).toEqual([]);
+        expect(readLines(sysctlLog)).toEqual(Array.from({ length: restored ? 3 : 2 }, () => '--user disable --now gbrain-autopilot.service'));
+      }
+      const reinstallRepo = join(tmpRoot, 'still-absent-reinstall-repo');
+      const reinstalled = runCli(['autopilot', '--install', '--force', '--yes', '--target', 'linux-systemd', '--repo', reinstallRepo]);
+      expect(reinstalled.status, reinstalled.stderr).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(reinstallRepo)).toBe(false);
+      for (const miss of [1, 2]) {
+        runWrapper();
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+        expect(existsSync(marker)).toBe(false);
+        expect(readLines(dispatchLog)).toEqual([]);
+      }
+      mkdirSync(reinstallRepo);
+      runWrapper();
+      expect(readLines(dispatchLog)).toEqual([`autopilot --repo ${reinstallRepo}`]);
+      expect(existsSync(strikes)).toBe(false);
+      expect(readFileSync(unitPath(), 'utf8')).toContain('Restart=always');
+    } finally {
+      mkdirSync(repoDir, { recursive: true });
+      rmSync(bashrc, { force: true });
+    }
+  }, 120_000);
+
+  test('systemd uninstall clears a self-disable history before another missing-repo install', () => {
+    const installed = runCli(['autopilot', '--install', '--force', '--yes', '--target', 'linux-systemd', '--repo', repoDir]);
+    expect(installed.status, installed.stderr).toBe(0);
+    const marker = join(home, '.gbrain', 'autopilot-disabled');
+    const strikes = join(home, '.gbrain', 'autopilot-disable-strikes');
+    const bashrc = join(home, '.bashrc');
+    writeFileSync(bashrc, `systemctl() { '${join(shimDir, 'systemctl')}' "$@"; }\n`);
+    const runWrapper = () => {
+      const result = spawnSync('bash', [wrapperPath()], { env: runEnv, encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL' });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+    };
+    try {
+      rmSync(repoDir, { recursive: true });
+      for (const miss of [1, 2, 3]) {
+        runWrapper();
+        expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+      }
+      expect(existsSync(marker)).toBe(true);
+      const removed = runCli(['autopilot', '--uninstall'], 60_000);
+      expect(removed.status, removed.stderr).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(strikes)).toBe(false);
+      const reinstalled = runCli(['autopilot', '--install', '--force', '--yes', '--target', 'linux-systemd', '--repo', repoDir]);
+      expect(reinstalled.status, reinstalled.stderr).toBe(0);
+      runWrapper();
+      expect(readFileSync(strikes, 'utf8')).toBe('1\n');
+      expect(existsSync(marker)).toBe(false);
+      const cronInstalled = runCli(['autopilot', '--install', '--force', '--yes', '--target', 'linux-cron', '--repo', repoDir]);
+      expect(cronInstalled.status, cronInstalled.stderr).toBe(0);
+    } finally {
+      mkdirSync(repoDir, { recursive: true });
+      rmSync(bashrc, { force: true });
+    }
   }, 120_000);
 
   test('uninstall removes ONLY autopilot artifacts: systemd disable sequence + destructive cron filter keeps foreign lines byte-identical', () => {

@@ -719,7 +719,11 @@ export function generateSelfDisableGuard(repoPath: string, target: InstallTarget
         ? `  systemctl --user disable --now ${job.systemdUnit} 2>/dev/null || true\n`
         : '';
   const strikes = autopilotDisableStrikesPath();
-  return `# Self-disable if the captured checkout is gone (rename / relocation / deletion).
+  return `# A self-disable remains terminal until a deliberate reinstall clears it.
+if [ -f '${q(marker)}' ]; then
+${disableCmd}  exit 0
+fi
+# Self-disable if the captured checkout is gone (rename / relocation / deletion).
 # Tests the repo DIRECTORY: --repo may be a subdirectory of the checkout, and
 # .git is a FILE in worktrees and submodules, so [ ! -d "$repo/.git" ] would
 # false-positive on healthy installs.
@@ -736,7 +740,6 @@ if [ ! -d '${q(repoPath)}' ]; then
   fi
   echo "$(date -u +%FT%TZ) [autopilot] repo path gone, disabling:" '${q(repoPath)}'
   printf '%s\\n' 'repo path gone: ${q(repoPath)}' > '${q(marker)}' 2>/dev/null || true
-  rm -f '${q(strikes)}' 2>/dev/null || true
 ${disableCmd}  exit 0
 fi
 rm -f '${q(strikes)}' 2>/dev/null || true
@@ -944,10 +947,9 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
     `auto-exported) in addition to your shell profile. If LLM phases report no provider, put ` +
     'ANTHROPIC_API_KEY=... (or KEY="$(your-secret-manager get KEY)" to keep it off disk) there and re-run `gbrain autopilot --install`.',
   );
-  // A fresh install clears any prior self-disable AND any leaked pause, so a
-  // reinstall does not report "disabled" forever or park itself from day one
-  // on a marker some dead migration left behind.
+  // Reinstall is a new admission, even if the captured repo is still absent.
   try { unlinkSync(autopilotDisabledMarkerPath()); } catch { /* not disabled */ }
+  try { unlinkSync(autopilotDisableStrikesPath()); } catch { /* no misses */ }
   try { unlinkSync(autopilotPausedMarkerPath()); } catch { /* not paused */ }
   const home = process.env.HOME || '';
 
@@ -1450,6 +1452,7 @@ export function uninstallDaemon() {
   // "DISABLED — repo path gone" with exit 2 forever on a machine with nothing
   // installed ('disabled' outranks 'not_installed' in the classifier).
   try { unlinkSync(autopilotDisabledMarkerPath()); } catch { /* not present */ }
+  try { unlinkSync(autopilotDisableStrikesPath()); } catch { /* not present */ }
   try { unlinkSync(autopilotPausedMarkerPath()); } catch { /* not present */ }
 }
 
