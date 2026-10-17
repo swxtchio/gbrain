@@ -1,0 +1,12 @@
+diff --git a/src/commands/autopilot.ts b/src/commands/autopilot.ts
+index d0b7a8bb6..618189159 100644
+--- a/src/commands/autopilot.ts
++++ b/src/commands/autopilot.ts
+@@ -742,7 +742,6 @@ if [ ! -d '${q(repoPath)}' ]; then
+   printf '%s\\n' 'repo path gone: ${q(repoPath)}' > '${q(marker)}' 2>/dev/null || true
+ ${disableCmd}  exit 0
+ fi
+-rm -f '${q(strikes)}' 2>/dev/null || true
+ `;
+ }
+ 

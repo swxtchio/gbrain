@@ -1,0 +1,40 @@
+bun test v1.4.2 (744846f84)
+
+test/autopilot-install-wrapper.test.ts:
+API keys: the daemon sources /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-gbrain-home-siwjJu/.gbrain/env (plain KEY=value lines, auto-exported) in addition to your shell profile. If LLM phases report no provider, put ANTHROPIC_API_KEY=... (or KEY="$(your-secret-manager get KEY)" to keep it off disk) there and re-run `gbrain autopilot --install`.
+Ephemeral container detected (Render / Railway / Fly / Docker).
+Repo: /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-LRlCPe/repo-4728
+Start script: /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-gbrain-home-siwjJu/.gbrain/start-autopilot-5cfbf8c2.sh
+  An already-running autopilot keeps its old environment until the container
+  restarts (or: kill $(cat '/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-gbrain-home-siwjJu/.gbrain/autopilot.pid'), then re-run the start script).
+
+Crontab is unreliable here (wiped on deploy). Add ONE LINE to your
+agent bootstrap to launch autopilot on every start:
+
+  bash /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-gbrain-home-siwjJu/.gbrain/start-autopilot-5cfbf8c2.sh
+
+  Uninstall: gbrain autopilot --uninstall
+190 |       expect(readFileSync(marker, 'utf8')).toBe(reason);
+191 |       // Only the installer runs in-process. The engine supplies consent config;
+192 |       // the container target emits files without starting a service or a daemon.
+193 |       const engine = { kind: 'pglite', getConfig: async () => null } as unknown as BrainEngine;
+194 |       await runAutopilot(engine, ['--install', '--force', '--yes', '--target', 'ephemeral-container', '--no-inject', '--repo', rig.repoDir]);
+195 |       expect(existsSync(marker)).toBe(false);
+                                       ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: true
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:195:34)
+      at async <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:67:15)
+      at async withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at async withRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:55:11)
+      at async <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:175:11)
+(fail) self-disabled wrapper dispatch boundary > deliberate reinstall recovers dispatch after a generated self-disable [20.08ms]
+
+ 0 pass
+ 9 filtered out
+ 1 fail
+ 16 expect() calls
+Ran 1 test across 1 file. [109.00ms]

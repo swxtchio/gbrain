@@ -1,0 +1,12 @@
+diff --git a/src/commands/autopilot.ts b/src/commands/autopilot.ts
+index d0b7a8bb6..1179eaa74 100644
+--- a/src/commands/autopilot.ts
++++ b/src/commands/autopilot.ts
+@@ -740,6 +740,7 @@ if [ ! -d '${q(repoPath)}' ]; then
+   fi
+   echo "$(date -u +%FT%TZ) [autopilot] repo path gone, disabling:" '${q(repoPath)}'
+   printf '%s\\n' 'repo path gone: ${q(repoPath)}' > '${q(marker)}' 2>/dev/null || true
++  rm -f '${q(strikes)}' 2>/dev/null || true
+ ${disableCmd}  exit 0
+ fi
+ rm -f '${q(strikes)}' 2>/dev/null || true

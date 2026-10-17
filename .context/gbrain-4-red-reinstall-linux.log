@@ -1,0 +1,23 @@
+bun test v1.4.2 (744846f84)
+
+test/e2e/autopilot-linux-lifecycle.serial.test.ts:
+380 |         expect(readLines(dispatchLog)).toEqual([]);
+381 |         expect(readLines(sysctlLog)).toEqual(['--user disable --now gbrain-autopilot.service']);
+382 |       }
+383 |       const reinstalled = runCli(['autopilot', '--install', '--force', '--yes', '--target', 'linux-systemd', '--repo', repoDir]);
+384 |       expect(reinstalled.status, reinstalled.stderr).toBe(0);
+385 |       expect(existsSync(marker)).toBe(false);
+                                       ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: true
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/e2e/autopilot-linux-lifecycle.serial.test.ts:385:34)
+(fail) autopilot linux lifecycle (PATH-shimmed crontab/systemctl) > systemd self-disable preserves history and status until reinstall recovers wrapper dispatch [1822.70ms]
+
+ 0 pass
+ 7 filtered out
+ 1 fail
+ 44 expect() calls
+Ran 1 test across 1 file. [5.72s]

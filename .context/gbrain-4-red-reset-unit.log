@@ -1,0 +1,27 @@
+bun test v1.4.2 (744846f84)
+
+test/autopilot-self-disable-and-status.test.ts:
+178 |       rig.run('linux-systemd');
+179 |       rig.run('linux-systemd');
+180 |       expect(readFileSync(rig.strikes, 'utf8')).toBe('2\n');
+181 |       mkdirSync(rig.repo);
+182 |       expect(rig.run('linux-systemd')).toBe('GUARD_DISPATCH\n');
+183 |       expect(existsSync(rig.strikes)).toBe(false);
+                                            ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: true
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:183:39)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:78:7)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withGuardRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:59:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:177:11)
+(fail) generateSelfDisableGuard > an unmarked successful probe resets misses before the next missing launch [9.90ms]
+
+ 0 pass
+ 24 filtered out
+ 1 fail
+ 18 expect() calls
+Ran 1 test across 1 file. [106.00ms]

@@ -1,0 +1,31 @@
+bun test v1.4.2 (744846f84)
+
+test/autopilot-self-disable-and-status.test.ts:
+87 |     for (const shape of ['git-file', 'subdirectory']) {
+88 |       await withGuardRig(rig => {
+89 |         mkdirSync(rig.repo);
+90 |         if (shape === 'git-file') writeFileSync(join(rig.repo, '.git'), 'gitdir: /some/checkout\n');
+91 |         else mkdirSync(join(rig.repo, '..', '.git'));
+92 |         expect(rig.run('linux-systemd')).toBe('GUARD_DISPATCH\n');
+                                              ^
+error: expect(received).toBe(expected)
+
+- "GUARD_DISPATCH
++ "2026-10-17T15:57:48Z [autopilot] repo path missing (strike 1 of 3, disabling at 3): /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-self-disable-g867bV/captured repo's checkout
+  "
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:92:42)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:78:7)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withGuardRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:59:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:88:13)
+(fail) generateSelfDisableGuard > healthy checkout directories dispatch with a .git file or from a checkout subdirectory [5.48ms]
+
+ 0 pass
+ 24 filtered out
+ 1 fail
+ 6 expect() calls
+Ran 1 test across 1 file. [92.00ms]

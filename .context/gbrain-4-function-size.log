@@ -1,0 +1,2 @@
+$ bun scripts/check-function-size.ts
+OK: function sizes within scripts/function-size-baseline.tsv (50 over-limit function(s) baselined, 0 raise(s), base: merge-base with origin/master: no baseline yet (seed), 2.6s)

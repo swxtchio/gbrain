@@ -1,0 +1,14 @@
+diff --git a/src/commands/autopilot.ts b/src/commands/autopilot.ts
+index d0b7a8bb6..ac41e07de 100644
+--- a/src/commands/autopilot.ts
++++ b/src/commands/autopilot.ts
+@@ -720,9 +720,6 @@ export function generateSelfDisableGuard(repoPath: string, target: InstallTarget
+         : '';
+   const strikes = autopilotDisableStrikesPath();
+   return `# A self-disable remains terminal until a deliberate reinstall clears it.
+-if [ -f '${q(marker)}' ]; then
+-  exit 0
+-fi
+ # Self-disable if the captured checkout is gone (rename / relocation / deletion).
+ # Tests the repo DIRECTORY: --repo may be a subdirectory of the checkout, and
+ # .git is a FILE in worktrees and submodules, so [ ! -d "$repo/.git" ] would

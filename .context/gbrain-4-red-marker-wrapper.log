@@ -1,0 +1,120 @@
+bun test v1.4.2 (744846f84)
+
+test/autopilot-install-wrapper.test.ts:
+160 |           writeFileSync(join(fallbackDir, 'gbrain'), '#!/bin/sh\necho "FALLBACK_RAN $@"\nexit 0\n', { mode: 0o755 });
+161 |           if (cliPath === 'fallback') rmSync(join(rig.bakedBinDir, 'gbrain'));
+162 |           const result = rig.run(`${fallbackDir}:${NO_GBRAIN_PATH}`);
+163 |           expect(result.error).toBeUndefined();
+164 |           expect(result.status).toBe(0);
+165 |           expect(result.stdout).toBe('');
+                                      ^
+error: expect(received).toBe(expected)
+
+- ""
++ "2026-10-17T15:56:30Z [autopilot] repo path gone, disabling: /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-pqyhf3/repo-4728
++ "
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:165:33)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:67:15)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:55:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:151:15)
+(fail) self-disabled wrapper dispatch boundary > recorded disable blocks baked dispatch with a missing repo [7.19ms]
+160 |           writeFileSync(join(fallbackDir, 'gbrain'), '#!/bin/sh\necho "FALLBACK_RAN $@"\nexit 0\n', { mode: 0o755 });
+161 |           if (cliPath === 'fallback') rmSync(join(rig.bakedBinDir, 'gbrain'));
+162 |           const result = rig.run(`${fallbackDir}:${NO_GBRAIN_PATH}`);
+163 |           expect(result.error).toBeUndefined();
+164 |           expect(result.status).toBe(0);
+165 |           expect(result.stdout).toBe('');
+                                      ^
+error: expect(received).toBe(expected)
+
+- ""
++ "BAKED_RAN autopilot --repo /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-lcIpdb/repo-4728
++ "
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:165:33)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:67:15)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:55:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:151:15)
+(fail) self-disabled wrapper dispatch boundary > recorded disable blocks baked dispatch with a restored repo [4.48ms]
+160 |           writeFileSync(join(fallbackDir, 'gbrain'), '#!/bin/sh\necho "FALLBACK_RAN $@"\nexit 0\n', { mode: 0o755 });
+161 |           if (cliPath === 'fallback') rmSync(join(rig.bakedBinDir, 'gbrain'));
+162 |           const result = rig.run(`${fallbackDir}:${NO_GBRAIN_PATH}`);
+163 |           expect(result.error).toBeUndefined();
+164 |           expect(result.status).toBe(0);
+165 |           expect(result.stdout).toBe('');
+                                      ^
+error: expect(received).toBe(expected)
+
+- ""
++ "2026-10-17T15:56:30Z [autopilot] repo path gone, disabling: /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-rKV8Gh/repo-4728
++ "
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:165:33)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:67:15)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:55:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:151:15)
+(fail) self-disabled wrapper dispatch boundary > recorded disable blocks fallback dispatch with a missing repo [5.59ms]
+160 |           writeFileSync(join(fallbackDir, 'gbrain'), '#!/bin/sh\necho "FALLBACK_RAN $@"\nexit 0\n', { mode: 0o755 });
+161 |           if (cliPath === 'fallback') rmSync(join(rig.bakedBinDir, 'gbrain'));
+162 |           const result = rig.run(`${fallbackDir}:${NO_GBRAIN_PATH}`);
+163 |           expect(result.error).toBeUndefined();
+164 |           expect(result.status).toBe(0);
+165 |           expect(result.stdout).toBe('');
+                                      ^
+error: expect(received).toBe(expected)
+
+- ""
++ "2026-10-17T15:56:30Z [autopilot] baked CLI path is gone: /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-baked-lKzPw8/gbrain - using /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-tFXwpQ/fallback-bin/gbrain
++ FALLBACK_RAN autopilot --repo /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-tFXwpQ/repo-4728
++ "
+
+- Expected  - 1
++ Received  + 3
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:165:33)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:67:15)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:55:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:151:15)
+(fail) self-disabled wrapper dispatch boundary > recorded disable blocks fallback dispatch with a restored repo [5.60ms]
+184 |         expect(readFileSync(strikes, 'utf8')).toBe(`${miss}\n`);
+185 |       }
+186 |       const reason = readFileSync(marker, 'utf8');
+187 |       expect(reason).toBe(`repo path gone: ${rig.repoDir}\n`);
+188 |       mkdirSync(rig.repoDir);
+189 |       expect(rig.run(NO_GBRAIN_PATH).stdout).toBe('');
+                                                   ^
+error: expect(received).toBe(expected)
+
+- ""
++ "BAKED_RAN autopilot --repo /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-4728-home-V5bCc3/repo-4728
++ "
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:189:46)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:67:15)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:55:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-install-wrapper.test.ts:175:11)
+(fail) self-disabled wrapper dispatch boundary > deliberate reinstall recovers dispatch after a generated self-disable [15.21ms]
+
+ 0 pass
+ 5 filtered out
+ 5 fail
+ 26 expect() calls
+Ran 5 tests across 1 file. [129.00ms]

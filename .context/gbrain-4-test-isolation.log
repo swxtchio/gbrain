@@ -1,0 +1,2 @@
+$ bash scripts/check-test-isolation.sh
+check-test-isolation: OK (3311 non-serial unit files scanned)
