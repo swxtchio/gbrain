@@ -1726,10 +1726,11 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         status: 'ok',
         duration_ms: 0,
         summary: 'dry-run: skipped purge sweep',
-        details: { dry_run: true, purged_sources_count: 0, purged_pages_count: 0, purged_orphan_clones_count: 0 },
+        details: { dry_run: true, purged_sources_count: 0, purged_pages_count: 0, purged_orphan_clones_count: 0, purged_jobs_count: 0 },
       };
     }
     const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts')]);
+    const purgedJobs = await (await import('./cycle/job-retention.ts')).pruneCompletedJobsForCycle(engine);
     // gbrain#4115: {purged, blocked} — a RESTRICT-FK-held source (revoked
     // oauth_client, v64) is reported and skipped instead of aborting the sweep.
     const purgeResult = await purgeExpiredSources(engine);
@@ -1793,9 +1794,10 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
         `${purgedBatchRetryAuditFiles} stale batch-retry audit file(s), ` +
-        `and ${purgedVolunteerEvents} stale volunteer event(s)`,
+        `and ${purgedVolunteerEvents} stale volunteer event(s), ${purgedJobs.count} completed job(s)`,
       details: {
         purged_sources_count: purgedSources.length,
+        purged_jobs_count: purgedJobs.count, completed_job_retention_days: purgedJobs.retentionDays,
         purged_sources_blocked: purgeResult.blocked,
         purged_pages_count: purgedPages.count, purged_pages_blocked: purgedPages.blocked, purged_pages_deferred: purgedPages.deferred,
         purged_orphan_clones_count: purgedClones.count,

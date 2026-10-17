@@ -1233,13 +1233,22 @@ export class MinionQueue {
   async prune(opts?: { olderThan?: Date; status?: MinionJobStatus[]; dryRun?: boolean }): Promise<number> {
     const statuses = opts?.status ?? ['completed', 'dead', 'cancelled'];
     const olderThan = opts?.olderThan ?? new Date(Date.now() - 30 * 86400000);
+    // Completion age must not restart when a diagnostic touches a completed row.
+    // Keep owners while their live dependents still need the execution tree.
+    const eligible = `status = ANY($1)
+      AND CASE WHEN status = 'completed' THEN COALESCE(finished_at, updated_at) ELSE updated_at END < $2
+      AND NOT EXISTS (
+        SELECT 1 FROM minion_jobs dependent
+        WHERE (dependent.parent_job_id = minion_jobs.id OR dependent.private_queue_owner_job_id = minion_jobs.id)
+          AND dependent.status NOT IN ('completed', 'failed', 'dead', 'cancelled')
+      )`;
 
     // #2712: dryRun counts the would-be-pruned rows without deleting.
     // Silent-ignoring a safety flag on a delete path is data loss.
     if (opts?.dryRun) {
       const rows = await this.engine.executeRaw<{ count: string }>(
         `SELECT count(*)::text as count FROM minion_jobs
-         WHERE status = ANY($1) AND updated_at < $2`,
+         WHERE ${eligible}`,
         [statuses, olderThan.toISOString()]
       );
       return parseInt(rows[0]?.count ?? '0', 10);
@@ -1251,7 +1260,7 @@ export class MinionQueue {
     const rows = await this.engine.executeRaw<{ count: string }>(
       `WITH pruned AS (
          DELETE FROM minion_jobs
-         WHERE status = ANY($1) AND updated_at < $2
+         WHERE ${eligible}
          RETURNING name, status, data, idempotency_key, finished_at
        ), archived AS (
          INSERT INTO dream_synthesis_completions (source_id, idempotency_key, completed_at)
