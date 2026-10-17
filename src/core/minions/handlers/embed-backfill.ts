@@ -49,6 +49,7 @@ import { createEmbedStallWatchdog, resolveEmbedStallAbortSeconds } from '../../e
 import { currentEmbeddingSignature } from '../../embedding.ts';
 import { type DbPacer, createDbPacer, createNoopPacer } from '../../db-pacer.ts';
 import { resolvePaceMode, loadPaceModeConfig, readPaceEnv } from '../../pace-mode.ts';
+import { resolvePacedEmbedAdmission } from '../../embed-concurrency.ts';
 import type { BrainEngine } from '../../engine.ts';
 import type { MinionJobContext } from '../types.ts';
 import { parseUsdLimit, usdLimitToCap, resolveSpendPosture } from '../../spend-posture.ts';
@@ -111,6 +112,7 @@ async function resolveBackfillPacer(
       envOverrides,
     });
     if (!knobs.enabled) return { pacer: createNoopPacer() };
+    resolvePacedEmbedAdmission(engine, knobs, { workerConcurrency: knobs.maxConcurrency });
     return { pacer: createDbPacer({ bundle: knobs }), concurrency: knobs.maxConcurrency };
   } catch {
     return { pacer: createNoopPacer() };

@@ -1,4 +1,6 @@
 import { resolvePoolSize } from './db.ts';
+import type { ResolvedPaceKnobs } from './pace-mode.ts';
+import type { PaceSnapshot } from './db-pacer.ts';
 
 let warnedEmbedConcurrencyClamp = false;
 
@@ -35,6 +37,56 @@ export function resolveEmbedConcurrency(
     );
   }
   return clamped;
+}
+
+export interface PacedEmbedAdmission {
+  concurrency: number;
+  /** Admission ceiling, including the configured-worker fallback when pool diagnostics are unavailable; not measured utilization. */
+  effectiveCap: number;
+  poolCapacity: number | null;
+}
+
+/** Single-pool admission only: sync's shared permit spans separate worker pools. */
+export function resolvePacedEmbedAdmission(
+  engine: { kind: string; getPoolDiagnostics?: () => { poolMax: number | null } | null },
+  pace: ResolvedPaceKnobs,
+  opts: { workerConcurrency?: number; env?: Record<string, string | undefined> } = {},
+): PacedEmbedAdmission {
+  const env = opts.env ?? process.env;
+  let poolCapacity: number | null = null;
+  if (engine.kind === 'postgres') {
+    try {
+      const pool = engine.getPoolDiagnostics?.()?.poolMax;
+      if (typeof pool === 'number' && Number.isInteger(pool) && pool > 0) poolCapacity = pool;
+    } catch { /* optional diagnostics must never stop embedding */ }
+  }
+  const requested = Math.max(1, Math.floor(pace.maxConcurrency));
+  const workerCeiling = opts.workerConcurrency ?? resolveEmbedConcurrency('pglite', requested, env);
+  const concurrency = opts.workerConcurrency ?? resolveEmbedConcurrency(engine.kind, requested, env, poolCapacity ?? resolvePoolSize());
+  const effectiveCap = Math.min(concurrency, requested, poolCapacity ?? Infinity);
+  if (pace.enabled && poolCapacity !== null && poolCapacity < Math.min(requested, workerCeiling)) {
+    try {
+      process.stderr.write(
+        `[pace] mode=${pace.resolved_mode} maxConcurrency=${requested} poolCapacity=${poolCapacity} effectiveCap=${effectiveCap}: ` +
+        `the connection pool limits attainable concurrency. Keep the small pool to retain your connection-limit guard, ` +
+        `or deliberately raise GBRAIN_POOL_SIZE for this run if your connection budget allows it. This is a ceiling, not measured parallelism.\n`,
+      );
+    } catch { /* diagnostic output must never stop embedding */ }
+  }
+  return { concurrency, effectiveCap, poolCapacity };
+}
+
+export function embedPacingTelemetry(snapshot: PaceSnapshot, admission: PacedEmbedAdmission) {
+  return {
+    maxConcurrency: snapshot.maxConcurrency,
+    effectiveCap: admission.effectiveCap,
+    poolCapacity: admission.poolCapacity,
+    samples: snapshot.sampleCount,
+    ewmaMs: snapshot.ewmaMs,
+    totalSleptMs: snapshot.totalSleptMs,
+    sleeps: snapshot.sleepCount,
+    maxWaiters: snapshot.maxWaiters,
+  };
 }
 
 /**

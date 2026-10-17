@@ -46,7 +46,7 @@ import {
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
 import { AITransientError } from '../core/ai/errors.ts';
-import { resolveEmbedConcurrency } from '../core/embed-concurrency.ts';
+import { resolveEmbedConcurrency, resolvePacedEmbedAdmission, embedPacingTelemetry, type PacedEmbedAdmission } from '../core/embed-concurrency.ts';
 export { resolveEmbedConcurrency, _resetEmbedConcurrencyClampWarningForTest } from '../core/embed-concurrency.ts';
 import { isEmbeddingZeroNormError } from '../core/ai/embedding-guard.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
@@ -339,6 +339,10 @@ export interface EmbedResult {
    */
   pacing?: {
     maxConcurrency: number;
+    /** Concurrency upper bound, not measured utilization or a guarantee that all slots can be used. */
+    effectiveCap: number;
+    /** Actual engine pool capacity, or null when unavailable / poolless. */
+    poolCapacity: number | null;
     /** In-band latency samples folded into the EWMA. */
     samples: number;
     /** Final EWMA of observed DB-op latency (ms), or null if no samples. */
@@ -633,7 +637,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     // incident escape hatch). dryRun skips it — no writes to pace. A
     // disabled bundle yields a no-op pacer (zero overhead on the hot path).
     let pacer: DbPacer = createNoopPacer();
-    let paceMaxConcurrency: number | undefined;
+    let pacedAdmission: PacedEmbedAdmission | undefined;
     if (!opts.dryRun) {
       try {
         const cfg = await loadPaceModeConfig(engine);
@@ -656,7 +660,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         });
         if (knobs.enabled) {
           pacer = createDbPacer({ bundle: knobs });
-          paceMaxConcurrency = knobs.maxConcurrency;
+          pacedAdmission = resolvePacedEmbedAdmission(engine, knobs);
         }
       } catch {
         // Fail-open: pacing must never break a backfill.
@@ -679,16 +683,9 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         // E1: surface pacing telemetry (human + structured) when pacing was on.
         const snap = pacer.snapshot();
         if (snap.enabled) {
-          result.pacing = {
-            maxConcurrency: snap.maxConcurrency,
-            samples: snap.sampleCount,
-            ewmaMs: snap.ewmaMs,
-            totalSleptMs: snap.totalSleptMs,
-            sleeps: snap.sleepCount,
-            maxWaiters: snap.maxWaiters,
-          };
+          result.pacing = embedPacingTelemetry(snap, pacedAdmission!);
           serr(
-            `  [embed] pacing: cap=${snap.maxConcurrency} samples=${snap.sampleCount} ` +
+            `  [embed] pacing: cap=${snap.maxConcurrency} effectiveCap=${pacedAdmission!.effectiveCap} poolCapacity=${pacedAdmission!.poolCapacity ?? 'unknown'} samples=${snap.sampleCount} ` +
               `ewma=${snap.ewmaMs === null ? 'n/a' : Math.round(snap.ewmaMs) + 'ms'} ` +
               `slept=${snap.totalSleptMs}ms/${snap.sleepCount}`,
           );
@@ -732,7 +729,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
           priority: opts.priority,
           catchUp: opts.catchUp,
           pacer,
-          paceMaxConcurrency,
+          concurrency: pacedAdmission?.concurrency,
           quiet: opts.quiet,
           includeNullSignature: opts.includeNullSignature,
           assertOwned: opts.assertOwned,
@@ -1243,8 +1240,8 @@ async function embedAll(
     catchUp?: boolean;
     /** DB-contention pacer (paced-backfill); no-op when pacing is off. */
     pacer?: DbPacer;
-    /** Resolved concurrency cap (E-1: the worker count, no separate permit). */
-    paceMaxConcurrency?: number;
+    /** Admitted worker count (single pool, no separate permit). */
+    concurrency?: number;
     /** #394: suppress human stdout summaries (structured-output callers). */
     quiet?: boolean;
     /** #3391: lift the NULL-signature grandfather clause (see EmbedOpts). */
@@ -1309,7 +1306,7 @@ async function embedAll(
   // Paced runs lower this to the resolved cap (the real lever vs pooler-slot
   // starvation); unpaced keeps the env/default 20. Codex P2: only ever LOWER —
   // never raise above an operator's existing env cap.
-  const CONCURRENCY = resolveEmbedConcurrency(engine.kind, staleOpts?.paceMaxConcurrency);
+  const CONCURRENCY = staleOpts?.concurrency ?? resolveEmbedConcurrency(engine.kind);
 
   async function embedOnePage(page: typeof pages[number]) {
     // #1737: bail before doing any work for this page if the run was aborted.
@@ -1613,8 +1610,8 @@ async function embedAllStale(
     catchUp?: boolean;
     /** DB-contention pacer (paced-backfill); no-op when pacing is off. */
     pacer?: DbPacer;
-    /** Resolved concurrency cap (E-1: the worker count, no separate permit). */
-    paceMaxConcurrency?: number;
+    /** Admitted worker count (single pool, no separate permit). */
+    concurrency?: number;
     /** #394: suppress human stdout summaries (structured-output callers). */
     quiet?: boolean;
     /** #3391: lift the NULL-signature grandfather clause (see EmbedOpts). */
@@ -1855,7 +1852,7 @@ async function embedAllStale(
   // Paced runs lower concurrency to the resolved cap (E-1: worker count IS the
   // lever on this single pool, no separate permit). Codex P2: pacing only ever
   // LOWERS concurrency — never raise above an operator's existing env cap.
-  const CONCURRENCY = resolveEmbedConcurrency(engine.kind, staleOpts?.paceMaxConcurrency);
+  const CONCURRENCY = staleOpts?.concurrency ?? resolveEmbedConcurrency(engine.kind);
   const pacer = staleOpts?.pacer ?? createNoopPacer();
 
   // D3 + D3a + D8: wall-clock budget. 30 min default; env override.

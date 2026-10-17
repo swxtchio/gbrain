@@ -42,10 +42,7 @@ transaction-mode pooler and starve the minion supervisor's lock renewals
 external SIGSTOP/SIGCONT wrapper script is needed. **Opt-in: default mode `off`.**
 
 The composable primitive is `src/core/db-pacer.ts` (`createDbPacer`):
-- **Concurrency cap is the real lever** (caps simultaneous in-flight DB writes =
-  pooler slots held). Embed paths set their worker count to `maxConcurrency`
-  (single pool, no permit); `sync` uses the shared `acquire()` **permit** because
-  each parallel worker owns a separate engine (one budget must span pools).
+- **Concurrency cap is the real lever.** Single-pool embedding admission is owned by `resolvePacedEmbedAdmission` in `src/core/embed-concurrency.ts`; the bulk loops use its worker decision. The separate `embed-backfill` handler retains its explicit paced worker count. Sync's `createImportPacer` and `importOnePath` in `src/commands/sync/imports.ts` own the shared `acquire()` permit across worker engines; one worker pool is not the whole sync's capacity.
 - **In-band signal** (`observe(ms)` EWMA from the work's own queries). There is
   no out-of-band probe pool, probe loop, or `probeLatency` engine method.
 - **Cooperative `pace()` sleep** on `setTimeout` (keeps the lock heartbeat
@@ -57,6 +54,8 @@ Named bundles resolve through `src/core/pace-mode.ts` (`resolvePaceMode`), mirro
 of the search-mode pattern but with **env ABOVE config** (incident escape hatch):
 
     per-call flag → GBRAIN_PACE_* env → config (pace.*) → PACE_BUNDLES[mode] → off
+
+For current bundle values and override validation, read `PACE_BUNDLES` and `resolvePaceMode` in `src/core/pace-mode.ts`.
 
 | Knob | off | gentle | balanced | aggressive |
 |---|---|---|---|---|
@@ -70,7 +69,7 @@ the resolved bundle) into the `embed` job payload; the handler re-resolves
 env>config>bundle at execution so `GBRAIN_PACE_*` still wins. Config-level
 `pace.mode` paces EVERY `runEmbedCore` caller (cycle embed, embed-catch-up,
 sync-auto-embed) and the prod `embed-backfill` job automatically. `sync` reads
-env/config. PGLite / mode `off` → no-op pacer.
+env/config. Mode `off` uses a no-op pacer. PGLite retains the embedding path's paced worker policy when pacing is enabled, but has no Postgres pool to diagnose.
 
 **Correctness guards for paced runs** (longer paced runs widen these races): CLI
 `embed --stale` single-flights via the SAME per-source lock key as the
@@ -81,5 +80,8 @@ the NULL→non-NULL upsert; a **bounded** end-of-run keyset re-entry
 cursor; and the embed wall-clock budget timer is re-armed around
 `pace()` sleeps so paced time doesn't burn the work budget.
 
-`EmbedResult.pacing` carries the end-of-run telemetry (cap, samples, EWMA, slept
-ms, max waiters) for `--json`; a one-line summary prints to stderr.
+**Pool-constrained runs.** Keep a deliberately small `GBRAIN_POOL_SIZE` when it protects a shared connection budget. A paced embedding admission warns on stderr when the executing Postgres engine reports a pool that reduces the applicable concurrency ceiling. The warning identifies the resolved mode, requested pace ceiling, actual pool capacity and attainable ceiling. Increasing the pool remains an operator choice; no diagnosis increases it. Missing or failing pool diagnostics remain fail-open and do not establish actual capacity. See `PostgresEngine.getPoolDiagnostics` in `src/core/postgres-engine.ts` and the admission resolver for the capacity source and worker fallback.
+
+`EmbedResult.pacing` in `src/commands/embed.ts` keeps `maxConcurrency` as the pacer's requested ceiling and adds `effectiveCap` for the page drain's worker/pool ceiling, with `poolCapacity` null when actual capacity is unavailable or the engine is poolless. These are ceilings, not measured utilization or throughput. Existing latency, sleep and sample fields retain their meanings. `runEmbedCore` produces this telemetry in cleanup for both bulk loops, and `src/cli/commands/embed.ts` serializes its result under `--json`; a summary also prints to stderr.
+
+**Say to your agent:** *"Check whether my database pool limits this paced embedding run, and keep my small pool unless I choose to increase it."*
