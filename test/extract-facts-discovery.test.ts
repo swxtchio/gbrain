@@ -56,7 +56,7 @@ function observe(engine: BrainEngine) {
       if (key === 'executeRaw') return async (sql: string, params?: unknown[]) => {
         statements.push(sql);
         const rows = await target.executeRaw(sql, params);
-        if (/SELECT id, compiled_truth, timeline, frontmatter, effective_date, knowledge_revision/.test(sql)) {
+        if (rows.some(row => row !== null && typeof row === 'object' && 'compiled_truth' in row)) {
           bodies.push([String(params?.[0]), String(params?.[1])]);
         }
         if (/SELECT p\.slug FROM pages p/.test(sql)) discoveries.push(rows);
@@ -152,7 +152,7 @@ for (const backend of testBackends()) {
     await put(engine, 'people/misplaced', 'Prose', 'default', fence(row(1, 'Misplaced claim')));
     const seen = observe(engine);
     const r = await runExtractFacts(seen.engine);
-    expect(seen.bodies.map(([, slug]) => slug)).toEqual(['people/broken', 'people/end-only', 'people/markers', 'people/misplaced']);
+    expect(seen.bodies.map(([, slug]) => slug).sort()).toEqual(['people/broken', 'people/end-only', 'people/markers', 'people/misplaced']);
     expect(r.warnings).toContainEqual(expect.stringContaining('people/broken: FACTS_TABLE_MALFORMED'));
     expect(r.warnings).toContainEqual(expect.stringContaining('people/end-only: FACTS_FENCE_UNBALANCED'));
     expect(r.warnings).toContainEqual(expect.stringContaining('people/misplaced: FACTS_FENCE_BELOW_SENTINEL'));

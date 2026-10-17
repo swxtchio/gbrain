@@ -589,8 +589,8 @@ export interface CycleOpts {
    * `dream.<phase>.enabled` / `cycle.<phase>.enabled` config gate. Wired
    * from `gbrain dream --phase <name> --once`.
    *
-    * A named phase keeps the bypass from leaking into other selected phases.
-    * Pack-gated lens phases have their own escape hatch instead.
+   * A named phase keeps the bypass from leaking into other selected phases.
+   * Pack-gated lens phases have their own escape hatch instead.
    */
   onceForPhase?: CyclePhase;
   /**
