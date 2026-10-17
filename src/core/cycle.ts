@@ -60,6 +60,7 @@ import { acquireLeaseSet, maintenanceLockBusySkip, MAINTENANCE_LEASE_ID } from '
 import { assertEmbedNotStalled } from './embed-stall.ts'; import { embedBackfillFix } from './embed-consent.ts';
 import { anyAbortSignal } from './abort-signals.ts';
 import { maybeRefreshPlannerStats } from './planner-stats.ts';
+import { cycleExtractFactsEnabled } from './cycle/extract-facts-setting.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 export { anyAbortSignal } from './abort-signals.ts';
@@ -1462,7 +1463,7 @@ async function runPhaseExtractFacts(
   once = false,
 ): Promise<PhaseResult> {
   try {
-    if (!once && /^\s*(false|0|off|no)\s*$/i.test(await engine.getConfig('cycle.extract_facts.enabled') ?? '')) {
+    if (!once && !await cycleExtractFactsEnabled(engine)) {
       return {
         phase: 'extract_facts', status: 'skipped', duration_ms: 0,
         summary: 'extract_facts skipped: cycle.extract_facts.enabled=false',

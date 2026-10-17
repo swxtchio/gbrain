@@ -7,6 +7,7 @@
  * No production seam: persisted pages and real engines, with a delegating read observer.
  */
 import { expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,6 +18,10 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { readFactsReconcileBacklog } from '../src/core/facts/reconcile-watermark.ts';
+import { readFactsReconcilePage } from '../src/core/facts/reconcile-pages.ts';
+import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
+import { submitPurgeFactMutation } from '../src/core/facts/purge.ts';
+import { registerLocalWriter } from '../src/core/persistence/identity.ts';
 import { serializePageToMarkdown } from '../src/core/markdown.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -175,6 +180,74 @@ for (const backend of testBackends()) {
     expect(await readFactsReconcileBacklog(engine)).toEqual({ pending: 0, invalid: [] });
   }), 60_000);
 
+  // The withdrawal producer changes the revision/ledger before its physical fence mirror.
+  // A raw planning read churns the expired fact; a raw transactional reread defers the correct plan.
+  test(`${backend}: withdrawn physical fence rows converge through canonical planning and transactional reads`, () => fixture(databaseUrl, async engine => {
+    const slug = 'people/withdrawn';
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('other', 'Other')");
+    const staleFence = fence(`${row(1, 'Withdrawn claim')}\n${row(2, 'Kept claim')}`);
+    await put(engine, slug, staleFence);
+    await put(engine, slug, staleFence, 'other');
+    await runExtractFacts(engine);
+    await runExtractFacts(engine, { sourceId: 'other' });
+    const prior = await state(engine);
+    const withdrawn = prior.find(f => f.source_id === 'default' && f.fact === 'Withdrawn claim')!;
+    const committed = await recordFactWithdrawal(engine, Number(withdrawn.id), 'default', false, { semanticReview: false });
+    expect(committed.withdrawn).toBe(true);
+    expect(committed.pages.map(p => p.slug)).toEqual([slug]);
+    const [physical] = await engine.executeRaw<{ compiled_truth: string; knowledge_revision: string }>(
+      'SELECT compiled_truth, knowledge_revision FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
+    expect(parseFactsFence(physical!.compiled_truth).facts.find(f => f.claim === 'Withdrawn claim')?.active).toBe(true);
+    expect(physical!.knowledge_revision).toBe(committed.pages[0]!.revision);
+
+    const first = await runExtractFacts(engine);
+    expect(first).toMatchObject({ factsInserted: 0, factsDeleted: 0, factsUpdated: 1, pagesFailed: 0 });
+    const settled = await state(engine);
+    const second = await runExtractFacts(engine);
+    expect(second).toMatchObject({ factsInserted: 0, factsDeleted: 0, factsUpdated: 0, pagesFailed: 0 });
+    expect(await state(engine)).toEqual(settled);
+    expect(settled.find(f => f.id === withdrawn.id)).toEqual({ ...withdrawn, expired: true });
+    expect(settled.filter(f => f.source_id === 'other')).toEqual(prior.filter(f => f.source_id === 'other'));
+    expect(await readFactsReconcileBacklog(engine)).toEqual({ pending: 0, invalid: [] });
+    const canonical = (await engine.getPage(slug, { sourceId: 'default' }))!;
+    const planning = (await readFactsReconcilePage(engine, 'default', slug))!;
+    const transactional = (await engine.transaction(tx => readFactsReconcilePage(tx, 'default', slug)))!;
+    expect(planning.compiled_truth).toBe(canonical.compiled_truth);
+    expect(transactional.compiled_truth).toBe(canonical.compiled_truth);
+    expect(parseFactsFence(planning.compiled_truth ?? '').facts.find(f => f.claim === 'Withdrawn claim')?.active).toBe(false);
+  }), 60_000);
+
+  for (const allSubjects of [false, true]) {
+    test(`${backend}: ${allSubjects ? 'source-wide' : 'page-scoped'} purge overlays keep stale fence rewrites out of reconciliation`, () => fixture(databaseUrl, async engine => {
+      const slug = 'people/purged';
+      const staleFence = fence(`${row(1, 'Purged claim')}\n${row(2, 'Kept claim')}`);
+      await put(engine, slug, staleFence);
+      await runExtractFacts(engine);
+      const id = (await state(engine)).find(f => f.fact === 'Purged claim')!.id;
+      await registerLocalWriter(engine, 'cli');
+      const ctx = { engine, sourceId: 'default', remote: false, dryRun: false,
+        config: { engine: engine.kind, embedding_disabled: true }, logger: { info() {}, warn() {}, error() {} } } as const;
+      const preview = await submitPurgeFactMutation(ctx, { id: Number(id), all_subjects: allSubjects, dry_run: true });
+      const purged = await submitPurgeFactMutation(ctx, { id: Number(id), all_subjects: allSubjects,
+        confirm: preview.confirm_token, expected_revision: preview.expected_revision, request_id: randomUUID() });
+      expect(purged.state).toBe('committed');
+      // The low-level page writer reproduces a stale cache arriving after the committed purge.
+      await put(engine, slug, staleFence);
+      const [physical] = await engine.executeRaw<{ compiled_truth: string }>(
+        'SELECT compiled_truth FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
+      expect(parseFactsFence(physical!.compiled_truth).facts.map(f => f.claim)).toContain('Purged claim');
+      const r = await runExtractFacts(engine);
+      expect(r).toMatchObject({ factsInserted: 0, factsUpdated: 0, factsDeleted: 0, pagesFailed: 0 });
+      expect((await state(engine)).map(f => f.fact)).toEqual(['Kept claim']);
+      const canonical = (await engine.getPage(slug, { sourceId: 'default' }))!;
+      const planning = (await readFactsReconcilePage(engine, 'default', slug))!;
+      const transactional = (await engine.transaction(tx => readFactsReconcilePage(tx, 'default', slug)))!;
+      expect(planning.compiled_truth).toBe(canonical.compiled_truth);
+      expect(transactional.compiled_truth).toBe(canonical.compiled_truth);
+      expect(parseFactsFence(planning.compiled_truth ?? '').facts.map(f => f.claim)).toEqual(['Kept claim']);
+    }), 60_000);
+  }
+
   test(`${backend}: selected-page reads retain quarantine and effective-date safety inputs`, () => fixture(databaseUrl, async engine => {
     const dated = fence(row(1, 'Dated claim').replace('2024-01-01', ''));
     await importFromContent(engine, 'people/dated', `---\ntitle: Dated\ntype: person\ndate: 2023-06-15\n---\n\n${dated}`, { noEmbed: true });
@@ -288,5 +361,18 @@ for (const backend of testBackends()) {
     expect(phase.summary).toContain('phantom(s) scanned');
     expect(seen.bodies).toEqual([]);
     expect(seen.lookups).toContainEqual(['default', 'ordinary']);
+  }), 60_000);
+
+  test(`${backend}: a cycle gate config-read failure retains default-enabled reconciliation`, () => fixture(databaseUrl, async engine => {
+    await put(engine, 'people/default-enabled', fence(row(1, 'Default-enabled claim')));
+    const flaky = new Proxy(engine, { get(target, key) {
+      if (key === 'getConfig') return (name: string) => name === 'cycle.extract_facts.enabled'
+        ? Promise.reject(new Error('config read unavailable')) : target.getConfig(name);
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const report = await runCycle(flaky, { brainDir: null, sourceId: 'default', phases: ['extract_facts'] });
+    expect(report.phases.find(p => p.phase === 'extract_facts')?.details).toMatchObject({ factsInserted: 1, pagesFailed: 0 });
+    expect((await state(engine)).map(f => f.fact)).toEqual(['Default-enabled claim']);
   }), 60_000);
 }
