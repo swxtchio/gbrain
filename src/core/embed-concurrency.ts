@@ -41,7 +41,7 @@ export function resolveEmbedConcurrency(
 
 export interface PacedEmbedAdmission {
   concurrency: number;
-  /** Capacity ceiling, not observed utilization; unknown pool capacity is omitted from the bound. */
+  /** Admission ceiling, including the configured-worker fallback when pool diagnostics are unavailable; not measured utilization. */
   effectiveCap: number;
   poolCapacity: number | null;
 }

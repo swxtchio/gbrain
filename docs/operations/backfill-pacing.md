@@ -57,6 +57,12 @@ of the search-mode pattern but with **env ABOVE config** (incident escape hatch)
 
 For current bundle values and override validation, read `PACE_BUNDLES` and `resolvePaceMode` in `src/core/pace-mode.ts`.
 
+| Knob | off | gentle | balanced | aggressive |
+|---|---|---|---|---|
+| `maxConcurrency` | (off) | 4 | 8 | 16 |
+| `paceAtMs` (EWMA → sleep) | — | 250 | 500 | 1000 |
+| `maxSleepMs` (jittered cap) | — | 2000 | 1500 | 1000 |
+
 **Surfaces.** `gbrain embed --stale --pace[=mode]` (bare `--pace` = balanced),
 `--pace-max-concurrency=N`. `--background` carries explicit pace OVERRIDES (not
 the resolved bundle) into the `embed` job payload; the handler re-resolves

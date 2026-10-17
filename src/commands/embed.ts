@@ -339,7 +339,7 @@ export interface EmbedResult {
    */
   pacing?: {
     maxConcurrency: number;
-    /** Attainable ceiling under this run's worker policy and known pool capacity, not measured utilization. */
+    /** Concurrency upper bound, not measured utilization or a guarantee that all slots can be used. */
     effectiveCap: number;
     /** Actual engine pool capacity, or null when unavailable / poolless. */
     poolCapacity: number | null;
