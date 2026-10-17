@@ -1254,25 +1254,33 @@ export class MinionQueue {
       return parseInt(rows[0]?.count ?? '0', 10);
     }
 
-    // A completed dream synthesis child is the record that its transcript was
-    // synthesized. Archive the key before the row goes, or the next cycle
-    // pays to synthesize the transcript again.
-    const rows = await this.engine.executeRaw<{ count: string }>(
-      `WITH pruned AS (
-         DELETE FROM minion_jobs
-         WHERE ${eligible}
-         RETURNING name, status, data, idempotency_key, finished_at
-       ), archived AS (
-         INSERT INTO dream_synthesis_completions (source_id, idempotency_key, completed_at)
-         SELECT COALESCE(NULLIF(data->>'source_id', ''), 'default'), idempotency_key, COALESCE(finished_at, now())
-           FROM pruned
-          WHERE name = 'subagent' AND status = 'completed' AND idempotency_key LIKE 'dream:synth%'
-         ON CONFLICT DO NOTHING
-       )
-       SELECT count(*)::text as count FROM pruned`,
-      [statuses, olderThan.toISOString()]
-    );
-    return parseInt(rows[0]?.count ?? '0', 10);
+    return this.engine.transaction(async tx => {
+      // Wait for accepted dependents to publish, then recheck in a fresh
+      // statement snapshot. A DELETE's pre-lock snapshot can miss their FK.
+      const candidates = await tx.executeRaw<{ id: number }>(
+        `SELECT id FROM minion_jobs WHERE ${eligible} ORDER BY id FOR UPDATE`,
+        [statuses, olderThan.toISOString()]
+      );
+      if (candidates.length === 0) return 0;
+      // Archive synthesis identity with deletion so history retention never
+      // makes an already-synthesized transcript eligible for paid work again.
+      const rows = await tx.executeRaw<{ count: string }>(
+        `WITH pruned AS (
+           DELETE FROM minion_jobs
+           WHERE id = ANY($3::int[]) AND ${eligible}
+           RETURNING name, status, data, idempotency_key, finished_at
+         ), archived AS (
+           INSERT INTO dream_synthesis_completions (source_id, idempotency_key, completed_at)
+           SELECT COALESCE(NULLIF(data->>'source_id', ''), 'default'), idempotency_key, COALESCE(finished_at, now())
+             FROM pruned
+            WHERE name = 'subagent' AND status = 'completed' AND idempotency_key LIKE 'dream:synth%'
+           ON CONFLICT DO NOTHING
+         )
+         SELECT count(*)::text as count FROM pruned`,
+        [statuses, olderThan.toISOString(), candidates.map(row => row.id)]
+      );
+      return parseInt(rows[0]?.count ?? '0', 10);
+    });
   }
 
   /** Get job statistics. */

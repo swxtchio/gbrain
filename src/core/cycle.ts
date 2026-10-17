@@ -1730,7 +1730,6 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
       };
     }
     const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts')]);
-    const purgedJobs = await (await import('./cycle/job-retention.ts')).pruneCompletedJobsForCycle(engine);
     // gbrain#4115: {purged, blocked} — a RESTRICT-FK-held source (revoked
     // oauth_client, v64) is reported and skipped instead of aborting the sweep.
     const purgeResult = await purgeExpiredSources(engine);
@@ -1783,9 +1782,12 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     try { purgedDecisionReceipts = await (await import('./ai/decide/store.ts')).pruneReceiptsForCycle(engine); } catch { /* pre-v179 brain */ }
     let purgedFeedback = { events: 0, weights: 0 };
     try { purgedFeedback = await (await import('./feedback/store.ts')).pruneRetrievalFeedback(engine, (await (await import('./feedback/settings.ts')).loadFeedbackSettings(engine)).eventRetentionDays); } catch { /* pre-v207 brain */ }
+    let purgedJobs: { count: number; retentionDays: number } | undefined;
+    let jobsPurgeError: PhaseError | undefined;
+    try { purgedJobs = await (await import('./cycle/job-retention.ts')).pruneCompletedJobsForCycle(engine); } catch (e) { jobsPurgeError = makeErrorFromException(e); }
     return {
       phase: 'purge',
-      status: purgedPages.error ? 'fail' : 'ok', error: purgedPages.error,
+      status: purgedPages.error || jobsPurgeError ? 'fail' : 'ok', error: purgedPages.error ?? jobsPurgeError,
       duration_ms: 0,
       summary:
         `purged ${purgedSources.length} source(s)` +
@@ -1794,10 +1796,11 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
         `${purgedBatchRetryAuditFiles} stale batch-retry audit file(s), ` +
-        `and ${purgedVolunteerEvents} stale volunteer event(s), ${purgedJobs.count} completed job(s)`,
+        `and ${purgedVolunteerEvents} stale volunteer event(s), ` +
+        (jobsPurgeError ? 'completed-job cleanup failed' : `${purgedJobs!.count} completed job(s)`),
       details: {
         purged_sources_count: purgedSources.length,
-        purged_jobs_count: purgedJobs.count, completed_job_retention_days: purgedJobs.retentionDays,
+        purged_jobs_count: purgedJobs?.count ?? null, completed_job_retention_days: purgedJobs?.retentionDays, ...(jobsPurgeError ? { purged_jobs_error: jobsPurgeError } : {}),
         purged_sources_blocked: purgeResult.blocked,
         purged_pages_count: purgedPages.count, purged_pages_blocked: purgedPages.blocked, purged_pages_deferred: purgedPages.deferred,
         purged_orphan_clones_count: purgedClones.count,

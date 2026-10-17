@@ -5,7 +5,7 @@
  * Uses real queue producers and engines; no new production testing seam.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -15,6 +15,9 @@ import { subagentAggregatorHandler } from '../src/core/minions/handlers/subagent
 import { runCycle } from '../src/core/cycle.ts';
 import { discoverTranscripts } from '../src/core/cycle/transcript-discovery.ts';
 import { partitionCompletedSynthesis } from '../src/core/cycle/synthesize-completion.ts';
+import { addSource } from '../src/core/sources-ops.ts';
+import { softDeleteSource } from '../src/core/destructive-guard.ts';
+import { recordCompleted } from '../src/core/op-checkpoint.ts';
 import { resetPgliteStateNarrow } from './helpers/reset-pglite.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -55,7 +58,7 @@ for (const backend of testBackends()) {
     });
 
     beforeEach(async () => {
-      await resetPgliteStateNarrow(engine, ['minion_jobs', 'dream_synthesis_completions', 'gbrain_cycle_locks']);
+      await resetPgliteStateNarrow(engine, ['minion_jobs', 'dream_synthesis_completions', 'gbrain_cycle_locks', 'sources', 'pages', 'op_checkpoints']);
       await engine.executeRaw('DELETE FROM config WHERE key = $1', [retentionKey]);
     });
 
@@ -71,7 +74,7 @@ for (const backend of testBackends()) {
     };
     const age = (id: number, days: number, timestamp: 'finished_at' | 'created_at' | 'updated_at' = 'finished_at') =>
       engine.executeRaw(`UPDATE minion_jobs SET ${timestamp} = now() - ($2 * interval '1 day')
-        ${timestamp === 'finished_at' ? ", created_at = LEAST(created_at, now() - ($2 * interval '1 day')), started_at = LEAST(started_at, now() - ($2 * interval '1 day'))" : ''}
+        ${timestamp === 'finished_at' ? ", updated_at = now() - ($2 * interval '1 day'), created_at = LEAST(created_at, now() - ($2 * interval '1 day')), started_at = LEAST(started_at, now() - ($2 * interval '1 day'))" : ''}
         WHERE id = $1`, [id, days]);
     const purge = async (dryRun = false) => {
       const report = await withEnv({ GBRAIN_HOME: home }, () => runCycle(engine, { brainDir: null, phases: ['purge'], dryRun }));
@@ -85,6 +88,7 @@ for (const backend of testBackends()) {
       const recent = await complete();
       const slow = await complete();
       await age(expired.job.id, 15);
+      await engine.executeRaw('UPDATE minion_jobs SET updated_at = now() WHERE id = $1', [expired.job.id]);
       await age(recent.job.id, 13);
       await age(slow.job.id, 40, 'created_at');
 
@@ -211,24 +215,63 @@ for (const backend of testBackends()) {
       expect((await queue.getJob(owned.id))?.status).toBe('completed');
     }, 60_000);
 
-    test('cleanup SQL failure is a failed phase and leaves completed history intact', async () => {
+    const seedUnrelatedPurgeWork = async () => {
+      await engine.putPage('notes/retention-tombstone', { type: 'note', title: 'Expired note', compiled_truth: 'Expired page fixture', timeline: '', frontmatter: {} }, { sourceId: 'default' });
+      expect(await engine.softDeletePage('notes/retention-tombstone', { sourceId: 'default' })).not.toBeNull();
+      await engine.executeRaw("UPDATE pages SET deleted_at = now() - interval '73 hours' WHERE slug = 'notes/retention-tombstone'");
+      await addSource(engine, { id: 'retention-expired-source' });
+      expect(await softDeleteSource(engine, 'retention-expired-source')).not.toBeNull();
+      await engine.executeRaw("UPDATE sources SET archived_at = now() - interval '74 hours', archive_expires_at = now() - interval '1 hour' WHERE id = 'retention-expired-source'");
+      expect(await recordCompleted(engine, { op: 'embed', fingerprint: 'retention-expired-checkpoint' }, ['finished-example'])).toBe(true);
+      await engine.executeRaw("UPDATE op_checkpoints SET updated_at = now() - interval '8 days' WHERE fingerprint = 'retention-expired-checkpoint'");
+      const clone = join(home, '.gbrain', 'clones', '.tmp', 'retention-orphan');
+      mkdirSync(clone, { recursive: true });
+      const old = new Date(Date.now() - 73 * 3_600_000);
+      utimesSync(clone, old, old);
+      return clone;
+    };
+    const expectUnrelatedPurges = async (result: Awaited<ReturnType<typeof purge>>, clone: string) => {
+      expect(await engine.executeRaw("SELECT id FROM pages WHERE slug = 'notes/retention-tombstone'")).toEqual([]);
+      expect(await engine.executeRaw("SELECT id FROM sources WHERE id = 'retention-expired-source'")).toEqual([]);
+      expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE fingerprint = 'retention-expired-checkpoint'")).toEqual([]);
+      expect(existsSync(clone)).toBe(false);
+      expect(result.details.purged_sources_count).toBe(1);
+      expect(result.details.purged_pages_count).toBe(1);
+      expect(result.details.purged_orphan_clones_count).toBe(1);
+      expect(result.details.purged_checkpoints_count).toBe(1);
+      expect(result.summary).toContain('completed-job cleanup failed');
+      expect(result.details.purged_jobs_count).toBeNull();
+      expect(result.details.purged_jobs_error).toEqual(result.error);
+    };
+
+    for (const value of ['0', '7d']) {
+      test(`invalid retention ${value} fails visibly while unrelated purge sweeps continue and report`, async () => {
+        const clone = await withEnv({ GBRAIN_HOME: home }, seedUnrelatedPurgeWork);
+        const done = await complete();
+        await age(done.job.id, 15);
+        await engine.setConfig(retentionKey, value);
+        const result = await purge();
+        await expectUnrelatedPurges(result, clone);
+        expect(result.status).toBe('fail');
+        expect(result.error?.message).toContain(retentionKey);
+        expect(await queue.getJob(done.job.id)).not.toBeNull();
+      }, 60_000);
+    }
+
+    test('cleanup SQL failure preserves unrelated purge results and leaves completed history intact', async () => {
+      const clone = await withEnv({ GBRAIN_HOME: home }, seedUnrelatedPurgeWork);
       const done = await complete();
       await age(done.job.id, 15);
-      const execute = engine.executeRaw;
-      const boundExecute = execute.bind(engine);
-      engine.executeRaw = async <T>(...args: Parameters<BrainEngine['executeRaw']>): Promise<T[]> => {
-        const [sql] = args;
-        if (sql.includes('DELETE FROM minion_jobs') && sql.includes('WITH pruned')) throw new Error('retention cleanup unavailable');
-        return boundExecute<T>(...args);
-      };
+      await engine.executeRaw("CREATE FUNCTION retention_delete_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'retention cleanup unavailable'; END $$");
+      await engine.executeRaw('CREATE TRIGGER retention_delete_failure BEFORE DELETE ON minion_jobs FOR EACH ROW EXECUTE FUNCTION retention_delete_failure()');
       try {
         const result = await purge();
+        await expectUnrelatedPurges(result, clone);
         expect(result.status).toBe('fail');
         expect(result.error?.message).toContain('retention cleanup unavailable');
-        expect(result.details.purged_jobs_count).toBeUndefined();
         expect(await queue.getJob(done.job.id)).not.toBeNull();
       } finally {
-        engine.executeRaw = execute;
+        await engine.executeRaw('DROP FUNCTION retention_delete_failure() CASCADE');
       }
     }, 60_000);
   });
