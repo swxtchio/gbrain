@@ -1,5 +1,6 @@
 import { resolvePoolSize } from './db.ts';
 import type { ResolvedPaceKnobs } from './pace-mode.ts';
+import type { PaceSnapshot } from './db-pacer.ts';
 
 let warnedEmbedConcurrencyClamp = false;
 
@@ -73,6 +74,19 @@ export function resolvePacedEmbedAdmission(
     } catch { /* diagnostic output must never stop embedding */ }
   }
   return { concurrency, effectiveCap, poolCapacity };
+}
+
+export function embedPacingTelemetry(snapshot: PaceSnapshot, admission: PacedEmbedAdmission) {
+  return {
+    maxConcurrency: snapshot.maxConcurrency,
+    effectiveCap: admission.effectiveCap,
+    poolCapacity: admission.poolCapacity,
+    samples: snapshot.sampleCount,
+    ewmaMs: snapshot.ewmaMs,
+    totalSleptMs: snapshot.totalSleptMs,
+    sleeps: snapshot.sleepCount,
+    maxWaiters: snapshot.maxWaiters,
+  };
 }
 
 /**

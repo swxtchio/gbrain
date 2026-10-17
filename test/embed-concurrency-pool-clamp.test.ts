@@ -73,16 +73,21 @@ describe('#9 single-pool paced admission diagnostics', () => {
     });
   });
 
-  test('reports known nonbinding capacity and an independent lower worker ceiling without blaming the pool', () => {
-    const err = spyOn(process.stderr, 'write').mockImplementation(() => true);
-    try {
-      expect(resolvePacedEmbedAdmission({ kind: 'postgres', getPoolDiagnostics: () => ({ poolMax: 17 }) }, pace, { env: {} }))
-        .toEqual({ concurrency: 8, effectiveCap: 8, poolCapacity: 17 });
-      expect(resolvePacedEmbedAdmission({ kind: 'postgres', getPoolDiagnostics: () => ({ poolMax: 2 }) }, pace,
-        { env: { GBRAIN_EMBED_CONCURRENCY: '1' } })).toEqual({ concurrency: 1, effectiveCap: 1, poolCapacity: 2 });
-      expect(err.mock.calls.filter(c => String(c[0]).includes('[pace]'))).toHaveLength(0);
-    } finally { err.mockRestore(); }
-  });
+  for (const fixture of [
+    { name: 'nonbinding pool', pool: 17, workers: undefined, effective: 8 },
+    { name: 'lower independent worker ceiling', pool: 2, workers: '1', effective: 1 },
+    { name: 'pool equal to the worker ceiling', pool: 2, workers: '2', effective: 2 },
+  ]) {
+    test(`reports ${fixture.name} without blaming the pool`, () => {
+      const err = spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        expect(resolvePacedEmbedAdmission({ kind: 'postgres', getPoolDiagnostics: () => ({ poolMax: fixture.pool }) }, pace,
+          { env: { GBRAIN_EMBED_CONCURRENCY: fixture.workers } }))
+          .toEqual({ concurrency: fixture.effective, effectiveCap: fixture.effective, poolCapacity: fixture.pool });
+        expect(err.mock.calls.filter(c => String(c[0]).includes('[pace]'))).toHaveLength(0);
+      } finally { err.mockRestore(); }
+    });
+  }
 
   test('unavailable, throwing or invalid diagnostics retain the configured worker guard without inventing pool capacity', async () => {
     await withEnv({ GBRAIN_POOL_SIZE: '2' }, () => {

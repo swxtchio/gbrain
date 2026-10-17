@@ -46,7 +46,7 @@ import {
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
 import { AITransientError } from '../core/ai/errors.ts';
-import { resolveEmbedConcurrency, resolvePacedEmbedAdmission, type PacedEmbedAdmission } from '../core/embed-concurrency.ts';
+import { resolveEmbedConcurrency, resolvePacedEmbedAdmission, embedPacingTelemetry, type PacedEmbedAdmission } from '../core/embed-concurrency.ts';
 export { resolveEmbedConcurrency, _resetEmbedConcurrencyClampWarningForTest } from '../core/embed-concurrency.ts';
 import { isEmbeddingZeroNormError } from '../core/ai/embedding-guard.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
@@ -683,16 +683,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         // E1: surface pacing telemetry (human + structured) when pacing was on.
         const snap = pacer.snapshot();
         if (snap.enabled) {
-          result.pacing = {
-            maxConcurrency: snap.maxConcurrency,
-            effectiveCap: pacedAdmission!.effectiveCap,
-            poolCapacity: pacedAdmission!.poolCapacity,
-            samples: snap.sampleCount,
-            ewmaMs: snap.ewmaMs,
-            totalSleptMs: snap.totalSleptMs,
-            sleeps: snap.sleepCount,
-            maxWaiters: snap.maxWaiters,
-          };
+          result.pacing = embedPacingTelemetry(snap, pacedAdmission!);
           serr(
             `  [embed] pacing: cap=${snap.maxConcurrency} effectiveCap=${pacedAdmission!.effectiveCap} poolCapacity=${pacedAdmission!.poolCapacity ?? 'unknown'} samples=${snap.sampleCount} ` +
               `ewma=${snap.ewmaMs === null ? 'n/a' : Math.round(snap.ewmaMs) + 'ms'} ` +
