@@ -15,6 +15,7 @@ import { UnrecoverableError } from '../src/core/minions/types.ts';
 import type { MinionJob } from '../src/core/minions/types.ts';
 import { waitFor, waitForValue } from './helpers/wait-for.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { runJobsPrune } from '../src/commands/jobs/prune.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -806,9 +807,60 @@ describe('MinionQueue: Claim Mechanics', () => {
   });
 });
 
-// --- Prune (1 test) ---
+// --- Prune ---
 
 describe('MinionQueue: Prune', () => {
+  const completedFixture = async () => {
+    const job = await queue.add('prune-example', {});
+    const token = `prune-${job.id}`;
+    expect((await queue.claim(token, 30_000, 'default', ['prune-example']))?.id).toBe(job.id);
+    expect((await queue.completeJob(job.id, token, { output: `prune-result-${job.id}` }))?.status).toBe('completed');
+    return job.id;
+  };
+  const manualPrune = (dryRun = false) => runJobsPrune({ engine, engineOrNull: engine, queue, args: ['--older-than', '30d', ...(dryRun ? ['--dry-run'] : [])] });
+
+  test('manual prune previews and deletes completion-aged history with a legacy updated-time fallback', async () => {
+    const expired = await completedFixture();
+    const legacy = await completedFixture();
+    const recent = await completedFixture();
+    await engine.executeRaw("UPDATE minion_jobs SET created_at = now() - interval '40 days', started_at = now() - interval '40 days', finished_at = now() - interval '40 days' WHERE id = $1", [expired]);
+    await engine.executeRaw("UPDATE minion_jobs SET created_at = now() - interval '40 days', started_at = now() - interval '40 days', finished_at = NULL, updated_at = now() - interval '40 days' WHERE id = $1", [legacy]);
+    await engine.executeRaw("UPDATE minion_jobs SET created_at = now() - interval '40 days' WHERE id = $1", [recent]);
+    const before = await engine.executeRaw('SELECT * FROM minion_jobs ORDER BY id');
+    expect(await queue.prune({ dryRun: true })).toBe(2);
+    await manualPrune(true);
+    expect(await engine.executeRaw('SELECT * FROM minion_jobs ORDER BY id')).toEqual(before);
+    await manualPrune();
+    expect(await queue.getJob(expired)).toBeNull();
+    expect(await queue.getJob(legacy)).toBeNull();
+    expect((await queue.getJob(recent))?.result).toEqual({ output: `prune-result-${recent}` });
+  });
+
+  test('manual prune previews and retains live-dependent owners until their dependents finish', async () => {
+    const parent = await completedFixture();
+    const owner = await completedFixture();
+    await engine.executeRaw("UPDATE minion_jobs SET created_at = now() - interval '40 days', started_at = now() - interval '40 days', finished_at = now() - interval '40 days', updated_at = now() - interval '40 days' WHERE id = ANY($1::int[])", [[parent, owner]]);
+    const child = await queue.add('prune-child', {}, { parent_job_id: parent });
+    const owned = await queue.add('prune-owned', {}, { private_queue_owner_job_id: owner });
+    expect(await queue.prune({ dryRun: true })).toBe(0);
+    await manualPrune(true);
+    await manualPrune();
+    expect(await queue.getJob(parent)).not.toBeNull();
+    expect(await queue.getJob(owner)).not.toBeNull();
+    expect((await queue.getJob(child.id))?.parent_job_id).toBe(parent);
+    expect((await queue.getJob(owned.id))?.private_queue_owner_job_id).toBe(owner);
+    for (const job of [child, owned]) {
+      expect((await queue.claim(`finish-${job.id}`, 30_000, 'default', [job.name]))?.id).toBe(job.id);
+      await queue.completeJob(job.id, `finish-${job.id}`, { done: true });
+    }
+    expect(await queue.prune({ dryRun: true })).toBe(2);
+    await manualPrune();
+    expect(await queue.getJob(parent)).toBeNull();
+    expect(await queue.getJob(owner)).toBeNull();
+    expect((await queue.getJob(child.id))?.status).toBe('completed');
+    expect((await queue.getJob(owned.id))?.status).toBe('completed');
+  });
+
   test('only prunes terminal statuses, respects age filter', async () => {
     const job1 = await queue.add('sync', {});
     const job2 = await queue.add('embed', {});
