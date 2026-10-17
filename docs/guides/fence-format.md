@@ -25,6 +25,24 @@ On the brain host, `gbrain repair fences` previews and applies the remaining
 repairs, and the maintenance run applies them automatically
 ([fence repair](repair.md#fences)).
 
+## Cycle reconciliation
+
+**Say to your agent:** *"Pause the cycle's Facts reconciliation, then show me how to run it once while paused."*
+
+Use the brain's supported setting to pause this cycle phase, including scheduled and standalone phase jobs:
+
+```bash
+gbrain config set cycle.extract_facts.enabled false
+gbrain dream --phase extract_facts --source wiki --json
+gbrain dream --phase extract_facts --source wiki --once --json
+gbrain config set cycle.extract_facts.enabled true
+gbrain config get cycle.extract_facts.enabled
+```
+
+The ordinary disabled run reports `skipped` with `details.reason: disabled` and an enable hint; `--once` applies only to the named phase and leaves the setting intact. Unset the key to restore the default enabled behavior. This is the cycle reconciliation switch; the explicit `extract_facts` memory operation retains its own contract. The dispatch and enable policy live in [`runPhaseExtractFacts`](../../src/core/cycle.ts), and the supported setter is [`runConfig`](../../src/commands/config.ts).
+
+An enabled full walk discovers Facts-related pages in the selected source before transferring their bodies: current markers in the body or timeline, and existing fence-owned index state that still needs reconciliation. This keeps an ordinary fence-less page out of the body walk without losing a page whose last fence was removed, a table without a `## Facts` heading, or a malformed/misplaced fence's preservation warning. The selection and narrow safety-input read are in [`facts/reconcile-pages.ts`](../../src/core/facts/reconcile-pages.ts); [`runExtractFacts`](../../src/core/cycle/extract-facts.ts) owns unfenced-row adoption, phantom redirects, deletion expiry and their same-run additions. A source with no work reports `details.reason: no_facts_work`; repair and phantom work remain visible in the phase result.
+
 <!-- BEGIN GENERATED fence-format (bun run scripts/build-fence-format.ts; drift test: test/fence-format-reference.test.ts) -->
 <a id="markers"></a>
 ## Markers

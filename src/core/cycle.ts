@@ -589,20 +589,8 @@ export interface CycleOpts {
    * `dream.<phase>.enabled` / `cycle.<phase>.enabled` config gate. Wired
    * from `gbrain dream --phase <name> --once`.
    *
-   * Deliberately typed as the SINGLE named `CyclePhase`, not a boolean —
-   * each gated phase's dispatch block below only honors the override when
-   * `onceForPhase` matches ITS OWN phase name, so the bypass can never leak
-   * to a different phase even if a caller passes a wider `phases` array
-   * than the CLI does (the CLI always restricts to `phases: [phase]`).
-   *
-   * Never reads or writes config — the phase still evaluates its config
-   * gate every call; this only overrides the boolean OUTCOME for that one
-   * call. Applies to: patterns, synthesize, conversation_facts_backfill,
-   * enrich_thin, skillopt, lint (the phases that gate on a `.enabled` config
-   * key read inside the phase's own module). Does NOT apply to
-   * extract_atoms / synthesize_concepts — those are pack-gated via
-   * `packDeclaresPhase`, a different mechanism with its own existing
-   * one-shot escape hatch (`--drain` for extract_atoms).
+    * A named phase keeps the bypass from leaking into other selected phases.
+    * Pack-gated lens phases have their own escape hatch instead.
    */
   onceForPhase?: CyclePhase;
   /**

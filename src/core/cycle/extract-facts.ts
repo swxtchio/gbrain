@@ -6,16 +6,8 @@
  * links + timeline) and `recompute_emotional_weight` so emotional
  * weight sees fresh take + fact state.
  *
- * Source-of-truth contract: the fence is canonical. For each page in
- * the affected slug set, this phase:
- *   1. Reads the markdown body (DB-side fetch via engine.getPage).
- *   2. Parses the `## Facts` fence with parseFactsFence.
- *   3. Maps ParsedFact → FenceExtractedFact via extractFactsFromFenceText.
- *   4. Collapses duplicate ACTIVE rows with the same (claim, source).
- *   5. Reconciles the page-scoped DB index by fence row number: matched
- *      (row_num, claim) rows are updated in place (ids stay stable), rows
- *      that left the fence are expired and detached (never deleted), and
- *      only new row numbers insert. No-op when already in sync (#1781).
+ * The fence is canonical: its derived index must follow edits without
+ * replacing stable fact identities or treating an unsafe read as deletion.
  *
  * Warning-bearing parses are non-authoritative and preserve that page's
  * existing index. A page with no fence expires and detaches its fence-owned
@@ -1042,7 +1034,7 @@ export async function runExtractFacts(
         return await maintenanceTransaction(engine, async tx => {
           opts.signal?.throwIfAborted();
           if (watermark && !await lockReconcileRevision(tx, sourceId, slug, page.knowledge_revision ?? null)) return null;
-           const current = await readFactsReconcilePage(tx, sourceId, slug);
+          const current = await readFactsReconcilePage(tx, sourceId, slug);
           if (!current || current.compiled_truth !== page.compiled_truth || current.timeline !== page.timeline) return null;
           const written = await writeFenceReconcile(tx, sourceId, slug, plan, writes, opts.signal);
           if (watermark && !deferInserts) await settleFactsReconcile(tx, sourceId, slug, 'complete', page.knowledge_revision ?? null);

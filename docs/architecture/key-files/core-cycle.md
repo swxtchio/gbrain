@@ -1,5 +1,7 @@
 # Key files: Core Cycle
 
+- `src/core/facts/reconcile-pages.ts` — the Facts phase's source-local discovery and narrow page read. `selectFactsReconcileSlugs` finds live pages with current fence markers or index state owned by reconciliation, keeping removal and invalid-placement handling eligible. `readFactsReconcilePage` retains the inputs consumed by the parser, quarantine gate, effective-date fallback, canonical-cache freshness and revision checks. The full-walk transfer and preservation boundary is exercised in `test/extract-facts-discovery.test.ts` and its PostgreSQL wrapper; the incremental watermark owner remains `facts/reconcile-watermark.ts`.
+
 [Subsystem index](../KEY_FILES.md) · [More entries](core-cycle-continued.md). Read only the entries relevant to your change.
 Current behavior and load-bearing invariants; history belongs in Git and CHANGELOG.
 

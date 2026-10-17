@@ -1594,8 +1594,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // file's git first-commit date as their effective-date fallback on full import.
   'sync.git_first_commit_dates',
   'cycle.grade_takes.write_gstack_learnings',
-  // #4102: off switch for the propose_takes LLM phase (default ON; the
-  // phase ships in the default list). Read by src/core/cycle/propose-takes.ts.
+  // Off switches let operators suspend phases that participate in routine maintenance.
   'cycle.propose_takes.enabled',
   'cycle.extract_facts.enabled',
   'cycle.propose_takes.types', // #5213: JSON array of page types propose_takes scans (unset = every type); read in cycle/propose-takes.ts
