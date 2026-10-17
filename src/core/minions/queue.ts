@@ -1255,13 +1255,20 @@ export class MinionQueue {
     }
 
     return this.engine.transaction(async tx => {
-      // Wait for accepted dependents to publish, then recheck in a fresh
-      // statement snapshot. A DELETE's pre-lock snapshot can miss their FK.
+      // Keep dependency insertion and terminal-to-live publication from
+      // slipping between the eligibility snapshot and deletion.
       const candidates = await tx.executeRaw<{ id: number }>(
         `SELECT id FROM minion_jobs WHERE ${eligible} ORDER BY id FOR UPDATE`,
         [statuses, olderThan.toISOString()]
       );
       if (candidates.length === 0) return 0;
+      const candidateIds = candidates.map(row => row.id);
+      // Terminal dependents can retry without taking their owner's lock.
+      await tx.executeRaw(
+        `SELECT id FROM minion_jobs WHERE parent_job_id = ANY($1::int[]) OR private_queue_owner_job_id = ANY($1::int[])
+         ORDER BY id FOR UPDATE`,
+        [candidateIds]
+      );
       // Archive synthesis identity with deletion so history retention never
       // makes an already-synthesized transcript eligible for paid work again.
       const rows = await tx.executeRaw<{ count: string }>(
@@ -1277,7 +1284,7 @@ export class MinionQueue {
            ON CONFLICT DO NOTHING
          )
          SELECT count(*)::text as count FROM pruned`,
-        [statuses, olderThan.toISOString(), candidates.map(row => row.id)]
+        [statuses, olderThan.toISOString(), candidateIds]
       );
       return parseInt(rows[0]?.count ?? '0', 10);
     });

@@ -94,4 +94,66 @@ describe('PostgreSQL cycle retention racing accepted dependents', () => {
       expect(phase?.details.purged_jobs_count).toBe(0);
     }, 60_000);
   }
+
+  for (const ownerKind of ['parent', 'private-queue owner'] as const) {
+    for (const reference of ['parent_job_id', 'private_queue_owner_job_id'] as const) {
+      test(`accepted retryJob ${reference} keeps its ${ownerKind} after every purge lock wait`, async () => {
+        const name = ownerKind === 'parent' ? 'subagent_aggregator' : 'autopilot-global-maintenance';
+        const owner = await queue.add(name, {}, {}, { allowProtectedSubmit: true });
+        const childQueue = ownerKind === 'parent' ? 'default' : 'dream-inline-retention-retry';
+        const child = await queue.add('retry-dependent', {}, { [reference]: owner.id, queue: childQueue, on_child_fail: 'continue', max_attempts: 1 });
+        expect((await queue.claim('child', 30_000, childQueue, [child.name]))?.id).toBe(child.id);
+        const terminal = ownerKind === 'parent' ? 'failed' : 'dead';
+        expect((await queue.failJob(child.id, 'child', 'fixture failure', terminal))?.status).toBe(terminal);
+        expect((await queue.claim('owner', 30_000, 'default', [name]))?.id).toBe(owner.id);
+        expect((await queue.completeJob(owner.id, 'owner', { children_finished: true }))?.status).toBe('completed');
+        await engine.executeRaw("UPDATE minion_jobs SET created_at = now() - interval '40 days', started_at = now() - interval '40 days', finished_at = now() - interval '40 days', updated_at = now() - interval '40 days' WHERE id = $1", [owner.id]);
+
+        let release!: () => void;
+        const commitGate = new Promise<void>(resolve => { release = resolve; });
+        let retried: MinionJob | null | undefined;
+        let blockerPid = 0;
+        let retryError: unknown;
+        let purgeError: unknown;
+        let report: CycleReport | undefined;
+        let purging: Promise<void> | undefined;
+        const retrying = engine.transaction(async tx => {
+          const [row] = await tx.executeRaw<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+          blockerPid = row!.pid;
+          retried = await new MinionQueue(tx).retryJob(child.id);
+          await commitGate;
+        }).catch(error => { retryError = error; });
+
+        try {
+          await waitFor(() => {
+            if (retryError) throw retryError;
+            return retried !== undefined;
+          }, { timeoutMs: 5_000, label: 'real retryJob returned its waiting row inside the held transaction' });
+          expect(retried?.status).toBe('waiting');
+          expect(retried?.[reference]).toBe(owner.id);
+          purging = withEnv({ GBRAIN_HOME: home }, () => runCycle(engine, { brainDir: null, phases: ['purge'] }))
+            .then(value => { report = value; }, error => { purgeError = error; });
+          await waitFor(async () => {
+            if (purgeError) throw purgeError;
+            const rows = await engine.executeRaw<{ blocked: number }>(`SELECT count(*)::int AS blocked FROM pg_stat_activity
+              WHERE $1::int = ANY(pg_blocking_pids(pid)) AND query LIKE '%minion_jobs%'`, [blockerPid], { timeoutMs: 2_000 });
+            return rows[0]!.blocked > 0;
+          }, { timeoutMs: 5_000, label: 'purge is blocked by the held retryJob publication' });
+        } finally {
+          release();
+          await retrying;
+          await purging;
+        }
+
+        expect(retryError).toBeUndefined();
+        expect(purgeError).toBeUndefined();
+        expect((await queue.getJob(child.id))?.[reference]).toBe(owner.id);
+        expect((await queue.getJob(child.id))?.status).toBe('waiting');
+        expect((await queue.getJob(owner.id))?.status).toBe('completed');
+        const phase = report!.phases.find(p => p.phase === 'purge');
+        expect(phase?.status).toBe('ok');
+        expect(phase?.details.purged_jobs_count).toBe(0);
+      }, 60_000);
+    }
+  }
 });

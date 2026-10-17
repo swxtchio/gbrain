@@ -431,7 +431,7 @@ gbrain dream --phase purge --dry-run
 
 For a manual job-history preview, use `gbrain jobs prune --older-than 30d --dry-run`. Its status selection and preview behavior live in [`runJobsPrune`](../../src/commands/jobs/prune.ts) and `MinionQueue.prune`.
 
-The manual command shares the queue's completion-age policy: `finished_at` is the age basis for completed jobs, with `updated_at` as the legacy fallback when the completion timestamp is missing. A later diagnostic touch therefore does not extend completed-history retention. An owner needed by a nonterminal child or private-queue job remains protected; consult `MinionQueue.prune` for the shared preview/deletion predicate and locked-candidate recheck.
+The manual command shares the queue's completion-age policy: `finished_at` is the age basis for completed jobs, with `updated_at` as the legacy fallback when the completion timestamp is missing. A later diagnostic touch therefore does not extend completed-history retention. An owner needed by a nonterminal child or private-queue job remains protected; consult `MinionQueue.prune` for the shared preview/deletion predicate and the eligibility recheck after candidate and dependent lock waits, including concurrent `retryJob` publication.
 
 If scheduled job-history cleanup fails, inspect `runPhasePurge`'s `purged_jobs_error` and the phase error. The phase still reports the independent page, source, clone and checkpoint sweeps; the unknown job deletion count is `null`, rather than a successful zero.
 
