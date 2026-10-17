@@ -1471,8 +1471,16 @@ async function runPhaseExtractFacts(
   dryRun: boolean,
   changedSlugs?: string[],
   signal?: AbortSignal,
+  once = false,
 ): Promise<PhaseResult> {
   try {
+    if (!once && /^\s*(false|0|off|no)\s*$/i.test(await engine.getConfig('cycle.extract_facts.enabled') ?? '')) {
+      return {
+        phase: 'extract_facts', status: 'skipped', duration_ms: 0,
+        summary: 'extract_facts skipped: cycle.extract_facts.enabled=false',
+        details: { reason: 'disabled', enable_hint: 'gbrain config set cycle.extract_facts.enabled true' },
+      };
+    }
     const { runExtractFacts } = await import('./cycle/extract-facts.ts');
     const result = await runExtractFacts(engine, {
       slugs: changedSlugs,
@@ -1487,10 +1495,11 @@ async function runPhaseExtractFacts(
     // fact-reconcile counts. We summarize the phantom counters in the
     // human-readable summary line when any non-zero phantom work happened
     // so the daily cycle report makes the cleanup visible.
-    const phantomSummary = (result.phantomsRedirected
+    const phantomSummary = (result.phantomsScanned
+      || result.phantomsRedirected
       || result.phantomsAmbiguous
       || result.phantomsSkippedDrift)
-      ? `, ${result.phantomsRedirected} phantom(s) redirected (${result.phantomsAmbiguous} ambiguous, ${result.phantomsSkippedDrift} drift-skipped)`
+      ? `, ${result.phantomsScanned} phantom(s) scanned, ${result.phantomsRedirected} redirected (${result.phantomsAmbiguous} ambiguous, ${result.phantomsSkippedDrift} drift-skipped)`
       : '';
     // #1928: a reconcile that deletes far more facts than it reinserts is the
     // signature of the conversation-facts wipe (factsDeleted 1829, inserted 0
@@ -1515,18 +1524,23 @@ async function runPhaseExtractFacts(
     const guardSummary = result.guardTriggered
       ? `; skipped ${result.legacyPages.length} page(s) holding ${result.legacyRowsPending} unfenced fact row(s) that could not be fenced: ${listed}`
       : '';
+    const noWork = result.pagesScanned === 0 && result.phantomsScanned === 0
+      && result.factsExpiredForDeletedPages === 0 && result.unfencedRowsFenced === 0
+      && result.warnings.length === 0 && !result.phantomsLockBusy && !result.phantomsMorePending;
     const decideConflict = dryRun ? undefined : await (await import('./ai/decide/sweep.ts')).conflictSweepTail(engine, sourceId, signal);
     return {
       phase: 'extract_facts',
-      status: result.warnings.length > 0 ? 'warn' : 'ok',
+      status: result.warnings.length > 0 ? 'warn' : noWork && !decideConflict ? 'skipped' : 'ok',
       duration_ms: 0,
-      summary: `${result.factsInserted} fact(s) reconciled across ${result.pagesScanned} page(s)${phantomSummary}` + guardSummary +
+      summary: (noWork ? `no Facts reconciliation work in source "${sourceId}"` : `${result.factsInserted} fact(s) reconciled across ${result.pagesScanned} page(s)${phantomSummary}`) + guardSummary +
         (result.warnings.length > 0 ? ` (${result.warnings.length} warning(s))` : ''),
       details: {
+        ...(noWork ? { reason: 'no_facts_work' } : {}),
         pagesScanned: result.pagesScanned,
         pagesWithFacts: result.pagesWithFacts,
         factsInserted: result.factsInserted,
         factsDeleted: result.factsDeleted,
+        factsExpiredForDeletedPages: result.factsExpiredForDeletedPages,
         unfencedRowsFenced: result.unfencedRowsFenced,
         legacyRowsPending: result.legacyRowsPending,
         legacyPages: result.legacyPages,
@@ -2390,7 +2404,7 @@ export async function runCycle(
         const syncRanButFailed = syncAttempted && syncPagesAffected === undefined;
         const xfSlugs = syncRanButFailed ? [] : syncPagesAffected;
         const { result, duration_ms } = await timePhase(() =>
-          runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, xfSlugs, cycleSignal), 'extract_facts');
+          runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, xfSlugs, cycleSignal, opts.onceForPhase === 'extract_facts'), 'extract_facts');
         result.duration_ms = duration_ms;
         phaseResults.push(result);
         progress.finish();

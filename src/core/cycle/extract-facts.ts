@@ -92,6 +92,7 @@ import { isAborted } from '../abort-check.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
 import { acquirePageLock } from '../page-lock.ts';
+import { readFactsReconcilePage, selectFactsReconcileSlugs } from '../facts/reconcile-pages.ts';
 import {
   lockReconcileRevision,
   selectFactsReconcileDrain,
@@ -605,7 +606,7 @@ export async function prepareDeletedPageFactsExpiry(engine: BrainEngine, row: Wr
 }
 
 export interface ExtractFactsOpts {
-  /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
+  /** Subset of slugs to reconcile. Omitted = discover source-local Facts reconciliation work. */
   slugs?: string[];
   /** Dry-run: parse + count, no DB writes. */
   dryRun?: boolean;
@@ -941,10 +942,7 @@ export async function runExtractFacts(
     // real incremental no-op; don't escalate to full-brain walk.
     slugs = opts.slugs;
   } else {
-    // Full walk: every page in the brain. Bounded by engine.getAllSlugs
-    // which is already the precedent for full-extract paths.
-    const allSlugs = await engine.getAllSlugs();
-    slugs = Array.from(allSlugs);
+    slugs = await selectFactsReconcileSlugs(engine, sourceId);
   }
   // v0.35.5: union the canonicals touched by the phantom-redirect pass
   // so their DB facts get reconciled from the just-merged disk fence.
@@ -972,7 +970,7 @@ export async function runExtractFacts(
   type PageOutcome = FactsReconcileOutcome | 'unchanged' | 'skipped' | 'stop';
   let revision: string | null | undefined;
   const reconcilePage = async (slug: string): Promise<PageOutcome> => {
-    const page = await engine.getPage(slug, { sourceId });
+    const page = await readFactsReconcilePage(engine, sourceId, slug);
     if (!page) {
       // Slug listed but not in DB — skip silently. The next cycle
       // will pick it up if it exists.
@@ -1044,7 +1042,7 @@ export async function runExtractFacts(
         return await maintenanceTransaction(engine, async tx => {
           opts.signal?.throwIfAborted();
           if (watermark && !await lockReconcileRevision(tx, sourceId, slug, page.knowledge_revision ?? null)) return null;
-          const current = await tx.getPage(slug, { sourceId });
+           const current = await readFactsReconcilePage(tx, sourceId, slug);
           if (!current || current.compiled_truth !== page.compiled_truth || current.timeline !== page.timeline) return null;
           const written = await writeFenceReconcile(tx, sourceId, slug, plan, writes, opts.signal);
           if (watermark && !deferInserts) await settleFactsReconcile(tx, sourceId, slug, 'complete', page.knowledge_revision ?? null);
