@@ -21,7 +21,7 @@
 import { describe, test, expect } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 
 import { writeWrapperScript } from '../src/commands/autopilot.ts';
@@ -141,4 +141,32 @@ describe('#4728 wrapper falls back when the baked CLI path is gone', () => {
       expect(src.indexOf(`\ncd '`)).toBeLessThan(src.indexOf('exec '));
     });
   });
+});
+
+describe('self-disabled wrapper dispatch boundary', () => {
+  for (const cliPath of ['baked', 'fallback']) {
+    for (const repoState of ['missing', 'restored']) {
+      test(`recorded disable blocks ${cliPath} dispatch with a ${repoState} repo`, async () => {
+        await withRig(rig => {
+          const marker = join(dirname(rig.wrapperPath), 'autopilot-disabled');
+          const strikes = join(dirname(rig.wrapperPath), 'autopilot-disable-strikes');
+          const reason = 'repo path gone: original captured checkout\n';
+          writeFileSync(marker, reason);
+          writeFileSync(strikes, '3\n');
+          if (repoState === 'missing') rmSync(rig.repoDir, { recursive: true });
+          const fallbackDir = join(rig.home, 'fallback-bin');
+          mkdirSync(fallbackDir);
+          writeFileSync(join(fallbackDir, 'gbrain'), '#!/bin/sh\necho "FALLBACK_RAN $@"\nexit 0\n', { mode: 0o755 });
+          if (cliPath === 'fallback') rmSync(join(rig.bakedBinDir, 'gbrain'));
+          const result = rig.run(`${fallbackDir}:${NO_GBRAIN_PATH}`);
+          expect(result.error).toBeUndefined();
+          expect(result.status).toBe(0);
+          expect(result.stdout).toBe('');
+          expect(result.stderr).toBe('');
+          expect(readFileSync(marker, 'utf8')).toBe(reason);
+          expect(readFileSync(strikes, 'utf8')).toBe('3\n');
+        });
+      });
+    }
+  }
 });

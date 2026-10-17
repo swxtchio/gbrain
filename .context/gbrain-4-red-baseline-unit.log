@@ -1,0 +1,49 @@
+bun test v1.4.2 (744846f84)
+
+test/autopilot-self-disable-and-status.test.ts:
+135 |         const reason = 'repo path gone: previously captured checkout\n';
+136 |         writeFileSync(rig.marker, reason);
+137 |         writeFileSync(rig.strikes, '3\n');
+138 |         for (const restored of [false, true]) {
+139 |           if (restored) mkdirSync(rig.repo);
+140 |           expect(rig.run(target)).toBe('');
+                                        ^
+error: expect(received).toBe(expected)
+
+- ""
++ "2026-10-17T15:50:59Z [autopilot] repo path gone, disabling: /home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-self-disable-oi0F06/captured repo's checkout
++ "
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:140:35)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:78:7)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withGuardRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:59:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:134:13)
+(fail) generateSelfDisableGuard > recorded disable is terminal for missing and restored repos on every target [9.00ms]
+157 |             expect(existsSync(rig.marker)).toBe(false);
+158 |             expect(rig.requests()).toBe('');
+159 |           }
+160 |           expect(rig.run(target, supervisorExit)).not.toContain('GUARD_DISPATCH');
+161 |           expect(readFileSync(rig.marker, 'utf8')).toBe(`repo path gone: ${rig.repo}\n`);
+162 |           expect(readFileSync(rig.strikes, 'utf8')).toBe('3\n');
+                       ^
+ENOENT: no such file or directory, open '/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-self-disable-Of76c3/brain's home/.gbrain/autopilot-disable-strikes'
+    path: "/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/.context/gbrain-self-disable-Of76c3/brain's home/.gbrain/autopilot-disable-strikes",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:162:18)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:78:7)
+      at withEnv (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/helpers/with-env.ts:68:18)
+      at withGuardRig (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:59:11)
+      at <anonymous> (/home/byates/fm-worktrees/fm-llmrouter/gbrain-4/gbrain/test/autopilot-self-disable-and-status.test.ts:152:15)
+(fail) generateSelfDisableGuard > consecutive misses retain threshold history and remove only the installed job even if the supervisor fails [13.72ms]
+
+ 23 pass
+ 2 fail
+ 125 expect() calls
+Ran 25 tests across 1 file. [131.00ms]
