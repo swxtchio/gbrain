@@ -4,6 +4,7 @@ import { withEnv } from './helpers/with-env.ts';
 import * as realEmbedding from '../src/core/embedding.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { DbLockHandle } from '../src/core/db-lock.ts';
+import { makeEmbedHandler } from '../src/core/minions/handlers/embed.ts';
 
 // Mock the embedding module BEFORE importing runEmbed, so runEmbed picks up
 // the mocked embedBatch. We track max concurrent invocations via a counter
@@ -147,6 +148,36 @@ describe('#9 real bulk producer pacing capacity', () => {
         expect(probes).toBe(0);
         expect(totalEmbedCalls).toBe(0);
         expect(err.mock.calls.filter(c => String(c[0]).includes('[pace]'))).toHaveLength(0);
+      } finally { err.mockRestore(); }
+    });
+  }, 5000);
+
+  test('queued embed execution diagnoses the worker-env resolution rather than the serialized pace request', async () => {
+    await withEnv({ GBRAIN_POOL_SIZE: '17', GBRAIN_EMBED_CONCURRENCY: undefined, GBRAIN_PACE_MODE: 'balanced',
+      GBRAIN_PACE_MAX_CONCURRENCY: '6', GBRAIN_PACE_MAX_SLEEP_MS: '0' }, async () => {
+      const pages = Array.from({ length: 4 }, (_, i) => ({ slug: `queued-${i}`, source_id: 'default' }));
+      const err = spyOn(process.stderr, 'write').mockImplementation(() => true);
+      embedBatchBehavior = async texts => {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        return texts.map(() => new Float32Array(1536));
+      };
+      const engine = mockEngine({ kind: 'postgres', getPoolDiagnostics: () => ({ poolMax: 2 }), listPages: async () => pages,
+        getConfig: async (key: string) => key === 'pace.mode' ? 'aggressive' : null,
+        getChunks: async (slug: string) => [{ chunk_index: 0, chunk_text: `text for ${slug}`, chunk_source: 'compiled_truth', embedded_at: null }],
+      });
+      const controller = new AbortController();
+      try {
+        const result = await makeEmbedHandler(engine)({ id: 1, name: 'embed', attempts_made: 0,
+          data: { all: true, pace: { perCallMode: 'gentle', perCall: { maxConcurrency: 1 } } },
+          signal: controller.signal, shutdownSignal: controller.signal, deadlineAtMs: null,
+          updateProgress: async () => {}, updateTokens: async () => {}, log: async () => {}, isActive: async () => true, readInbox: async () => [],
+        });
+        expect(result).toMatchObject({ embedded: 4, failures: 0 });
+        expect(maxConcurrentEmbedCalls).toBe(2);
+        const warnings = err.mock.calls.map(c => String(c[0])).filter(line => line.includes('[pace]'));
+        expect(warnings).toHaveLength(1);
+        for (const info of ['mode=balanced', 'maxConcurrency=6', 'poolCapacity=2', 'effectiveCap=2']) expect(warnings[0]).toContain(info);
+        expect(process.env.GBRAIN_POOL_SIZE).toBe('17');
       } finally { err.mockRestore(); }
     });
   }, 5000);
