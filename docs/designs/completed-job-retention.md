@@ -19,3 +19,11 @@ Authority: the captain's 2026-10-17 fix order for PR #34, reviewed pin `d1fcf12d
 - Lock prune candidates in deterministic id order with `SELECT ... FOR UPDATE` inside an engine transaction, then delete only locked ids with the full eligibility predicate rechecked in the subsequent statement. Use real PostgreSQL `queue.add` transactions and observed lock blocking to prove newly accepted parent/private-owner dependents prevent deletion.
 - Pin manual `runJobsPrune` age/fallback and live-dependent preview/deletion semantics in the existing queue prune boundary; update the operator guide. Align ordinary completion aging with the timestamps emitted by `completeJob`, retaining a separately explicit recent diagnostic touch where completion-age coverage needs it.
 - Demonstrate bounded round-1 red and restored green for every new or rewritten regression, including independent removal of the lock and eligibility recheck. Preserve logs and statuses under `.context/retention-round1`, then update the same draft PR and report its new head.
+
+## Adjudicated round-2 repair
+
+Authority: the captain's 2026-10-17 fix order for PR #34, reviewed pin `98efdf8d9ab7f544982560693ecb59a260221c30`; residual work is owned by issue #36.
+
+- Lock every row referencing a locked prune candidate through either owner foreign key, including terminal rows that `retryJob` may return to waiting. Run the final DELETE eligibility check only after candidate and dependent lock waits have resolved, in the same transaction.
+- Reproduce the real `retryJob` publication under a held transaction through `runCycle` on PostgreSQL for both parent and private-queue owner fixtures, each linked through both foreign-key fields. Obtain positive database evidence that purge is blocked before releasing the retry to commit.
+- Remove only the new dependent serialization to prove bounded regression failure, restore it and rerun the focused cycle, native race and manual-prune boundaries green. Keep the accepted failure-isolation and queue.add repairs; update the same draft and preserve proof under `.context/retention-round2`.
