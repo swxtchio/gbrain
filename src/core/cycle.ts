@@ -1729,7 +1729,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         status: 'ok',
         duration_ms: 0,
         summary: 'dry-run: skipped purge sweep',
-        details: { dry_run: true, purged_sources_count: 0, purged_pages_count: 0, purged_orphan_clones_count: 0 },
+        details: { dry_run: true, purged_sources_count: 0, purged_pages_count: 0, purged_orphan_clones_count: 0, purged_jobs_count: 0 },
       };
     }
     const [{ purgeExpiredSources }, { purgeDeletedPagesCoordinated }] = await Promise.all([import('./destructive-guard.ts'), import('./persistence/purge-deleted.ts')]);
@@ -1785,9 +1785,12 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     try { purgedDecisionReceipts = await (await import('./ai/decide/store.ts')).pruneReceiptsForCycle(engine); } catch { /* pre-v179 brain */ }
     let purgedFeedback = { events: 0, weights: 0 };
     try { purgedFeedback = await (await import('./feedback/store.ts')).pruneRetrievalFeedback(engine, (await (await import('./feedback/settings.ts')).loadFeedbackSettings(engine)).eventRetentionDays); } catch { /* pre-v207 brain */ }
+    let purgedJobs: { count: number; retentionDays: number } | undefined;
+    let jobsPurgeError: PhaseError | undefined;
+    try { purgedJobs = await (await import('./cycle/job-retention.ts')).pruneCompletedJobsForCycle(engine); } catch (e) { jobsPurgeError = makeErrorFromException(e); }
     return {
       phase: 'purge',
-      status: purgedPages.error ? 'fail' : 'ok', error: purgedPages.error,
+      status: purgedPages.error || jobsPurgeError ? 'fail' : 'ok', error: purgedPages.error ?? jobsPurgeError,
       duration_ms: 0,
       summary:
         `purged ${purgedSources.length} source(s)` +
@@ -1796,9 +1799,11 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
         `${purgedBatchRetryAuditFiles} stale batch-retry audit file(s), ` +
-        `and ${purgedVolunteerEvents} stale volunteer event(s)`,
+        `and ${purgedVolunteerEvents} stale volunteer event(s), ` +
+        (jobsPurgeError ? 'completed-job cleanup failed' : `${purgedJobs!.count} completed job(s)`),
       details: {
         purged_sources_count: purgedSources.length,
+        purged_jobs_count: purgedJobs?.count ?? null, completed_job_retention_days: purgedJobs?.retentionDays, ...(jobsPurgeError ? { purged_jobs_error: jobsPurgeError } : {}),
         purged_sources_blocked: purgeResult.blocked,
         purged_pages_count: purgedPages.count, purged_pages_blocked: purgedPages.blocked, purged_pages_deferred: purgedPages.deferred,
         purged_orphan_clones_count: purgedClones.count,

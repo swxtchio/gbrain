@@ -417,6 +417,24 @@ covers the shell handler's 5 s child-kill grace (`KILL_GRACE_MS`). For
 long-running shell jobs, prefer timeouts via `--timeout-ms` on submit
 over relying on hard kills.
 
+## Completed-job history
+
+Scheduled maintenance's purge phase reclaims completed history through [`pruneCompletedJobsForCycle`](../../src/core/cycle/job-retention.ts); that module owns the finite default and the `minions.completed_retention_days` setting. Choose positive whole days for your diagnostic history. [`MinionQueue.prune`](../../src/core/minions/queue.ts) owns eligibility and preservation of synthesis identity and outstanding execution dependencies; [`runPhasePurge`](../../src/core/cycle.ts) owns the cleanup counts and failure report.
+
+**Say to your agent:** *"Keep a month of completed job history and show me the next cleanup preview."*
+
+```bash
+gbrain config set minions.completed_retention_days 30
+gbrain config get minions.completed_retention_days
+gbrain dream --phase purge --dry-run
+```
+
+For a manual job-history preview, use `gbrain jobs prune --older-than 30d --dry-run`. Its status selection and preview behavior live in [`runJobsPrune`](../../src/commands/jobs/prune.ts) and `MinionQueue.prune`.
+
+The manual command shares the queue's completion-age policy: `finished_at` is the age basis for completed jobs, with `updated_at` as the legacy fallback when the completion timestamp is missing. A later diagnostic touch therefore does not extend completed-history retention. An owner needed by a nonterminal child or private-queue job remains protected; consult `MinionQueue.prune` for the shared preview/deletion predicate and the eligibility recheck after candidate and dependent lock waits, including concurrent `retryJob` publication.
+
+If scheduled job-history cleanup fails, inspect `runPhasePurge`'s `purged_jobs_error` and the phase error. The phase still reports the independent page, source, clone and checkpoint sweeps; the unknown job deletion count is `null`, rather than a successful zero.
+
 ## Smoke test
 
 ```bash
