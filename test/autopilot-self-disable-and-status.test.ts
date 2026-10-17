@@ -135,12 +135,16 @@ describe('generateSelfDisableGuard', () => {
         const reason = 'repo path gone: previously captured checkout\n';
         writeFileSync(rig.marker, reason);
         writeFileSync(rig.strikes, '3\n');
+        const request = target === 'macos' ? `launchctl bootout gui/4242/${rig.job.launchdLabel}\n`
+          : target === 'linux-systemd' ? `systemctl --user disable --now ${rig.job.systemdUnit}\n` : '';
+        let expectedRequests = '';
         for (const restored of [false, true]) {
           if (restored) mkdirSync(rig.repo);
           expect(rig.run(target)).toBe('');
           expect(readFileSync(rig.marker, 'utf8')).toBe(reason);
           expect(readFileSync(rig.strikes, 'utf8')).toBe('3\n');
-          expect(rig.requests()).toBe('');
+          expectedRequests += request;
+          expect(rig.requests()).toBe(expectedRequests);
         }
       });
     }
@@ -167,7 +171,7 @@ describe('generateSelfDisableGuard', () => {
           expect(rig.run(target, supervisorExit)).toBe('');
           expect(readFileSync(rig.strikes, 'utf8')).toBe('3\n');
           expect(readFileSync(rig.marker, 'utf8')).toBe(`repo path gone: ${rig.repo}\n`);
-          expect(rig.requests()).toBe(expectedRequest);
+          expect(rig.requests()).toBe(expectedRequest + expectedRequest);
         });
       }
     }
