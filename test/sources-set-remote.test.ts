@@ -2,8 +2,8 @@
  * Protects the existing-source remote repair through runSources and persisted rows.
  * Regressions: missing dispatch, unchecked URL, detached config replacement, early
  * success, or checkout ownership escalation. Existing set-path/pull-strategy tests
- * never invoke set-remote. Uses real config writers and pull policy, with spies
- * only for failure injection and deterministic interleaving; no production seam.
+ * never invoke set-remote. Uses real config writers and pull policy; spies observe
+ * CLI effects and inject failures and deterministic interleaving. No production seam.
  */
 import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
