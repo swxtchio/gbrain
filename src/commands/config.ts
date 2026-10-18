@@ -640,7 +640,17 @@ export async function tryRunConfigThinClient(args: string[]): Promise<boolean> {
   return false;
 }
 
-/** `config show`: file/env values, with the effective DB-aware value for the dual-plane keys. */
+async function resolveConfigEmbeddingIdentity(
+  engine: BrainEngine,
+  fileConfig: GBrainConfig | null,
+) {
+  const { resolveEmbeddingIdentity } = await import('../core/embedding-identity-resolution.ts');
+  const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
+  const route = brainRoutingArgs();
+  return resolveEmbeddingIdentity(engine, fileConfig, { allowDbRecovery: route[1] === 'host' });
+}
+
+/** `config show`: file/env values, dual-plane values, and an explicit status for unverified embedding identity. */
 async function showConfig(engine: BrainEngine): Promise<void> {
   const config = loadConfig();
   if (!config) {
@@ -654,6 +664,27 @@ async function showConfig(engine: BrainEngine): Promise<void> {
     const disabled = await effectiveEmbeddingDisabled(engine);
     if (disabled) effective[EMBEDDING_DISABLED_KEY] = disabled;
   } catch { /* DB plane unreadable: show the file/env values alone */ }
+  try {
+    const identity = await resolveConfigEmbeddingIdentity(engine, config);
+    if (identity.state === 'recovered') {
+      effective.embedding_model = {
+        value: identity.model,
+        note: `DB plane, verified by ${identity.signature ?? `the stored vector(${identity.dimensions}) width`}`,
+      };
+      effective.embedding_dimensions = {
+        value: identity.dimensions,
+        note: 'DB plane, verified against the stored vector column',
+      };
+    } else if (identity.state === 'unverified') {
+      const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
+      const statusCommand = ['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()].join(' ');
+      console.error(`[config] Effective embedding identity is unverified: ${identity.reason}`);
+      console.error(`[config] Read-only check: ${statusCommand}`);
+    }
+  } catch {
+    console.error('[config] Effective embedding identity could not be verified because a required configuration or DB read failed.');
+    console.error('[config] Read-only check: gbrain migrate embeddings --status --json');
+  }
   const shown = { ...config } as Record<string, unknown>;
   for (const [k, e] of Object.entries(effective)) shown[k] = e.value;
   for (const [k, v] of Object.entries(shown)) {
@@ -912,6 +943,53 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     };
     const fileVal = resolveDotted(filePlane, key);
     const dbVal = await engine.getConfig(key);
+    if (key === 'embedding_model' || key === 'embedding_dimensions') {
+      const identity = await resolveConfigEmbeddingIdentity(engine, filePlane as GBrainConfig | null);
+      if (identity.state === 'recovered') {
+        const effectiveValue = key === 'embedding_model' ? identity.model : identity.dimensions;
+        console.log(String(effectiveValue));
+        console.error(`[config] source: DB plane, verified by ${identity.signature ?? `the stored vector(${identity.dimensions}) width`}`);
+        return;
+      }
+      if (identity.state === 'configured') {
+        let effectiveValue: string | number | undefined = key === 'embedding_model' ? identity.model : identity.dimensions;
+        if (key === 'embedding_dimensions' && effectiveValue === undefined) {
+          try { effectiveValue = (await import('../core/ai/gateway.ts')).getEmbeddingDimensions(); } catch { /* retain the file value path below */ }
+        }
+        if (effectiveValue !== undefined) {
+          const out = String(effectiveValue);
+          console.log(rawFlag ? out : redactConfigValue(key, out));
+          console.error(`[config] source: file/environment plane${key === 'embedding_dimensions' && identity.dimensions === undefined ? ' (gateway default width)' : ''}`);
+          return;
+        }
+      }
+      if (identity.state === 'unverified') {
+        const storedValue = fileVal ?? dbVal;
+        const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
+        const statusCommand = ['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()].join(' ');
+        if (storedValue !== null && storedValue !== undefined) {
+          const out = typeof storedValue === 'string' ? storedValue : JSON.stringify(storedValue);
+          console.log(rawFlag ? out : redactConfigValue(key, out));
+          console.error(`[config] stored value is not a verified runtime identity: ${identity.reason}`);
+          console.error(`[config] Read-only check: ${statusCommand}`);
+          return;
+        }
+        console.error(`[config] Effective embedding identity is unverified: ${identity.reason}`);
+        console.error(`[config] Read-only check: ${statusCommand}`);
+        process.exit(1);
+      }
+      if (identity.state === 'disabled') {
+        const storedValue = fileVal ?? dbVal;
+        if (storedValue !== null && storedValue !== undefined) {
+          const out = typeof storedValue === 'string' ? storedValue : JSON.stringify(storedValue);
+          console.log(rawFlag ? out : redactConfigValue(key, out));
+        } else {
+          console.log('');
+        }
+        console.error('[config] Embeddings are disabled by choice; this stored value is not active at runtime.');
+        return;
+      }
+    }
     // Dual-plane ambient-writeback keys are DB-AUTHORITATIVE at runtime
     // (adversarial review, this wave): reporting the file mirror here after
     // a failed dual-write would show 'off' while every runtime surface still
@@ -1144,15 +1222,11 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       return;
     }
 
-    // v0.37.11.0 fix wave (Lane C.2 + CDX2-13): refuse writes to schema-sizing
-    // fields unconditionally. These fields size the `content_chunks.embedding`
-    // column at init time and are file-plane canonical. `gbrain config set
-    // embedding_model X` writes the DB plane, which the embed pipeline
-    // never reads — silent lie that took users hours to diagnose.
-    //
-    // No `--force` escape hatch (CDX2-13): keeping a known-no-op DB-only
-    // write preserves the split-brain footgun the wave exists to close.
-    if (key === 'embedding_model' || key === 'embedding_dimensions') await refuseSchemaSizingKey(key, value);
+    // These fields size the `content_chunks.embedding` column and remain
+    // file/environment choices. The startup recovery path can honor a legacy
+    // DB-only identity only when stored signatures and width prove it; a new
+    // DB write cannot safely pin or switch that identity.
+    if (key === 'embedding_model' || key === 'embedding_dimensions') await refuseSchemaSizingKey(engine, key, value);
 
     // v0.37.10.0 (D6): strict unknown-key rejection with --force escape hatch.
     // Catches the silent-no-op class for namespaced typos like `embedding.provider`,
@@ -1471,36 +1545,70 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   }
 }
 
-/**
- * `config set embedding_model|embedding_dimensions` is refused (a DB-plane
- * write is a silent no-op). The recipe comes from readiness (A7): enabling is
- * in place and keeps pages and DB-only facts; switching an active model is a
- * previewed migration. Never a wipe.
- */
-async function refuseSchemaSizingKey(key: 'embedding_model' | 'embedding_dimensions', value: string): Promise<never> {
-  const { loadConfig } = await import('../core/config.ts');
-  const { embeddingEnablement } = await import('../core/readiness.ts');
+async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model' | 'embedding_dimensions', value: string): Promise<never> {
+  const { loadConfig, gbrainPath } = await import('../core/config.ts');
+  const { resolveRecipe } = await import('../core/ai/model-resolver.ts');
+  const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
   const { shellQuote } = await import('../core/agent-output.ts');
-  const cfg = loadConfig() ?? ({ engine: 'pglite' } as GBrainConfig);
-  const requested = key === 'embedding_model' ? { embedding_model: value } : { embedding_dimensions: Number(value) };
-  const active = !cfg.embedding_disabled ? cfg.embedding_model?.trim() : undefined;
-  console.error(`[config] ${key} is a file-plane field that sizes the schema.`);
-  console.error(`[config] Setting it in the DB has no effect on the embed pipeline (silent no-op).`);
-  console.error(`[config]`);
-  if (active) {
-    const to = key === 'embedding_model' ? value : active;
-    const dim = key === 'embedding_dimensions' ? ['--dim', value] : [];
-    console.error(`[config] This brain already embeds with ${active}. Switching is a re-embed migration (pages and facts are kept); preview it first:`);
-    console.error(`[config]   ${shellQuote(['gbrain', 'migrate', 'embeddings', '--to', to, ...dim, '--dry-run'])}`);
-  } else {
-    const fix = embeddingEnablement({ ...cfg, ...requested } as GBrainConfig);
-    console.error(`[config] To turn embeddings on in place:`);
-    if (fix.argv) console.error(`[config]   ${shellQuote(fix.argv)}`);
-    console.error(`[config] ${fix.why}`);
-    for (const input of fix.inputs ?? []) console.error(`[config] Needs ${input.name}: ${input.how}`);
+  let fileConfig: GBrainConfig | null = null;
+  let identity: Awaited<ReturnType<typeof resolveConfigEmbeddingIdentity>>;
+  try {
+    fileConfig = loadConfig();
+    identity = await resolveConfigEmbeddingIdentity(engine, fileConfig);
+  } catch (error) {
+    identity = { state: 'unverified', reason: `file/environment or DB-plane identity could not be read: ${(error as Error).message}` };
   }
-  console.error(`[config]`);
-  console.error(`[config] No --force escape: silently writing a no-op preserves the bug class this rejection closes.`);
+
+  const current = identity.state === 'configured' || identity.state === 'recovered' ? identity : null;
+  const configPath = gbrainPath('config.json');
+  const sameModel = (requested: string, active: string): boolean => {
+    if (requested.trim() === active) return true;
+    try {
+      const activeParsed = resolveRecipe(active).parsed;
+      if (!requested.includes(':') && !requested.includes('/')) return requested.trim() === activeParsed.modelId;
+      const requestedParsed = resolveRecipe(requested).parsed;
+      return requestedParsed.providerId === activeParsed.providerId && requestedParsed.modelId === activeParsed.modelId;
+    } catch {
+      return false;
+    }
+  };
+
+  console.error(`[config] ${key} is a file/environment schema identity. This command remains refused because it cannot safely set or change the file-plane choice.`);
+  if (identity.state === 'recovered') {
+    console.error(`[config] Effective identity: ${identity.model} (${identity.dimensions} dims), recovered from the DB plane${identity.signature ? ` and verified by ${identity.signature}` : ' and verified by the stored column width'}.`);
+  } else if (identity.state === 'configured') {
+    console.error(`[config] Effective identity: ${identity.model}${identity.dimensions === undefined ? '' : ` (${identity.dimensions} dims)`}, from file/environment.`);
+  } else if (identity.state === 'disabled') {
+    console.error('[config] Embeddings are disabled by choice; a DB-plane model does not override that setting.');
+  } else {
+    console.error(`[config] Effective identity is unverified: ${identity.reason}`);
+  }
+
+  if (current) {
+    const requestedMatches = key === 'embedding_model'
+      ? sameModel(value, current.model)
+      : Number(value) === current.dimensions;
+    if (requestedMatches && identity.state === 'recovered' && identity.dimensions !== undefined) {
+      const pin = { embedding_model: identity.model, embedding_dimensions: identity.dimensions };
+      console.error(`[config] To pin this identity in ${configPath}, add: ${JSON.stringify(pin)}`);
+      console.error('[config] Verify with: gbrain config get embedding_model and gbrain config get embedding_dimensions.');
+    } else if (requestedMatches) {
+      console.error('[config] This identity is already selected by file/environment; no DB-plane write is needed.');
+    } else {
+      const targetModel = key === 'embedding_model' ? value.trim() : current.model;
+      const targetDimensions = key === 'embedding_dimensions' ? Number(value) : current.dimensions;
+      if ((targetModel.includes(':') || targetModel.includes('/')) && Number.isSafeInteger(targetDimensions) && targetDimensions! > 0) {
+        console.error('[config] Changing the current vector identity requires an explicit, previewed migration:');
+        console.error(`[config]   ${shellQuote(['gbrain', 'migrate', 'embeddings', '--to', targetModel, '--dim', String(targetDimensions), '--dry-run'])}`);
+      } else {
+        console.error('[config] Choose a provider-qualified model and preview it with gbrain migrate embeddings --to <provider:model> --dim <N> --dry-run.');
+      }
+    }
+  } else {
+    console.error(`[config] Read-only next step: ${['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()].join(' ')}.`);
+    console.error('[config] Do not select a default until the existing vectors are identified; then preview an explicit migration with --dry-run.');
+  }
+  console.error('[config] No --force escape; changing the model or width without a verified identity could mislabel existing vectors.');
   process.exit(1);
 }
 

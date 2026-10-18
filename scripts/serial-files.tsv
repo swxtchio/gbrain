@@ -168,6 +168,7 @@ test/embed-stale-unavailable-snapshot.serial.test.ts	global-state	global-state: 
 test/embed.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
 test/embedding-completion-atomic.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests, __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
 test/embedding-identity-companions.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; R4: PGLiteEngine without an afterAll disconnect; process-wide test seams __setEmbedTransportForTests, __setRerankTransportForTests; configureGateway changes the process-wide AI gateway; spyOn globalThis.fetch
+test/embedding-identity-recovery.serial.test.ts	global-state	global-state: configures the process-wide gateway for fixture schema setup; reuses a synthetic PGLite brain across startup, doctor and config subprocesses
 test/embedding-migration-settle.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway; spyOn console.log, console.error
 test/embedding-recovery.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
 test/embedding-rejection-refund.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
