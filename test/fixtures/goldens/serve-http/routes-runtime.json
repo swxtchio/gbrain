@@ -447,6 +447,14 @@
             "<anonymous>"
           ],
           "method": "get",
+          "path": "/admin/api/ops"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
           "path": "/admin/api/full-stats"
         },
         {
@@ -649,6 +657,7 @@
         },
         {
           "handlers": [
+            "requestWatchdog",
             "<anonymous>",
             "<anonymous>"
           ],
@@ -1163,6 +1172,14 @@
             "<anonymous>"
           ],
           "method": "get",
+          "path": "/admin/api/ops"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
           "path": "/admin/api/full-stats"
         },
         {
@@ -1365,6 +1382,7 @@
         },
         {
           "handlers": [
+            "requestWatchdog",
             "<anonymous>",
             "<anonymous>"
           ],

@@ -27,6 +27,7 @@ beforeAll(async () => {
     engine: 'pglite',
     embedding_model: 'openai:text-embedding-3-small',
     embedding_dimensions: 1536,
+    consent: { preapprove: { paid: { max_usd_per_run: 1 } } },
   }));
   engine = new PGLiteEngine();
   await engine.connect({});

@@ -60,7 +60,7 @@ describe('doctor check registry golden (AST, master order)', () => {
     // db_repair_recurrence); connection failure returns right after `connection`.
     expect(early_returns_after).toEqual(['db_repair_recurrence', 'connection']);
     expect(names.indexOf('connection')).toBeLessThan(names.indexOf('pgvector'));
-    expect(names.at(-1)).toBe('dangling_aliases');
+    expect(names.slice(-2)).toEqual(['dangling_aliases', 'onboard_checks']);
   });
 
   test('every runtime doctor golden emits registry names in registry order (extractor recall)', () => {
