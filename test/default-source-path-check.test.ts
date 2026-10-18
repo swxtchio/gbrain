@@ -20,13 +20,15 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { assessDefaultSourcePath } from '../src/core/default-source-path-check.ts';
 import { defaultSourceLocalPathCheck } from '../src/commands/doctor/checks/default-source-path.ts';
+import { buildChecks } from '../src/commands/doctor.ts';
+import { onlyNeedsEngine } from '../src/commands/doctor/registry.ts';
 
 // ---------------------------------------------------------------------------
 // Pure assessment helper
@@ -194,5 +196,128 @@ describe('defaultSourceLocalPathCheck (engine wiring)', () => {
     const check = await defaultSourceLocalPathCheck(engine);
     expect(check!.status).toBe('ok');
     expect(check!.message).toContain(d);
+  });
+
+  test('registered doctor entry reports every unusable active path beside a healthy default', async () => {
+    const defaultRoot = makeDir();
+    const healthyRoot = makeDir();
+    const missingParent = makeDir();
+    const missingPath = join(missingParent, 'missing-checkout');
+    const notDirectory = join(makeDir(), 'regular-file');
+    const archivedParent = makeDir();
+    const archivedPath = join(archivedParent, 'retired-checkout');
+    writeFileSync(notDirectory, 'controlled fixture');
+
+    await engine.setConfig('sync.repo_path', defaultRoot);
+    await engine.putPage('notes/default', { type: 'note', title: 'default', compiled_truth: 'body' });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
+      ['wiki', missingPath, false],
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
+      ['research', healthyRoot, false],
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
+      ['file-source', notDirectory, false],
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
+      ['empty-path', '', false],
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
+      ['retired', archivedPath, true],
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, NULL, '{}'::jsonb, $2)`,
+      ['db-only', false],
+    );
+
+    const checks = await buildChecks(engine, [
+      '--only',
+      'default_source_local_path,source_local_path_resolvable',
+      '--json',
+    ]);
+    const defaultCheck = checks.find((check) => check.name === 'default_source_local_path');
+    const sourcePathCheck = checks.find((check) => check.name === 'source_local_path_resolvable');
+
+    expect(defaultCheck?.status).toBe('ok');
+    expect(sourcePathCheck?.status).toBe('fail');
+    expect(sourcePathCheck?.message).toContain(`wiki (${missingPath})`);
+    expect(sourcePathCheck?.message).toContain('directory does not exist on this host');
+    expect(sourcePathCheck?.message).toContain('gbrain sources set-path wiki <path>');
+    expect(sourcePathCheck?.message).toContain(`file-source (${notDirectory})`);
+    expect(sourcePathCheck?.message).toContain('path is not a directory');
+    expect(sourcePathCheck?.message).toContain('gbrain sources set-path file-source <path>');
+    expect(sourcePathCheck?.message).toContain('empty-path ()');
+    expect(sourcePathCheck?.message).toContain('gbrain sources set-path empty-path <path>');
+    expect(sourcePathCheck?.message).not.toContain('retired');
+    expect(sourcePathCheck?.message).not.toContain('db-only');
+    expect(sourcePathCheck?.message).not.toContain('research');
+    expect(onlyNeedsEngine(new Set(['source_local_path_resolvable']))).toBe(true);
+  });
+
+  test('registered doctor entry assesses an explicit default local_path', async () => {
+    const missingParent = makeDir();
+    const missingPath = join(missingParent, 'missing-default-checkout');
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [missingPath]);
+
+    const checks = await buildChecks(engine, [
+      '--only',
+      'default_source_local_path,source_local_path_resolvable',
+      '--json',
+    ]);
+    const defaultCheck = checks.find((check) => check.name === 'default_source_local_path');
+    const sourcePathCheck = checks.find((check) => check.name === 'source_local_path_resolvable');
+
+    expect(defaultCheck?.status).toBe('ok');
+    expect(sourcePathCheck?.status).toBe('fail');
+    expect(sourcePathCheck?.message).toContain(`default (${missingPath})`);
+    expect(sourcePathCheck?.message).toContain('gbrain sources set-path default <path>');
+  });
+
+  test('registered doctor entry reports explicit readable directories as healthy', async () => {
+    const defaultRoot = makeDir();
+    const sourceRoot = makeDir();
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [defaultRoot]);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ($1, $1, $2, '{}'::jsonb, false)`,
+      ['wiki', sourceRoot],
+    );
+
+    const checks = await buildChecks(engine, ['--only', 'source_local_path_resolvable', '--json']);
+    const sourcePathCheck = checks.find((check) => check.name === 'source_local_path_resolvable');
+    expect(sourcePathCheck?.status).toBe('ok');
+    expect(sourcePathCheck?.message).toContain('readable directories');
+  });
+
+  test('registered doctor entry fails for an unreadable explicit directory', async () => {
+    const unreadable = makeDir();
+    chmodSync(unreadable, 0o000);
+    try {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config, archived)
+         VALUES ($1, $1, $2, '{}'::jsonb, false)`,
+        ['restricted', unreadable],
+      );
+
+      const checks = await buildChecks(engine, ['--only', 'source_local_path_resolvable', '--json']);
+      const sourcePathCheck = checks.find((check) => check.name === 'source_local_path_resolvable');
+      expect(sourcePathCheck?.status).toBe('fail');
+      expect(sourcePathCheck?.message).toContain(`restricted (${unreadable})`);
+      expect(sourcePathCheck?.message).toContain('not readable and traversable');
+      expect(sourcePathCheck?.message).toContain('gbrain sources set-path restricted <path>');
+    } finally {
+      chmodSync(unreadable, 0o700);
+    }
   });
 });

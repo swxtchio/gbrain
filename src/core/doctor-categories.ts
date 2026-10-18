@@ -382,6 +382,7 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'agent_contract',
   'cycle_phase_scope',
   'default_source_local_path',
+  'source_local_path_resolvable',
   'eval_capture',
   'retrieval_feedback_health',
   // #4613 — links_link_source_check CHECK shape: schema coherence healed by
