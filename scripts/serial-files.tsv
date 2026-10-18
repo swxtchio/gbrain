@@ -94,7 +94,7 @@ test/corpus-retention-uningested.serial.test.ts	R1	R1: mutates GBRAIN_HOME for i
 test/creds-vault.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/cross-modal-hybrid-integration.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway
 test/cycle-embed-phase-warn.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway; mock.module replaces the embed module
-test/cycle-job-retention.serial.test.ts	R1	R1: withEnv isolates the real purge's filesystem maintenance under a per-suite GBRAIN_HOME
+test/cycle-job-retention.serial.test.ts	global-state	global-state: withEnv holds GBRAIN_HOME while a purge cycle and isolated persistence cleanup await; concurrent files could route to the scratch brain
 test/cycle-lock-release-diagnostic.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/cycle-lock-steal.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_CYCLE_LOCK_REFRESH_MS)
 test/cycle-patterns-cadence.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts, ../src/core/cycle/synthesize.ts, ../src/core/minions/wait-for-completion.ts) replaces modules for every file in the process
@@ -250,6 +250,7 @@ test/jobs-embed-background-parity.serial.test.ts	R2	R2: mock.module(../src/core/
 test/jobs-embed-stall-wiring.serial.test.ts	R2	R2: mock.module(../src/commands/embed.ts) replaces modules for every file in the process
 test/jobs-gateway-refresh.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, ANTHROPIC_API_KEY, OPENAI_API_KEY)
 test/jobs-list-get-json.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
+test/jobs-prune-unknown-flag.serial.test.ts	global-state	global-state: patches process.exit, console.error, and console.log around runJobs; other files in the same Bun process must not observe those temporary handlers
 test/jobs-stats-backpressure.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/jobs-stats-divergence.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/jobs-stats-private-queue.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
@@ -394,6 +395,8 @@ test/sources-push-cli.serial.test.ts	R1	R1: mutates process.env (HOME, GBRAIN_HO
 test/spawn-seam-batch1-4992.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GIT_DIR) and spies on node:child_process
 test/stdio-stderr-redirect.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/subagent-put-page-rejection.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests; configureGateway changes the process-wide AI gateway; spyOn putPage.handler
+test/swx-reindex-gateway.serial.test.ts	global-state	global-state: replaces the process-wide embedding transport and configures the gateway during upgrade-reindex checks; concurrent files could observe the fake provider
+test/swx-shared-skills-relink.serial.test.ts	global-state	global-state: withEnv holds GBRAIN_HOME and database URL overrides across awaited shared-skill relinking; concurrent files could observe the scratch brain
 test/sync-convergence.serial.test.ts	global-state	global-state: binds local servers/ports (two latency proxies per scenario) and spawns serve/sync/put/call processes against each scenario's brain; its oracle tests read the chaos scenario their describe's beforeAll ran, across it() boundaries
 test/sync-cost-gate.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console
 test/sync-default-write-guard.serial.test.ts	global-state	global-state: spyOn console.error, console.log, process.exit

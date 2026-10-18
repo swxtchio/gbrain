@@ -254,6 +254,55 @@ describe('chunkCodeText — TypeScript', () => {
   });
 });
 
+describe('chunkCodeText — C and C++ SWX symbols', () => {
+  test('walks C header guards and preserves typedefs, declarations, functions, enums, unions, and macros', async () => {
+    const source = `#ifndef WIDGET_H
+#define WIDGET_H
+typedef struct Widget { int value; } Widget;
+typedef void (*Callback)(int);
+enum State { STATE_READY, STATE_DONE };
+union Value { int i; float f; };
+int parse_widget(Widget* widget);
+int parse_widget_impl(Widget* widget) { return widget->value; }
+#define WIDGET_FLAG 1
+#define WIDGET_SET(x) ((x) | WIDGET_FLAG)
+#endif
+`;
+    const chunks = await chunkCodeText(source, 'widget.h', { chunkSizeTokens: 40 });
+    const symbols = chunks.map(c => [c.metadata.symbolName, c.metadata.symbolType, c.metadata.language]);
+    expect(symbols).toEqual(expect.arrayContaining([
+      ['Widget', 'type definition', 'c'], ['Callback', 'type definition', 'c'],
+      ['State', 'enum', 'c'], ['Value', 'union specifier', 'c'],
+      ['parse_widget', 'declaration', 'c'], ['parse_widget_impl', 'function', 'c'],
+      ['WIDGET_FLAG', 'preproc def', 'c'], ['WIDGET_SET', 'function', 'c'],
+    ]));
+  });
+
+  test('walks C++ header guards, namespaces, templates, linkage blocks, and macros', async () => {
+    const source = `#ifndef API_HPP
+#define API_HPP
+namespace sample {
+template <typename T> T echo(T value) { return value; }
+template <typename T> class Box { T value; };
+}
+extern "C" {
+typedef int (*Callback)(int);
+int invoke(Callback callback);
+}
+#define API_FLAG 1
+#define API_SET(x) ((x) | API_FLAG)
+#endif
+`;
+    const chunks = await chunkCodeText(source, 'api.hpp', { chunkSizeTokens: 40 });
+    const symbols = chunks.map(c => [c.metadata.symbolName, c.metadata.symbolType, c.metadata.language]);
+    expect(symbols).toEqual(expect.arrayContaining([
+      ['echo', 'function', 'cpp'], ['Box', 'class', 'cpp'],
+      ['Callback', 'type definition', 'cpp'], ['invoke', 'declaration', 'cpp'],
+      ['API_FLAG', 'preproc def', 'cpp'], ['API_SET', 'function', 'cpp'],
+    ]));
+  });
+});
+
 describe('chunkCodeText — Python', () => {
   test('extracts class_definition + function_definition', async () => {
     const src = `class Animal:

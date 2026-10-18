@@ -326,6 +326,49 @@ fun fixtureKotlinHelper(input: String): String {
   });
 });
 
+describe('C and C++ code definitions', () => {
+  test('real file imports keep SWX typedef and union symbols searchable', async () => {
+    const cSource = `#ifndef WIDGET_H
+#define WIDGET_H
+typedef struct Widget { int value; } Widget;
+union Value { int i; float f; };
+int parse_widget(Widget* widget);
+int parse_widget_impl(Widget* widget) { return widget->value; }
+#define WIDGET_FLAG 1
+#define WIDGET_SET(x) ((x) | WIDGET_FLAG)
+#endif
+`;
+    const cppSource = `#ifndef API_HPP
+#define API_HPP
+namespace sample {
+template <typename T> T echo(T value) { return value; }
+template <typename T> class Box { T value; };
+}
+extern "C" {
+typedef int (*Callback)(int);
+int invoke(Callback callback);
+}
+#define API_FLAG 1
+#endif
+`;
+    await importCodeFile(engine, 'include/widget.h', cSource, { noEmbed: true });
+    await importCodeFile(engine, 'include/api.hpp', cppSource, { noEmbed: true });
+
+    const expected: Array<[string, string, string]> = [
+      ['Widget', 'type definition', 'c'], ['Value', 'union specifier', 'c'],
+      ['parse_widget', 'declaration', 'c'], ['parse_widget_impl', 'function', 'c'],
+      ['WIDGET_FLAG', 'preproc def', 'c'], ['WIDGET_SET', 'function', 'c'],
+      ['echo', 'function', 'cpp'], ['Box', 'class', 'cpp'],
+      ['Callback', 'type definition', 'cpp'], ['invoke', 'declaration', 'cpp'],
+      ['API_FLAG', 'preproc def', 'cpp'],
+    ];
+    for (const [symbol, symbolType, language] of expected) {
+      const rows = await findCodeDef(engine, symbol);
+      expect(rows.some(row => row.symbol_type === symbolType && row.language === language), symbol).toBe(true);
+    }
+  });
+});
+
 // #3789 aside — a count:0 that was FILTERED by the allowlist must not read as
 // a bare "ready, symbol does not exist". The probe surfaces the symbol types
 // that exist for the name but were excluded by DEF_TYPES.

@@ -1,20 +1,11 @@
 /**
- * #6803 (4): a checkout-less per-source cycle (a connector source: phases
- * extract, extract_facts, recompute_emotional_weight, no sync) reconciled
- * facts for EVERY slug in the brain on every cycle. With no sync phase the
- * phase got `slugs: undefined`, the full-walk mode, and the full walk read
- * `engine.getAllSlugs()` unscoped, so a connector source on a 290K-page brain
- * walked every other source's pages until the autopilot-cycle job died with
- * `aborted: timeout`. A connector cycle now reconciles only its own source,
- * through the bounded reconcile watermark drain.
- *
- * Real handler and cycle on every configured engine. The fixture
- * toggles the brain-wide persistence switch and process env.
+ * #6803: a checkout-less connector cycle bounds its source window and keeps Facts reconciliation scoped to that source. The test drives the real handler and cycle against the configured engine arms.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { makeAutopilotCycleHandler } from '../src/core/minions/handlers/autopilot-cycle.ts';
 import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
+import { selectFactsReconcileSlugs } from '../src/core/facts/reconcile-pages.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { createConnectorFixture, googleConfig } from './helpers/connector-fixture.ts';
@@ -25,6 +16,14 @@ beforeAll(fixture.setup, 120_000);
 afterAll(fixture.teardown);
 
 const OTHER_PAGES = 40;
+const factsFence = (claim: string) => `## Facts
+
+<!--- gbrain:facts:begin -->
+| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | ${claim} | fact | 1 | world | medium | 2024-01-01 | | notes | |
+<!--- gbrain:facts:end -->
+`;
 
 async function seed(engine: BrainEngine): Promise<{ connector: string; other: string }> {
   const connector = (await source(engine, googleConfig)).id;
@@ -78,11 +77,20 @@ describe('#6803 connector cycle extract_facts scope', () => {
     }
   }), 180_000);
 
-  test('a full walk for one source never visits another source\'s slugs', async () => withEnv(env, async () => {
+  test('a source-scoped Facts selection reconciles its own fence and ignores an other-source fence', async () => withEnv(env, async () => {
     for (const engine of engines) {
-      const { connector } = await seed(engine);
+      const { connector, other } = await seed(engine);
+      await engine.putPage('people/connector-facts', { title: 'Connector facts', type: 'person', compiled_truth: factsFence('Connector claim') }, { sourceId: connector });
+      await engine.putPage('people/other-facts', { title: 'Other facts', type: 'person', compiled_truth: factsFence('Other claim') }, { sourceId: other });
+      expect(await selectFactsReconcileSlugs(engine, connector)).toEqual(['people/connector-facts']);
       const result = await runExtractFacts(engine, { sourceId: connector, drain: {} });
       expect(result.pagesScanned).toBe(1);
+      expect(result.factsInserted).toBe(1);
+      const rows = await engine.executeRaw<{ source_id: string; slug: string; fact: string }>(
+        `SELECT source_id, source_markdown_slug AS slug, fact FROM facts
+          WHERE fact IN ('Connector claim', 'Other claim') ORDER BY source_id`,
+      );
+      expect(rows).toEqual([{ source_id: connector, slug: 'people/connector-facts', fact: 'Connector claim' }]);
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     }
   }), 180_000);

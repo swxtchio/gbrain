@@ -147,7 +147,7 @@ for (const backend of testBackends()) {
     expect(again.bodies).toEqual([]);
   }), 60_000);
 
-  test(`${backend}: marker-only, malformed, end-only and misplaced fences stay visible to reconciliation`, () => fixture(databaseUrl, async engine => {
+  test(`${backend}: marker-only, malformed, end-only and lone timeline fences stay visible to reconciliation`, () => fixture(databaseUrl, async engine => {
     await put(engine, 'people/markers', fence(row(1, 'Markers claim')).replace('## Facts\n\n', ''));
     await put(engine, 'people/broken', fence(row(1, 'Preserved claim')));
     await runExtractFacts(engine, { slugs: ['people/broken'] });
@@ -160,11 +160,14 @@ for (const backend of testBackends()) {
     expect(seen.bodies.map(([, slug]) => slug).sort()).toEqual(['people/broken', 'people/end-only', 'people/markers', 'people/misplaced']);
     expect(r.warnings).toContainEqual(expect.stringContaining('people/broken: FACTS_TABLE_MALFORMED'));
     expect(r.warnings).toContainEqual(expect.stringContaining('people/end-only: FACTS_FENCE_UNBALANCED'));
-    expect(r.warnings).toContainEqual(expect.stringContaining('people/misplaced: FACTS_FENCE_BELOW_SENTINEL'));
+    // #6686: a lone, valid timeline fence is the page's authoritative fence and reconciles in place.
+    expect(r.warnings.some(w => w.includes('people/misplaced: FACTS_FENCE_BELOW_SENTINEL'))).toBe(false);
     expect(r.factsDeleted).toBe(0);
-    expect(r.factsInserted).toBe(1);
-    expect((await state(engine)).filter(f => f.slug === 'people/broken')).toEqual(before);
-    expect((await state(engine)).find(f => f.fact === 'Markers claim')).toMatchObject({ expired: false });
+    expect(r.factsInserted).toBe(2);
+    const after = await state(engine);
+    expect(after.filter(f => f.slug === 'people/broken')).toEqual(before);
+    expect(after.find(f => f.fact === 'Markers claim')).toMatchObject({ expired: false });
+    expect(after.find(f => f.fact === 'Misplaced claim')).toMatchObject({ slug: 'people/misplaced', expired: false });
   }), 60_000);
 
   test(`${backend}: rewritten reconciled fences remain discoverable and retain unchanged fact identities`, () => fixture(databaseUrl, async engine => {
