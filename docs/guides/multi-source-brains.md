@@ -83,6 +83,16 @@ gbrain sources add gstack --path ~/.gstack --federated
 gbrain sources add sessions --path ~/.claude/sessions --no-federated
 ```
 
+## Set or rotate an existing source's remote
+
+Use `gbrain sources set-remote <id> <url>` when a source registered with `--path` needs a remote, or when its saved remote changes:
+
+```bash
+gbrain sources set-remote gstack https://example.com/acme-example/gstack.git
+```
+
+The command shows the previous value before writing and preserves the source's data, other config, and `local_path`. It uses the same HTTPS URL validation as `sources add --url`, including the explicit `GBRAIN_ALLOW_PRIVATE_REMOTES=1` opt-in for private Git hosts. Only the saved `config.remote_url` changes: the command does not pull, retarget the checkout's Git origin, or claim that GBrain owns the clone. Automatic pulling still follows the managed-writer restrictions and the global `autopilot.git_pull` setting. See `gbrain sources --help` for source-management commands.
+
 ## Resolution priority
 
 When any command needs to pick a source, gbrain walks this list (highest
