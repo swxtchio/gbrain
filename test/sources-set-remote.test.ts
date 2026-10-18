@@ -29,7 +29,7 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => { await engine.disconnect(); rmSync(scratch, { recursive: true, force: true }); });
 
-async function cli(args: string[], events: string[] = []) {
+async function cli(args: string[], events: string[] = []): Promise<{ out: string; err: string; exit: number | null }> {
   const out: string[] = [], err: string[] = [];
   let exit: number | null = null;
   const stopped = new Error('CLI exited');
