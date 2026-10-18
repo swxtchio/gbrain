@@ -233,6 +233,10 @@ src/core/facts/purge.ts	redactPageVersions	sql	SEGW	lane 1e: segmented versions 
 src/core/facts/purge.ts	rewritePageBodies	call:contentHash	META	inline pages only (see sql row)
 src/core/facts/purge.ts	rewritePageBodies	field	SEGW	segmented page: getter throws page_body_segmented
 src/core/facts/purge.ts	rewritePageBodies	sql	SEGW	refuses a segmented target with page_body_segmented before rewriting (segment purge in PR 2)
+src/core/facts/reconcile-pages.ts	readFactsReconcilePage	field	INLINE	segmented rows return before body fields enter overlayCanonicalBodies; inline-only overlay remains
+src/core/facts/reconcile-pages.ts	readFactsReconcilePage	sql	STREAM	preserves body identity; segmented body columns are NULL and the fence plan reads their marker segments
+src/core/facts/reconcile-pages.ts	sameFactsReconcileBody	field	INLINE	inline branch compares strings; segmented branch compares body identity only
+src/core/facts/reconcile-pages.ts	selectFactsReconcileSlugs	sql	STREAM	inline marker checks plus live segmented manifest slots/marker bytes discover candidate slugs before segment reads
 src/core/facts/reconcile-watermark.ts	readFactsReconcileBacklog	sql	STREAM	
 src/core/facts/reconcile-watermark.ts	selectFactsReconcileDrain	sql	STREAM	
 src/core/facts/relink-publish.ts	prepareRelinkMutation	call:serializePageToMarkdown	SEGW	

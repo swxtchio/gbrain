@@ -9,7 +9,7 @@
  *    end marker before it, an end marker quoted in code inside the fence (the
  *    fence then crosses a segment cut), a begin marker split by a forced cut
  *    (balanced and unbalanced), a fence over several segments and a row longer than a segment (a forced cut
- *    inside the fence), runExtractFacts gives the same counts, warnings
+ *    inside the fence), source discovery finds a segmented fence before its first facts row, and runExtractFacts gives the same counts, warnings
  *    and facts rows, from an empty index and from a drifted one (a changed
  *    cell, a rewritten claim, a row the fence no longer holds);
  *    segmentedFactsFenceView equals factsFenceView of the strings, reading
@@ -33,6 +33,7 @@ import { importFromContent } from '../../src/core/import-file.ts';
 import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
 import { runMaintenanceSweep } from '../../src/core/sweep.ts';
 import { factsFenceView, FACTS_FENCE_BEGIN, FACTS_FENCE_END } from '../../src/core/facts-fence.ts';
+import { readFactsReconcilePage, sameFactsReconcileBody } from '../../src/core/facts/reconcile-pages.ts';
 import { segmentedBodyMatchesFile, segmentedFactsFenceView } from '../../src/core/page-body/segment-facts.ts';
 import { materializedPage } from '../../src/core/persistence/segmented-apply.ts';
 import { parseMarkdown } from '../../src/core/markdown.ts';
@@ -146,6 +147,57 @@ describe('fence reconcile of a segmented page (full-pass mode)', () => {
     }
   }, 300_000);
 
+  test('source discovery reconciles a segmented Facts fence before any facts are indexed', async () => {
+    for (const engine of engines) {
+      const sourceId = `segmented-discovery-${engines.indexOf(engine)}`;
+      const slug = 'people/new-segmented-fence';
+      await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1)', [sourceId]);
+      await engine.setConfig('pages.segmented_storage', 'on');
+      expect(await importFromContent(engine, slug, page(VARIANTS.body!), { sourceId, noEmbed: true }))
+        .toMatchObject({ status: 'imported' });
+      const [storedPage] = await engine.executeRaw<{ body_storage: string }>(
+        'SELECT body_storage FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
+      expect(storedPage!.body_storage).toBe('segmented');
+      const [before] = await engine.executeRaw<{ n: number }>(
+        'SELECT count(*)::int AS n FROM facts WHERE source_id=$1 AND source_markdown_slug=$2', [sourceId, slug]);
+      expect(before!.n).toBe(0);
+
+      const result = await runExtractFacts(engine, { sourceId });
+      expect(result.factsInserted).toBe(4);
+      expect(result.factsDeleted).toBe(0);
+      const rows = await engine.executeRaw<{ row_num: number; fact: string; expired: boolean }>(
+        `SELECT row_num, fact, expired_at IS NOT NULL AS expired FROM facts
+          WHERE source_id=$1 AND source_markdown_slug=$2 ORDER BY row_num`, [sourceId, slug]);
+      const active = rows.filter(row => !row.expired).map(row => [Number(row.row_num), row.fact]);
+      expect(active).toEqual([[2, 'Works at Beta Example'], [3, 'Prefers short meetings'], [4, 'Plans to ship in May']]);
+    }
+  }, 300_000);
+
+  test('the narrow segmented reread retains the source body identity across a same-size replacement', async () => {
+    for (const engine of engines) {
+      const sourceId = `segmented-identity-${engines.indexOf(engine)}`;
+      const slug = 'people/replaced-segmented-fence';
+      await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1)', [sourceId]);
+      await engine.setConfig('pages.segmented_storage', 'on');
+      expect(await importFromContent(engine, slug, page(VARIANTS.body!), { sourceId, noEmbed: true }))
+        .toMatchObject({ status: 'imported' });
+
+      const planned = await readFactsReconcilePage(engine, sourceId, slug);
+      expect(planned).toMatchObject({ slug, source_id: sourceId, body_storage: 'segmented' });
+      const sameBody = await readFactsReconcilePage(engine, sourceId, slug);
+      expect(sameBody).not.toBeNull();
+      expect(sameFactsReconcileBody(sameBody!, planned!)).toBe(true);
+
+      const replacement = page(VARIANTS.body!.replace('Works at Beta Example', 'Works at Zeta Example'));
+      expect(await importFromContent(engine, slug, replacement, { sourceId, noEmbed: true }))
+        .toMatchObject({ status: 'imported' });
+      const current = await readFactsReconcilePage(engine, sourceId, slug);
+      expect(current).toMatchObject({ body_storage: 'segmented', body_bytes: planned!.body_bytes });
+      expect(current!.content_hash).not.toBe(planned!.content_hash);
+      expect(sameFactsReconcileBody(current!, planned!)).toBe(false);
+    }
+  }, 300_000);
+
   test('segmentedFactsFenceView equals factsFenceView of the strings, reading only marker segments', async () => {
     for (const engine of engines) {
       for (const variant of Object.keys(VARIANTS)) {
@@ -191,6 +243,12 @@ describe('fence reconcile of a segmented page (full-pass mode)', () => {
         if (variant === 'body') {
           expect(outcomes[0]).toMatchObject({ fresh: { inserted: 4 }, drifted: { updated: 1 } });
           expect((outcomes[0]!.afterDrift as unknown[]).length).toBeGreaterThan(4);
+          // drift() updates row 2, rewrites row 4's claim, and adds row 999, which is absent from the fence.
+          expect(outcomes[1]!.drifted).toMatchObject({ deleted: 2, inserted: 1, updated: 1 });
+          const reconciled = outcomes[1]!.afterDrift as Array<{ fact: string; expired: boolean }>;
+          for (const claim of ['Works at Beta Example', 'Prefers short meetings', 'Plans to ship in May']) {
+            expect(reconciled.find(row => row.fact === claim), claim).toMatchObject({ expired: false });
+          }
         }
         if (variant === 'unbalanced' || variant === 'split') expect((outcomes[0]!.fresh as { warnings: string[] }).warnings.length).toBeGreaterThan(0);
       }

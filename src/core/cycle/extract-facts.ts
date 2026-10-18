@@ -92,7 +92,7 @@ import { parseMarkdown } from '../markdown.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
 import { urlCloneReadOnly } from '../url-clone.ts';
 import { acquirePageLock } from '../page-lock.ts';
-import { readFactsReconcilePage, selectFactsReconcileSlugs } from '../facts/reconcile-pages.ts';
+import { readFactsReconcilePage, sameFactsReconcileBody, selectFactsReconcileSlugs } from '../facts/reconcile-pages.ts';
 import {
   lockReconcileRevision,
   selectFactsReconcileDrain,
@@ -208,7 +208,7 @@ async function syncSupersession(
 }
 
 /** The pages-table body a reconcile read: its strings, or a segmented page whose body stays in its segments. */
-type CachedBody = { id: number; body_storage?: Page['body_storage']; compiled_truth: string | null; timeline: string | null };
+type CachedBody = { id: number; body_storage?: Page['body_storage'] | null; compiled_truth: string | null; timeline: string | null };
 
 /** The body a reconcile planned from is still the stored one: the same strings, or the same segmented body (content hash and size). */
 function sameBody(current: Page, planned: Page): boolean {
@@ -361,7 +361,7 @@ async function listExistingFactsForPage(
 }
 
 /** The page a reconcile plans from: its body as strings, or a segmented page whose fences are read from its segments. */
-type PageFenceInput = { id?: number; slug?: string; source_id?: string; body_storage?: Page['body_storage']; compiled_truth: string | null; timeline: string | null;
+type PageFenceInput = { id?: number; slug?: string; source_id?: string; body_storage?: Page['body_storage'] | null; compiled_truth: string | null; timeline: string | null;
   effective_date?: Date | string | null };
 
 interface FenceReconcilePlan {
@@ -1014,7 +1014,7 @@ export async function runExtractFacts(
           opts.signal?.throwIfAborted();
           if (watermark && !await lockReconcileRevision(tx, sourceId, slug, page.knowledge_revision ?? null)) return null;
           const current = await readFactsReconcilePage(tx, sourceId, slug);
-          if (!current || current.compiled_truth !== page.compiled_truth || current.timeline !== page.timeline) return null;
+          if (!current || !sameFactsReconcileBody(current, page)) return null;
           const written = await writeFenceReconcile(tx, sourceId, slug, plan, writes, opts.signal);
           if (watermark && !deferInserts) await settleFactsReconcile(tx, sourceId, slug, 'complete', page.knowledge_revision ?? null);
           return written;
