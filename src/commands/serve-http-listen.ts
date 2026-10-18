@@ -25,7 +25,9 @@ export async function listenOrRefuse(app: HttpRequestHandler & { listen(port: nu
   });
   if (!failure) return server;
   try { server.close(); } catch { /* never listened */ }
-  throw opError('serve_port_in_use', `gbrain serve --http could not listen on ${bind}:${port}: ${failure.message}`,
+  const code = (failure as NodeJS.ErrnoException).code;
+  const detail = code ? `${code}: ${failure.message}` : failure.message;
+  throw opError('serve_port_in_use', `gbrain serve --http could not listen on ${bind}:${port}: ${detail}`,
     'Nothing was started and the brain is free again. Stop the process holding the port, or pass another --port (and point the harnesses at that URL).', {
       why: 'Another process (often an earlier gbrain serve --http) already listens on that address.',
       fix: {

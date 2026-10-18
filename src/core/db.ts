@@ -114,7 +114,7 @@ export function resolvePrepare(url: string): boolean | undefined {
 }
 
 /** Why a read-side pool got its `max_pipeline` (#6543); `/health?deep=1` reports it beside the live value. */
-export type ReadPoolPipelineReason = 'gbrain_max_pipeline' | 'gbrain_prepare_on' | 'url_max_pipeline' | 'env_pgmax_pipeline' | 'transaction_pooler_port' | 'url_prepare_false' | 'gbrain_prepare_off' | 'default';
+export type ReadPoolPipelineReason = 'gbrain_max_pipeline' | 'url_max_pipeline' | 'env_pgmax_pipeline' | 'transaction_pooler_port' | 'url_prepare_false' | 'gbrain_prepare_off' | 'default';
 
 /**
  * #6543: the `max_pipeline` a read-side pool (the module singleton, an engine's
@@ -138,7 +138,6 @@ export function resolveReadPoolPipeline(url: string): { value: number | null; re
   const params = new URLSearchParams(queryAt >= 0 ? beforeFragment.slice(queryAt + 1) : '');
   if (params.has('max_pipeline')) return { value: null, reason: 'url_max_pipeline' };
   if ((process.env.PGMAX_PIPELINE ?? '').trim() !== '') return { value: null, reason: 'env_pgmax_pipeline' };
-  if (process.env.GBRAIN_PREPARE === 'true' || process.env.GBRAIN_PREPARE === '1') return { value: null, reason: 'gbrain_prepare_on' };
   let port = '';
   try { port = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://')).port; } catch { /* unparseable: no port */ }
   if (AUTO_DETECT_PORTS.has(port)) return { value: 0, reason: 'transaction_pooler_port' };

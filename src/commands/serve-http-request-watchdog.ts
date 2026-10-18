@@ -1,7 +1,5 @@
 import { STALL_DEFAULT_GRACE_MS } from '../core/process-watchdog.ts';
-import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
-import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
-import { withBearerScopeHint } from './serve-http-oauth.ts';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 export const SERVE_MCP_REQUEST_TIMEOUT_ENV = 'GBRAIN_SERVE_MCP_REQUEST_TIMEOUT_MS';
 
@@ -140,31 +138,6 @@ export function createServeMcpRequestWatchdogLifecycle(
   };
 
   return { requestWatchdog, trackAuthorization, trackTransport, trackServerOperation };
-}
-
-/** Mount stateless MCP HTTP routes and return their per-request lifecycle tracker. */
-export function mountServeMcpRequestRoutes(
-  app: Express,
-  timeoutMs: number,
-  authOptions: Parameters<typeof requireBearerAuth>[0],
-  handlePost: (req: Request, res: Response) => Promise<void>,
-): ServeMcpRequestWatchdogLifecycle {
-  // Stateless Streamable HTTP has no GET backchannel, so return the protocol
-  // response that lets clients recognize this as an MCP endpoint.
-  app.get('/mcp', (_req: Request, res: Response) => {
-    res.set('Allow', 'POST, DELETE');
-    res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
-  });
-
-  const lifecycle = createServeMcpRequestWatchdogLifecycle(timeoutMs);
-  const authorization = withBearerScopeHint(requireBearerAuth(authOptions), ['read']);
-  app.post(
-    '/mcp',
-    lifecycle.requestWatchdog,
-    lifecycle.trackAuthorization(authorization),
-    lifecycle.trackTransport(handlePost),
-  );
-  return lifecycle;
 }
 
 /** Start a request deadline; the caller stops it after transport and handler work settle. */

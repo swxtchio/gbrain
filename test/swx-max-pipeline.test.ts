@@ -16,7 +16,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { resolveMaxPipeline } from '../src/core/db.ts';
+import { resolveMaxPipeline, resolvePrepare } from '../src/core/db.ts';
 import { ConnectionManager } from '../src/core/connection-manager.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -41,8 +41,9 @@ describe('resolveMaxPipeline', () => {
     expect(resolveMaxPipeline(`${DIRECT}?prepare=false`)).toBe(0);
   }));
 
-  test('GBRAIN_PREPARE=true on 6543 (session-mode pooler) keeps pipelining', () => env({ GBRAIN_PREPARE: 'true' }, () => {
-    expect(resolveMaxPipeline(POOLER)).toBeUndefined();
+  test('GBRAIN_PREPARE=true enables prepared statements without pipelining on a transaction-pooler URL', () => env({ GBRAIN_PREPARE: 'true' }, () => {
+    expect(resolvePrepare(POOLER)).toBe(true);
+    expect(resolveMaxPipeline(POOLER)).toBe(0);
   }));
 
   test('GBRAIN_MAX_PIPELINE overrides both ways', async () => {
