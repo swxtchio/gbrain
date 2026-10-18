@@ -523,8 +523,9 @@
     },
     {
       "handlers": [
-        "withBearerScopeHint(requireBearerAuth({ verifier : resourceVerifier , resourceMetadataUrl }), [ 'read' , 'write' ])",
-        "<inline>"
+        "watchdog.requestWatchdog",
+        "watchdog.trackAuthorization(withBearerScopeHint(requireBearerAuth({ verifier : resourceVerifier , resourceMetadataUrl }), [ 'read' , 'write' ]))",
+        "watchdog.trackTransport(<inline>)"
       ],
       "method": "post",
       "path": "/mcp",

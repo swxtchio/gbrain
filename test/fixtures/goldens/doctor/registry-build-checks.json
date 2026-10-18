@@ -1012,6 +1012,10 @@
       {
         "category": "brain",
         "name": "dangling_aliases"
+      },
+      {
+        "category": "ops",
+        "name": "onboard_checks"
       }
     ],
     "early_returns_after": [

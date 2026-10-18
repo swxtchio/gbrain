@@ -89,11 +89,31 @@ function run(rows: string[][]): Promise<CliResult[]> {
   return runCliBatch(rows, { home, env: { GBRAIN_REMOTE_CLIENT_SECRET: undefined }, timeoutMs: 60_000 });
 }
 
+function scrubBunFetchRefusalPrefix(text: string): string {
+  return text.replace(/OAuth discovery network error: ECONNREFUSED: (?=Unable to connect)/g, 'OAuth discovery network error: ');
+}
+
 function normalizerFor(rows: string[][]) {
   return defineNormalizer('cli-thin-client-v1', (results: CliResult[]) =>
-    rows.map((argv, i) => ({ argv: argv.join(' '), ...normalizeCliResult(results[i]!, home) })),
+    rows.map((argv, i) => {
+      const normalized = normalizeCliResult(results[i]!, home);
+      return {
+        argv: argv.join(' '),
+        ...normalized,
+        stdout: normalized.stdout.map(scrubBunFetchRefusalPrefix),
+        stderr: normalized.stderr.map(scrubBunFetchRefusalPrefix),
+      };
+    }),
   );
 }
+
+test('Bun fetch refusal normalization ignores its version-specific ECONNREFUSED prefix', () => {
+  const detail = 'Unable to connect to the url?';
+  const error = `OAuth discovery network error: ${detail}`;
+  expect(scrubBunFetchRefusalPrefix(`OAuth discovery network error: ECONNREFUSED: ${detail}`)).toBe(error);
+  expect(scrubBunFetchRefusalPrefix(error)).toBe(error);
+  expect(scrubBunFetchRefusalPrefix('ECONNREFUSED: an unrelated failure')).toBe('ECONNREFUSED: an unrelated failure');
+});
 
 describe('A16b thin-client refusal matrix', () => {
   let cases: CliResult[];

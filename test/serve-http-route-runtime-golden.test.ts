@@ -154,6 +154,8 @@ const normalizer = defineNormalizer('serve-http-routes-runtime-v1', (capture: Ru
 // AST identity (serve-http/routes.json) -> runtime handler base name. Shared
 // objects keep their identity through `#<ordinal>` (checked separately below).
 const AST_TO_RUNTIME: Array<[RegExp, string]> = [
+  [/^watchdog\.requestWatchdog$/, 'requestWatchdog'],
+  [/^watchdog\.track(?:Authorization|Transport)\(/, '<anonymous>'],
   [/^cookieParser\(\)$/, 'cookieParser'],
   [/^express\.json\(\)$/, 'jsonParser'],
   [/^express\.urlencoded\(/, 'urlencodedParser'],

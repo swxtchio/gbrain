@@ -657,6 +657,7 @@
         },
         {
           "handlers": [
+            "requestWatchdog",
             "<anonymous>",
             "<anonymous>"
           ],
@@ -1381,6 +1382,7 @@
         },
         {
           "handlers": [
+            "requestWatchdog",
             "<anonymous>",
             "<anonymous>"
           ],
