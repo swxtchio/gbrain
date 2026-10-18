@@ -1,5 +1,6 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import type { BrainEngine } from '../../../core/engine.ts';
+import { msysToNativePath } from '../../../core/path-confine.ts';
 import type { Check } from '../../doctor.ts';
 
 interface SourcePathRow {
@@ -23,7 +24,10 @@ function pathFailureReason(error: unknown): string {
   return `directory cannot be accessed on this host${code ? ` (${code})` : ''}`;
 }
 
-export async function sourceLocalPathCheck(engine: BrainEngine): Promise<Check> {
+export async function sourceLocalPathCheck(
+  engine: BrainEngine,
+  options: { platform?: NodeJS.Platform } = {},
+): Promise<Check> {
   let sources: SourcePathRow[];
   try {
     sources = await engine.executeRaw<SourcePathRow>(
@@ -37,16 +41,17 @@ export async function sourceLocalPathCheck(engine: BrainEngine): Promise<Check> 
     };
   }
 
-  const configured = sources.filter((source) => source.local_path !== null);
+  const configured = sources.filter((source) => source.local_path);
   const failures: SourcePathFailure[] = [];
   for (const source of configured) {
     const path = source.local_path!;
     try {
-      if (!statSync(path).isDirectory()) {
+      const filesystemPath = msysToNativePath(path, options.platform);
+      if (!statSync(filesystemPath).isDirectory()) {
         failures.push({ id: source.id, path, reason: 'path is not a directory' });
         continue;
       }
-      accessSync(path, constants.R_OK | constants.X_OK);
+      accessSync(filesystemPath, constants.R_OK | constants.X_OK);
     } catch (error) {
       failures.push({ id: source.id, path, reason: pathFailureReason(error) });
     }

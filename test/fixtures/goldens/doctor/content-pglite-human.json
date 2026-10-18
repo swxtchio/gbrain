@@ -46,6 +46,7 @@
       "  [OK] progressive_batch_audit_health: No progressive-batch operations in the last 7 days",
       "  [OK] conversation_parser_probe_health: disabled (opt-in; default-on only for search.mode=tokenmax). Enable with: `gbrain config set autopilot.conversation_parser_probe.enabled true`",
       "  [OK] home_dir_in_worktree: gbrain home is outside any enclosing git worktree.",
+      "  [OK] source_local_path_resolvable: All 2 active source local_path value(s) are readable directories.",
       "  [OK] default_source_local_path: default source local_path is set: <home>/.gbrain/content/<uuid>/default",
       "  [OK] multi_source_drift: No cross-source slug drift detected.",
       "  [OK] embedding_key_source: No embedding key is set here (VOYAGE_API_KEY or voyage_api_key). No environment variable overrides a different config-plane provider key. This check sees only the environment `gbrain doctor` runs in; a daemon (gbrain serve, autopilot) has its own, and reports a mismatch in its log with a startup warning or embedding_auth_failed.",

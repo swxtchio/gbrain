@@ -195,6 +195,10 @@
       },
       {
         "category": "meta",
+        "name": "source_local_path_resolvable"
+      },
+      {
+        "category": "meta",
         "name": "default_source_local_path"
       },
       {

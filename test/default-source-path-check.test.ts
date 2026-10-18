@@ -20,13 +20,15 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { assessDefaultSourcePath } from '../src/core/default-source-path-check.ts';
 import { defaultSourceLocalPathCheck } from '../src/commands/doctor/checks/default-source-path.ts';
+import { sourceLocalPathCheck } from '../src/commands/doctor/checks/source-local-path.ts';
 import { buildChecks } from '../src/commands/doctor.ts';
 import { onlyNeedsEngine } from '../src/commands/doctor/registry.ts';
 
@@ -228,11 +230,6 @@ describe('defaultSourceLocalPathCheck (engine wiring)', () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, local_path, config, archived)
        VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
-      ['empty-path', '', false],
-    );
-    await engine.executeRaw(
-      `INSERT INTO sources (id, name, local_path, config, archived)
-       VALUES ($1, $1, $2, '{}'::jsonb, $3)`,
       ['retired', archivedPath, true],
     );
     await engine.executeRaw(
@@ -257,12 +254,28 @@ describe('defaultSourceLocalPathCheck (engine wiring)', () => {
     expect(sourcePathCheck?.message).toContain(`file-source (${notDirectory})`);
     expect(sourcePathCheck?.message).toContain('path is not a directory');
     expect(sourcePathCheck?.message).toContain('gbrain sources set-path file-source <path>');
-    expect(sourcePathCheck?.message).toContain('empty-path ()');
-    expect(sourcePathCheck?.message).toContain('gbrain sources set-path empty-path <path>');
     expect(sourcePathCheck?.message).not.toContain('retired');
     expect(sourcePathCheck?.message).not.toContain('db-only');
     expect(sourcePathCheck?.message).not.toContain('research');
     expect(onlyNeedsEngine(new Set(['source_local_path_resolvable']))).toBe(true);
+  });
+
+  test('registered doctor entry treats an empty local_path as absent', async () => {
+    const repo = makeDir();
+    await engine.executeRaw(`UPDATE sources SET local_path = '' WHERE id = 'default'`);
+    await engine.setConfig('sync.repo_path', repo);
+    await engine.putPage('notes/default-empty-path', { type: 'note', title: 'default', compiled_truth: 'body' });
+
+    const checks = await buildChecks(engine, [
+      '--only',
+      'default_source_local_path,source_local_path_resolvable',
+      '--json',
+    ]);
+    const defaultCheck = checks.find((check) => check.name === 'default_source_local_path');
+    const sourcePathCheck = checks.find((check) => check.name === 'source_local_path_resolvable');
+    expect(defaultCheck?.status).toBe('ok');
+    expect(sourcePathCheck?.status).toBe('ok');
+    expect(sourcePathCheck?.message).toContain('No active source has an explicit local_path');
   });
 
   test('registered doctor entry assesses an explicit default local_path', async () => {
@@ -300,7 +313,37 @@ describe('defaultSourceLocalPathCheck (engine wiring)', () => {
     expect(sourcePathCheck?.message).toContain('readable directories');
   });
 
-  test('registered doctor entry fails for an unreadable explicit directory', async () => {
+  test('source path check normalizes an MSYS local_path before filesystem access', async () => {
+    const id = `msys-${randomUUID()}`;
+    let nativePath: string;
+    let storedPath: string;
+    if (process.platform === 'win32') {
+      nativePath = join(tmpdir(), id);
+      const root = parse(nativePath).root;
+      const drive = root.slice(0, 1).toLowerCase();
+      storedPath = `/${drive}/${nativePath.slice(root.length).replaceAll('\\', '/')}`;
+    } else {
+      const leaf = `${id}-checkout`;
+      nativePath = `C:\\${leaf}`;
+      storedPath = `/c/${leaf}`;
+    }
+    mkdirSync(nativePath, { recursive: true });
+    try {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config, archived)
+         VALUES ($1, $1, $2, '{}'::jsonb, false)`,
+        [id, storedPath],
+      );
+
+      const check = await sourceLocalPathCheck(engine, { platform: 'win32' });
+      expect(check.status).toBe('ok');
+      expect(check.message).toContain('readable directories');
+    } finally {
+      rmSync(nativePath, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('registered doctor entry fails for an unreadable explicit directory', async () => {
     const unreadable = makeDir();
     chmodSync(unreadable, 0o000);
     try {
