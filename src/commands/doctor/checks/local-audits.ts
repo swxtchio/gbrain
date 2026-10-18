@@ -20,6 +20,7 @@ import {
   computeAtomProvenanceDriftCheck,
 } from './extraction-sync.ts';
 import { buildHomeDirInWorktreeCheck } from './home-worktree.ts';
+import { sourceLocalPathCheck } from './source-local-path.ts';
 import {
   computeNightlyQualityProbeHealthCheck,
   computeConversationFactsBacklogCheck,
@@ -500,6 +501,8 @@ async function runDefaultSourcePath(ctx: DoctorContext): Promise<Check[]> {
   const { engine } = ctx;
   const checks: Check[] = [];
 
+  if (engine !== null) checks.push(await sourceLocalPathCheck(engine));
+
   // 3a-bis. default_source_local_path (#4739, narrowed). A null
   // default.local_path is the DESIGNED fallback topology (pages nest under
   // sync.repo_path), so this only warns when that fallback demonstrably
@@ -603,7 +606,7 @@ async function runDefaultSourcePath(ctx: DoctorContext): Promise<Check[]> {
 
 export const defaultSourcePathEntry: DoctorEntry = {
   name: 'default_source_local_path',
-  emits: ['default_source_local_path', 'fts_reindex_incomplete', 'multi_source_drift', 'orphan_clones'],
-  engineChecks: ['default_source_local_path', 'fts_reindex_incomplete', 'multi_source_drift'],
+  emits: ['source_local_path_resolvable', 'default_source_local_path', 'fts_reindex_incomplete', 'multi_source_drift', 'orphan_clones'],
+  engineChecks: ['source_local_path_resolvable', 'default_source_local_path', 'fts_reindex_incomplete', 'multi_source_drift'],
   run: runDefaultSourcePath,
 };

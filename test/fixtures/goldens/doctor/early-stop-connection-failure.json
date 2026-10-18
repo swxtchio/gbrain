@@ -283,6 +283,12 @@
       "status": "ok"
     },
     {
+      "elapsed_ms": "<volatile>",
+      "message": "No active source has an explicit local_path; no source-directory repair is needed.",
+      "name": "source_local_path_resolvable",
+      "status": "ok"
+    },
+    {
       "details": {
         "docs": "docs/guides/repair.md#embedding-key-source",
         "embedding_key": {

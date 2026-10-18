@@ -385,6 +385,13 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
+            "message": "All 3 active source local_path value(s) are readable directories.",
+            "name": "source_local_path_resolvable",
+            "status": "ok"
+          },
+          {
+            "category": "meta",
+            "elapsed_ms": "<volatile>",
             "message": "default source local_path is set: <home>/.gbrain/content/<uuid>/default",
             "name": "default_source_local_path",
             "status": "ok"
@@ -4658,6 +4665,13 @@
             "elapsed_ms": "<volatile>",
             "message": "gbrain home is outside any enclosing git worktree.",
             "name": "home_dir_in_worktree",
+            "status": "ok"
+          },
+          {
+            "category": "meta",
+            "elapsed_ms": "<volatile>",
+            "message": "All 3 active source local_path value(s) are readable directories.",
+            "name": "source_local_path_resolvable",
             "status": "ok"
           },
           {
