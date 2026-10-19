@@ -67,6 +67,7 @@ describe('routes, identity and redaction', () => {
     expect(targetIdentity('postgres://bob:x@db.example.com/brain').id).not.toBe(a.id);
     expect(targetIdentity('postgres://alice@db.example.com').database).toBe('alice');
     expect(targetIdentity('postgres://alice@db.example.com/brain?database=other').id).not.toBe(a.id);
+    expect(targetIdentity('postgres://alice@db.example.com/brain?Search_Path=other,public').id).not.toBe(a.id);
 
     const reordered = targetIdentity('postgres://alice@db.example.com/brain?database=brain&application_name=gbrain&connect_timeout=5');
     const duplicated = targetIdentity('postgres://alice@db.example.com/brain?connect_timeout=5&application_name=gbrain&database=brain&application_name=gbrain');

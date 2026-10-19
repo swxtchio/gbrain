@@ -422,4 +422,107 @@ __setEmbedTransportForTests(async ({ model, values }) => {
       await Promise.all([fileTarget.close(), otherTarget.close()]);
     }
   }, 240_000);
+
+  test('mixed-case search_path override refuses pinning and sync preserves populated vectors', async () => {
+    const engine = database!.engine as PostgresEngine;
+    const fileConfig = { engine: 'postgres', database_url: database!.databaseUrl } as const;
+    const shadowSchema = 'gbrain12_search_path_shadow';
+    const envTarget = new URL(database!.databaseUrl);
+    envTarget.searchParams.set('Search_Path', `public,${shadowSchema}`);
+    const overrideUrl = envTarget.toString();
+
+    await engine.connect({ database_url: database!.databaseUrl });
+    await engine.executeRaw(`CREATE SCHEMA IF NOT EXISTS ${shadowSchema}`);
+    const priorVectors = await engine.executeRaw<{ model: string; embedding: string }>(
+      `SELECT cc.model, cc.embedding::text AS embedding
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+    );
+    const priorSignature = await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    );
+    const priorWidth = await readContentChunksEmbeddingDim(engine);
+    expect(priorVectors.length).toBeGreaterThan(0);
+    expect(priorSignature).toEqual([{ embedding_signature: SIGNATURE }]);
+    expect(priorWidth).toMatchObject({ exists: true, dims: DIMS });
+    expect(await engine.getConfig('embedding_model')).toBe(MODEL);
+    await engine.disconnect();
+
+    const pathProbe = new PostgresEngine();
+    await pathProbe.connect({ database_url: overrideUrl, poolSize: 1 });
+    try {
+      const [row] = await pathProbe.executeRaw<{ search_path: string }>('SHOW search_path');
+      expect(row?.search_path.replace(/\s/g, '')).toBe(`public,${shadowSchema}`);
+    } finally {
+      await pathProbe.disconnect();
+    }
+
+    writeFileSync(configPath!, JSON.stringify(fileConfig));
+    const refused = runGbrain(['config', 'set', 'embedding_model', MODEL], {
+      GBRAIN_DATABASE_URL: overrideUrl,
+      GBRAIN_DIRECT_DATABASE_URL: overrideUrl,
+      OPENAI_API_KEY: 'synthetic-openai-key',
+    });
+    expect(refused.error).toBeUndefined();
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('GBRAIN_DATABASE_URL');
+    expect(refused.stderr).toContain('recovered identity cannot be pinned');
+    expect(refused.stderr).not.toContain('To pin this identity');
+    expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+
+    const afterRefusal = new PostgresEngine();
+    await afterRefusal.connect({ database_url: database!.databaseUrl, poolSize: 1 });
+    try {
+      expect(await afterRefusal.executeRaw<{ model: string; embedding: string }>(
+        `SELECT cc.model, cc.embedding::text AS embedding
+           FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+      )).toEqual(priorVectors);
+      expect(await afterRefusal.executeRaw<{ embedding_signature: string | null }>(
+        `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+      )).toEqual(priorSignature);
+      expect(await readContentChunksEmbeddingDim(afterRefusal)).toMatchObject({ exists: true, dims: DIMS });
+      expect(await afterRefusal.getConfig('embedding_model')).toBe(MODEL);
+      expect(await afterRefusal.getConfig('embedding_dimensions')).toBe(String(DIMS));
+    } finally {
+      await afterRefusal.disconnect();
+    }
+
+    writeFileSync(capturePath!, '');
+    addCommittedNote('search-path-mixed-case');
+    const synced = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json'], {
+      GBRAIN_DATABASE_URL: overrideUrl,
+      GBRAIN_DIRECT_DATABASE_URL: overrideUrl,
+      OPENAI_API_KEY: 'synthetic-openai-key',
+    });
+    expect(synced.error).toBeUndefined();
+    expect(synced.status, `${synced.stderr}\n${synced.stdout}`).toBe(0);
+    expect(capturedEmbeds()).toContainEqual({ provider: 'openai.embedding', modelId: 'text-embedding-3-large' });
+
+    const afterSync = new PostgresEngine();
+    await afterSync.connect({ database_url: database!.databaseUrl, poolSize: 1 });
+    try {
+      expect(await afterSync.executeRaw<{ model: string; embedding: string }>(
+        `SELECT cc.model, cc.embedding::text AS embedding
+           FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+      )).toEqual(priorVectors);
+      expect(await afterSync.executeRaw<{ embedding_signature: string | null }>(
+        `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+      )).toEqual(priorSignature);
+      const syncedVectors = await afterSync.executeRaw<{ model: string; dimensions: number; signature: string | null }>(
+        `SELECT cc.model, vector_dims(cc.embedding)::int AS dimensions, p.embedding_signature AS signature
+           FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = 'search-path-mixed-case' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+      );
+      expect(syncedVectors.length).toBeGreaterThan(0);
+      expect(syncedVectors.every((row) => row.model === MODEL && row.dimensions === DIMS && row.signature === SIGNATURE)).toBe(true);
+      expect(await readContentChunksEmbeddingDim(afterSync)).toMatchObject({ exists: true, dims: DIMS });
+      expect(await afterSync.getConfig('embedding_model')).toBe(MODEL);
+      expect(await afterSync.getConfig('embedding_dimensions')).toBe(String(DIMS));
+    } finally {
+      await afterSync.disconnect();
+    }
+    expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+  }, 240_000);
 });

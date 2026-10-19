@@ -50,7 +50,8 @@ const TARGET_QUERY_PARAMS = new Set([
 
 function targetQueryParams(url: URL, base: { host: string; port: number; database: string; user: string }): Array<[string, string]> {
   const effective = new Map<string, string>();
-  for (const [key, value] of url.searchParams) {
+  for (const [rawKey, value] of url.searchParams) {
+    const key = rawKey.toLowerCase();
     if (!TARGET_QUERY_PARAMS.has(key)) continue;
     if (key === 'target_session_attrs') {
       if (!value) continue;

@@ -1638,7 +1638,7 @@ async function emptyBrainEmbeddingEnablement(
 }
 
 async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model' | 'embedding_dimensions', value: string): Promise<boolean> {
-  const { loadConfig, loadConfigFileOnly, gbrainPath } = await import('../core/config.ts');
+  const { loadConfig, loadConfigFileOnly, getDbUrlSource, gbrainPath } = await import('../core/config.ts');
   const { resolveRecipe } = await import('../core/ai/model-resolver.ts');
   const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
   const { shellQuote } = await import('../core/agent-output.ts');
@@ -1656,9 +1656,16 @@ async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model'
   const emptyBrain = identity.state === 'disabled'
     || (identity.state === 'unverified' && identity.reasonCode === 'missing_model');
   let fileTargetMismatch = false;
-  if (emptyBrain && fileConfig) {
+  let fileTargetMismatchEnv: 'GBRAIN_DATABASE_URL' | 'DATABASE_URL' | null = null;
+  if (fileConfig && await hostBrainSelected()) {
     const persisted = loadConfigFileOnly();
     fileTargetMismatch = persisted !== null && !(await effectiveDatastoreMatchesFile(engine, fileConfig, persisted));
+    if (fileTargetMismatch) {
+      const source = getDbUrlSource();
+      fileTargetMismatchEnv = source === 'env:GBRAIN_DATABASE_URL' ? 'GBRAIN_DATABASE_URL'
+        : source === 'env:DATABASE_URL' ? 'DATABASE_URL'
+          : null;
+    }
   }
   const enablement = !current && emptyBrain && !fileTargetMismatch
     ? await emptyBrainEmbeddingEnablement(engine, fileConfig, key, value)
@@ -1704,21 +1711,23 @@ async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model'
   } else {
     console.error(`[config] Effective identity is unverified: ${identity.reason}`);
   }
-  if (fileTargetMismatch) {
-    console.error(`[config] Effective datastore differs from ${configPath}; no file-plane identity was written.`);
+  if (fileTargetMismatch && identity.state !== 'recovered') {
+    console.error(`[config] Effective datastore differs from ${configPath}${fileTargetMismatchEnv ? ` (${fileTargetMismatchEnv} override)` : ''}; no file-plane identity was written.`);
   }
 
   if (current) {
     const requestedMatches = key === 'embedding_model'
       ? sameModel(value, current.model)
       : Number(value) === current.dimensions;
-    if (requestedMatches && identity.state === 'recovered' && identity.dimensions !== undefined) {
+    if (requestedMatches && identity.state === 'recovered' && identity.dimensions !== undefined && fileTargetMismatch) {
+      console.error(`[config] ${fileTargetMismatchEnv ?? 'The effective datastore'} selects a different target from ${configPath}; the recovered identity cannot be pinned there.`);
+    } else if (requestedMatches && identity.state === 'recovered' && identity.dimensions !== undefined) {
       const pin = { embedding_model: identity.model, embedding_dimensions: identity.dimensions };
       console.error(`[config] To pin this identity in ${configPath}, add: ${JSON.stringify(pin)}`);
       console.error('[config] Verify with: gbrain config get embedding_model and gbrain config get embedding_dimensions.');
-    } else if (requestedMatches) {
+    } else if (requestedMatches && identity.state === 'configured') {
       console.error('[config] This identity is already selected by file/environment; no DB-plane write is needed.');
-    } else {
+    } else if (!requestedMatches) {
       const targetModel = key === 'embedding_model' ? value.trim() : current.model;
       const targetDimensions = key === 'embedding_dimensions' ? Number(value) : current.dimensions;
       if ((targetModel.includes(':') || targetModel.includes('/')) && Number.isSafeInteger(targetDimensions) && targetDimensions! > 0) {
