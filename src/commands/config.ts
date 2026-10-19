@@ -1553,10 +1553,15 @@ async function emptyBrainEmbeddingEnablement(
 ): Promise<{ argv?: string[]; why?: string; inputs?: Array<{ name: string; how: string }> } | null> {
   try {
     const { readPrimaryEmbeddingStores, readStoredEmbeddingIdentity } = await import('../core/stored-embedding-identity.ts');
+    const { resolveActiveEmbeddingColumnFromEngine } = await import('../core/search/embedding-column.ts');
     const tables = await readPrimaryEmbeddingStores(engine);
+    let activeChunkColumn: string | undefined;
     for (const table of tables) {
+      const embeddingColumn = table === 'content_chunks'
+        ? (activeChunkColumn ??= (await resolveActiveEmbeddingColumnFromEngine(engine)).name)
+        : 'embedding';
       const [row] = await engine.executeRaw<{ present: boolean }>(
-        `SELECT EXISTS (SELECT 1 FROM ${quoteIdentifier(table)} WHERE embedding IS NOT NULL) AS present`,
+        `SELECT EXISTS (SELECT 1 FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(embeddingColumn)} IS NOT NULL) AS present`,
       );
       if (row?.present) return null;
     }

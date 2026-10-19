@@ -12,9 +12,11 @@
  * isolated GBRAIN_HOME, no provider keys).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { withManagedFixtureWrite } from './helpers/managed-e2e-fixture-write.ts';
 
 const CLI = join(import.meta.dir, '../src/cli.ts');
 
@@ -116,4 +118,56 @@ describe('embedding_disabled and schema_pack config planes', () => {
     expect(get.stderr).toContain('db plane');
     expect((await cli(['config', 'show'])).stdout).toContain('schema_pack: gbrain-creator');
   }, 60_000);
+
+  test('registry-active chunks prevent empty-brain enablement advice', async () => {
+    const dbPath = join(home, '.gbrain', 'brain.pglite');
+    writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', database_path: dbPath, embedding_disabled: true }));
+    const engine = new PGLiteEngine();
+    await engine.connect({ database_path: dbPath });
+    try {
+      await engine.setConfig('embedding_disabled', 'true');
+      await engine.unsetConfig('embedding_model');
+      await engine.unsetConfig('embedding_dimensions');
+      await engine.executeRaw('ALTER TABLE content_chunks ADD COLUMN embedding_review_active vector(1536)');
+      await engine.setConfig('embedding_columns', JSON.stringify({
+        embedding_review_active: { provider: 'openai:text-embedding-3-large', dimensions: 1536, type: 'vector' },
+      }));
+      await engine.setConfig('search_embedding_column', 'embedding_review_active');
+      await withManagedFixtureWrite(engine, ['default'], async tx => {
+        await tx.putPage('notes/registry-active', { type: 'note', title: 'Registry active fixture', compiled_truth: 'Synthetic retained vector.' });
+        await tx.executeRaw(
+          `INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, model, embedding_review_active)
+           SELECT id, 0, 'Synthetic retained vector.', 'compiled_truth', 'openai:text-embedding-3-large',
+                  array_fill(0.1::real, ARRAY[1536])::vector
+             FROM pages WHERE slug = 'notes/registry-active' AND source_id = 'default'`,
+        );
+      });
+      expect(await engine.executeRaw<{ legacy_empty: boolean; active_present: boolean }>(
+        `SELECT embedding IS NULL AS legacy_empty, embedding_review_active IS NOT NULL AS active_present
+           FROM content_chunks WHERE page_id = (SELECT id FROM pages WHERE slug = 'notes/registry-active' AND source_id = 'default')`,
+      )).toEqual([{ legacy_empty: true, active_present: true }]);
+    } finally {
+      await engine.disconnect();
+    }
+
+    const refused = await cli(['config', 'set', 'embedding_model', 'openai:text-embedding-3-large']);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('Embeddings are disabled by choice');
+    expect(refused.stderr).toContain('Read-only next step: gbrain migrate embeddings --status --json');
+    expect(refused.stderr).not.toContain('This brain has no stored vectors');
+    expect(refused.stderr).not.toContain('gbrain init --force');
+
+    const verify = new PGLiteEngine();
+    await verify.connect({ database_path: dbPath });
+    try {
+      expect(await verify.getConfig('embedding_disabled')).toBe('true');
+      expect(await verify.getConfig('embedding_model')).toBeNull();
+      expect(await verify.executeRaw<{ active_present: boolean }>(
+        `SELECT embedding_review_active IS NOT NULL AS active_present FROM content_chunks
+          WHERE page_id = (SELECT id FROM pages WHERE slug = 'notes/registry-active' AND source_id = 'default')`,
+      )).toEqual([{ active_present: true }]);
+    } finally {
+      await verify.disconnect();
+    }
+  }, 120_000);
 });
