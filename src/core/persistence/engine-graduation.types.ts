@@ -122,7 +122,7 @@ export interface Inventory {
 }
 
 export interface TargetIdentity {
-  /** sha256 over [host, port, database, user]; never the password. */
+  /** Stable target identity for comparison and resume; credentials are excluded. */
   id: string;
   host: string;
   port: number;

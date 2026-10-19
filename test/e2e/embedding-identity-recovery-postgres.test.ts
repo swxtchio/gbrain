@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import type { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { addSource } from '../../src/core/sources-ops.ts';
 import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../../src/core/ai/build-gateway-config.ts';
@@ -358,6 +358,28 @@ __setEmbedTransportForTests(async ({ model, values }) => {
         embedding_dimensions: 1536,
       });
 
+      const fileWithInnocuousParams = new URL(fileTarget.databaseUrl);
+      fileWithInnocuousParams.searchParams.set('application_name', 'gbrain-12-target-test');
+      fileWithInnocuousParams.searchParams.set('connect_timeout', '5');
+      const reorderedParams = new URL(fileTarget.databaseUrl);
+      reorderedParams.searchParams.set('connect_timeout', '5');
+      reorderedParams.searchParams.append('application_name', 'gbrain-12-target-test');
+      reorderedParams.searchParams.append('application_name', 'gbrain-12-target-test');
+      const equivalentFileConfig = { ...fileConfig, database_url: fileWithInnocuousParams.toString() };
+      writeFileSync(configPath!, JSON.stringify(equivalentFileConfig));
+      const equivalent = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: reorderedParams.toString(),
+        GBRAIN_DIRECT_DATABASE_URL: reorderedParams.toString(),
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(equivalent.error).toBeUndefined();
+      expect(equivalent.status, `${equivalent.stderr}\n${equivalent.stdout}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toMatchObject({
+        ...equivalentFileConfig,
+        embedding_model: requestedModel,
+        embedding_dimensions: 1536,
+      });
+
       // The CLI must not pin an identity to the file brain when it is connected elsewhere.
       writeFileSync(configPath!, JSON.stringify(fileConfig));
       const mismatching = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
@@ -369,6 +391,30 @@ __setEmbedTransportForTests(async ({ model, values }) => {
       expect(mismatching.status, `${mismatching.stderr}\n${mismatching.stdout}`).toBe(1);
       expect(mismatching.stderr).toContain('[config] Effective datastore differs from ');
       expect(mismatching.stderr).toContain('no file-plane identity was written.');
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+      expect(await fileTarget.engine.getConfig('embedding_model')).toBeNull();
+      expect(await otherTarget.engine.getConfig('embedding_model')).toBeNull();
+
+      const querySelectedTarget = new URL(fileTarget.databaseUrl);
+      const otherDatabaseName = new URL(otherTarget.databaseUrl).pathname.slice(1);
+      querySelectedTarget.searchParams.set('database', otherDatabaseName);
+      const querySelectedEngine = new PostgresEngine();
+      await querySelectedEngine.connect({ database_url: querySelectedTarget.toString(), poolSize: 1 });
+      try {
+        expect(await querySelectedEngine.executeRaw<{ name: string }>('SELECT current_database() AS name'))
+          .toEqual([{ name: otherDatabaseName }]);
+      } finally {
+        await querySelectedEngine.disconnect();
+      }
+      const queryMismatch = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: querySelectedTarget.toString(),
+        GBRAIN_DIRECT_DATABASE_URL: querySelectedTarget.toString(),
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(queryMismatch.error).toBeUndefined();
+      expect(queryMismatch.status, `${queryMismatch.stderr}\n${queryMismatch.stdout}`).toBe(1);
+      expect(queryMismatch.stderr).toContain('[config] Effective datastore differs from ');
+      expect(queryMismatch.stderr).toContain('no file-plane identity was written.');
       expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
       expect(await fileTarget.engine.getConfig('embedding_model')).toBeNull();
       expect(await otherTarget.engine.getConfig('embedding_model')).toBeNull();

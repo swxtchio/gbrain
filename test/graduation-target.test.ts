@@ -57,7 +57,7 @@ describe('routes, identity and redaction', () => {
     expect(JSON.stringify(mysql)).not.toContain(SECRET);
   });
 
-  test('the identity hashes host, port, database and user, never the password', () => {
+  test('identity follows the effective connection target without hashing passwords', () => {
     const a = targetIdentity(`postgres://alice:${SECRET}@DB.example.com/brain`);
     const b = targetIdentity('postgres://alice:rotated@db.example.com:5432/brain');
     expect(a).toEqual(b);
@@ -66,6 +66,13 @@ describe('routes, identity and redaction', () => {
     expect(targetIdentity('postgres://alice:x@db.example.com/other').id).not.toBe(a.id);
     expect(targetIdentity('postgres://bob:x@db.example.com/brain').id).not.toBe(a.id);
     expect(targetIdentity('postgres://alice@db.example.com').database).toBe('alice');
+    expect(targetIdentity('postgres://alice@db.example.com/brain?database=other').id).not.toBe(a.id);
+
+    const reordered = targetIdentity('postgres://alice@db.example.com/brain?database=brain&application_name=gbrain&connect_timeout=5');
+    const duplicated = targetIdentity('postgres://alice@db.example.com/brain?connect_timeout=5&application_name=gbrain&database=brain&application_name=gbrain');
+    expect(reordered.id).toBe(a.id);
+    expect(duplicated.id).toBe(a.id);
+    expect(targetIdentity('postgres://alice@db.example.com/brain?host=&port=&target_session_attrs=').id).toBe(a.id);
     expect(redactTargetUrl(`postgres://alice:${SECRET}@h:1/d?password=${SECRET}`)).toBe('postgres://alice@h:1/d');
   });
 });
