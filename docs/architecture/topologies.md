@@ -295,8 +295,9 @@ gbrain reinit-pglite --embedding-model voyage:voyage-code-3 --embedding-dimensio
 gbrain reindex-code --yes
 ```
 
-(`gbrain config set embedding_model` is refused because the schema column
-has to resize alongside the config.)
+(`gbrain config set embedding_model` is a safe shortcut only when the primary
+vector stores are empty and the selected model fits the stored active-column
+width. A model change with vectors requires the migration path.)
 
 `gbrain reindex-code` prints a recommendation when the configured
 embedding model isn't code-tuned. Suppress with

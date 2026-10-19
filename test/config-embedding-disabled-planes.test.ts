@@ -39,6 +39,33 @@ describe('embedding_disabled and schema_pack config planes', () => {
     return { stdout: stdout.trim(), stderr, code };
   }
   const fileConfig = () => JSON.parse(readFileSync(join(home, '.gbrain', 'config.json'), 'utf8')) as Record<string, unknown>;
+  async function resetKeylessBrain(disabled: boolean): Promise<string> {
+    const dbPath = join(home, '.gbrain', 'brain.pglite');
+    const config = fileConfig();
+    delete config.embedding_model;
+    delete config.embedding_dimensions;
+    if (disabled) config.embedding_disabled = true;
+    else delete config.embedding_disabled;
+    writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify(config));
+    const engine = new PGLiteEngine();
+    await engine.connect({ database_path: dbPath });
+    try {
+      await engine.unsetConfig('embedding_model');
+      await engine.unsetConfig('embedding_dimensions');
+      if (disabled) await engine.setConfig('embedding_disabled', 'true');
+      else await engine.unsetConfig('embedding_disabled');
+    } finally {
+      await engine.disconnect();
+    }
+    return dbPath;
+  }
+  function advertisedArgv(stderr: string): string[] {
+    const line = stderr.split(/\r?\n/).find(candidate => /^\[config\]\s+gbrain /.test(candidate));
+    if (!line) throw new Error(`No executable config remedy was printed:\n${stderr}`);
+    const argv = line.replace(/^\[config\]\s+/, '').split(/\s+/);
+    if (argv[0] !== 'gbrain') throw new Error(`Unexpected command in config remedy: ${argv.join(' ')}`);
+    return argv.slice(1);
+  }
 
   test('a keyless embed names the one enablement command', async () => {
     const run = await cli(['embed', '--stale']);
@@ -64,48 +91,44 @@ describe('embedding_disabled and schema_pack config planes', () => {
     expect((await cli(['config', 'set', 'embedding_disabled', 'maybe'])).code).toBe(1);
   }, 60_000);
 
-  test('refused model write keeps the supported enablement path usable for an empty keyless brain', async () => {
+  test('schema-compatible model set succeeds without reviving the disabled choice', async () => {
+    await resetKeylessBrain(true);
     expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);
-    expect(fileConfig().embedding_disabled).toBe(true);
     const env = { VOYAGE_API_KEY: 'synthetic-voyage-key' };
-    const refused = await cli(['config', 'set', 'embedding_model', 'voyage:voyage-4'], env);
-    const dbPath = join(home, '.gbrain', 'brain.pglite');
-    expect(refused.code).toBe(1);
-    expect(refused.stderr).toContain('This brain has no stored vectors; the supported enablement path keeps the current schema width:');
-    expect(refused.stderr).toContain(`gbrain init --force --embedding-model voyage:voyage-4 --embedding-dimensions 1024 --path ${dbPath}`);
+    const configured = await cli(['config', 'set', 'embedding_model', 'voyage:voyage-4'], env);
+    expect({ code: configured.code, stderr: configured.stderr }).toMatchObject({ code: 0 });
+    expect(fileConfig()).toMatchObject({ embedding_model: 'voyage:voyage-4', embedding_dimensions: 1024 });
+    expect(fileConfig().embedding_disabled).toBe(true);
+    expect((await cli(['config', 'get', 'embedding_disabled'])).stdout).toBe('true');
 
-    const enabled = await cli(['init', '--force', '--embedding-model', 'voyage:voyage-4', '--embedding-dimensions', '1024', '--path', dbPath], env);
-    expect({ code: enabled.code, stderr: enabled.stderr }).toMatchObject({ code: 0 });
+    const enabled = await cli(['config', 'set', 'embedding_disabled', 'false'], env);
+    expect(enabled.code).toBe(0);
     expect(fileConfig()).toMatchObject({ embedding_model: 'voyage:voyage-4', embedding_dimensions: 1024 });
     expect('embedding_disabled' in fileConfig()).toBe(false);
-    expect((await cli(['config', 'get', 'embedding_disabled'])).code).toBe(1);
+    expect((await cli(['config', 'get', 'embedding_disabled'])).stdout).toBe('false');
   }, 120_000);
 
-  test('refused width write keeps the enablement recipe at the stored schema width', async () => {
-    expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);
+  test('refused width change advertises a compatible command that runs on the existing brain', async () => {
+    await resetKeylessBrain(false);
     const before = await cli(['migrate', 'embeddings', '--status', '--json']);
     expect(before.code).toBe(0);
     expect((JSON.parse(before.stdout) as { column_dims: number }).column_dims).toBe(1024);
 
     const refused = await cli(['config', 'set', 'embedding_dimensions', '1536'], { VOYAGE_API_KEY: 'synthetic-voyage-key' });
     expect(refused.code).toBe(1);
-    expect(refused.stderr).toContain('This brain has no stored vectors; the supported enablement path keeps the current schema width:');
-    expect(refused.stderr).toContain(`gbrain init --force --embedding-model voyage:voyage-4 --embedding-dimensions 1024 --path ${join(home, '.gbrain', 'brain.pglite')}`);
+    expect(refused.stderr).toContain('This brain has no stored vectors; the supported configuration path keeps the current schema width:');
+    const advertised = advertisedArgv(refused.stderr);
+    expect(advertised).toEqual(['config', 'set', 'embedding_model', 'voyage:voyage-4']);
+    const configured = await cli(advertised, { VOYAGE_API_KEY: 'synthetic-voyage-key' });
+    expect(configured.code).toBe(0);
+    expect(fileConfig()).toMatchObject({ embedding_model: 'voyage:voyage-4', embedding_dimensions: 1024 });
+    expect('embedding_disabled' in fileConfig()).toBe(false);
     expect(refused.stderr).not.toContain('--embedding-dimensions 1536');
 
     const after = await cli(['migrate', 'embeddings', '--status', '--json']);
     expect(after.code).toBe(0);
     expect((JSON.parse(after.stdout) as { column_dims: number }).column_dims).toBe(1024);
-  }, 120_000);
-
-  test('the enable path clears both planes', async () => {
-    expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);
-    const force = await cli(['init', '--force', '--embedding-model', 'voyage:voyage-4', '--embedding-dimensions', '1024',
-      '--path', join(home, '.gbrain', 'brain.pglite')]);
-    expect({ code: force.code, stderr: force.stderr }).toMatchObject({ code: 0 });
-    expect(fileConfig()).toMatchObject({ embedding_model: 'voyage:voyage-4', embedding_dimensions: 1024 });
-    const get = await cli(['config', 'get', 'embedding_disabled']);
-    expect({ code: get.code, stdout: get.stdout }).toEqual({ code: 1, stdout: '' });
+    expect((await cli(['config', 'get', 'embedding_model'])).stdout).toBe('voyage:voyage-4');
   }, 120_000);
 
   test('config get and show report the schema pack the runtime resolves', async () => {

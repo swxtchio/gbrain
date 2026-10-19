@@ -54,7 +54,7 @@ ENTRYPOINT ["/bin/sh", "-c", "\
   && exec gbrain serve"]
 ```
 
-The `gbrain init --no-embedding` opt-in writes `embedding_disabled: true` to config. Every embed callsite (`gbrain import`, `gbrain embed`, the `runEmbedCore` library entry point) checks this and refuses cleanly with a re-init hint (`gbrain init --force --embedding-model voyage:voyage-4`) rather than proceeding with a silent default. (`gbrain config set embedding_model` is refused by design — it's a file-plane schema-sizing field the DB-plane command can't affect.)
+The `gbrain init --no-embedding` opt-in writes `embedding_disabled: true` to config. Every embed callsite (`gbrain import`, `gbrain embed`, the `runEmbedCore` library entry point) checks this and refuses cleanly with a re-init hint (`gbrain init --force --embedding-model voyage:voyage-4`) rather than proceeding with a silent default. `gbrain config set embedding_model` keeps that disabled choice and only writes a model when the primary vector stores are empty and the model fits the stored active-column width; set `embedding_disabled` to false separately when enabling embeddings is intended.
 
 The runtime `gbrain init --force` re-runs the init flow against the now-populated env, which:
 

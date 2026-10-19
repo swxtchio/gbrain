@@ -57,6 +57,21 @@ function runGbrain(args: string[]) {
   });
 }
 
+function runAdvertisedGbrain(command: string) {
+  const bin = join(home!, 'fixture-bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\nexec "${process.execPath}" --preload "${preloadPath!}" "${join(REPO, 'src/cli.ts')}" "$@"\n`, { mode: 0o755 });
+  const env = childEnv();
+  env.PATH = `${bin}:${process.env.PATH ?? ''}`;
+  return spawnSync('bash', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 120_000 });
+}
+
+function advertisedCommand(stderr: string): string {
+  const line = stderr.split(/\r?\n/).find(candidate => /^\[config\]\s+gbrain /.test(candidate));
+  if (!line) throw new Error(`No executable config remedy was printed:\n${stderr}`);
+  return line.replace(/^\[config\]\s+/, '');
+}
+
 function capturedEmbeds(): Array<{ provider: string; modelId: string }> {
   const contents = readFileSync(capturePath!, 'utf8').trim();
   return contents ? contents.split('\n').map((line) => JSON.parse(line)) : [];
@@ -266,6 +281,50 @@ __setEmbedTransportForTests(async ({ model, values }) => {
       } finally {
         await engine.disconnect();
       }
+    }
+  }, 120_000);
+
+  test('the advertised config remedy executes on an existing Postgres brain', async () => {
+    const existing = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    try {
+      const width = (await readContentChunksEmbeddingDim(existing.engine)).dims;
+      if (width === null || !Number.isSafeInteger(width)) throw new Error('Synthetic Postgres fixture has no stored embedding width.');
+      await existing.engine.setConfig('embedding_disabled', 'true');
+      await existing.engine.unsetConfig('embedding_model');
+      await existing.engine.unsetConfig('embedding_dimensions');
+      writeFileSync(configPath!, JSON.stringify({ engine: 'postgres', database_url: existing.databaseUrl, embedding_disabled: true }));
+      writeFileSync(capturePath!, '');
+
+      const requestedWidth = width === 1024 ? 1536 : 1024;
+      const refusal = runGbrain(['config', 'set', 'embedding_dimensions', String(requestedWidth)]);
+      expect(refusal.error).toBeUndefined();
+      expect(refusal.status).toBe(1);
+      const command = advertisedCommand(refusal.stderr);
+      expect(command).toMatch(/^gbrain config set embedding_model \S+$/);
+      const model = command.split(/\s+/)[4];
+      expect(model).toBeTruthy();
+      const applied = runAdvertisedGbrain(command);
+      expect(applied.error).toBeUndefined();
+      expect(applied.status, `${applied.stderr}\n${applied.stdout}`).toBe(0);
+
+      const config = JSON.parse(readFileSync(configPath!, 'utf8')) as Record<string, unknown>;
+      expect(config).toMatchObject({ engine: 'postgres', database_url: existing.databaseUrl,
+        embedding_model: model, embedding_dimensions: width, embedding_disabled: true });
+      expect(await existing.engine.getConfig('embedding_disabled')).toBe('true');
+      const enabled = runGbrain(['config', 'set', 'embedding_disabled', 'false']);
+      expect(enabled.error).toBeUndefined();
+      expect(enabled.status, `${enabled.stderr}\n${enabled.stdout}`).toBe(0);
+      const enabledConfig = JSON.parse(readFileSync(configPath!, 'utf8')) as Record<string, unknown>;
+      expect(enabledConfig).toMatchObject({ embedding_model: model, embedding_dimensions: width });
+      expect('embedding_disabled' in enabledConfig).toBe(false);
+      expect(await existing.engine.getConfig('embedding_disabled')).toBe('false');
+      expect(await readContentChunksEmbeddingDim(existing.engine)).toMatchObject({ exists: true, dims: width });
+      expect(await existing.engine.executeRaw<{ vectors: number }>(
+        'SELECT count(*)::int AS vectors FROM content_chunks WHERE embedding IS NOT NULL',
+      )).toEqual([{ vectors: 0 }]);
+      expect(capturedEmbeds()).toEqual([]);
+    } finally {
+      await existing.close();
     }
   }, 120_000);
 });
