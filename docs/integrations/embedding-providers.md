@@ -111,7 +111,7 @@ gbrain models doctor          # green `reranker_config voyage:rerank-2.5` is the
 gbrain init --pglite --embedding-model voyage:voyage-code-3 --embedding-dimensions 1024
 ```
 
-To switch an existing brain, run `gbrain migrate embeddings --to voyage:voyage-code-3 --dim 1024` (works on both engines; resumable, cost-previewed with `--dry-run` — see [`docs/guides/embedding-migration.md`](../guides/embedding-migration.md)). `gbrain config set embedding_model` is refused — the schema column has to resize, and the migration command is the path that does that safely.
+To switch a brain that has vectors, run `gbrain migrate embeddings --to voyage:voyage-code-3 --dim 1024` (works on both engines; resumable, cost-previewed with `--dry-run` — see [`docs/guides/embedding-migration.md`](../guides/embedding-migration.md)). `gbrain config set embedding_model` can set a model directly only when all primary vector stores are empty and the model fits the stored active-column width; it does not resize the schema.
 
 `gbrain reindex-code` will print a recommendation when run against a brain whose configured embedding model isn't code-tuned; suppress with `GBRAIN_NO_CODE_MODEL_NUDGE=1` if you've intentionally chosen another model (single-vendor procurement, compliance, etc.).
 
@@ -264,7 +264,7 @@ Four options:
 
 ## Switching providers on an existing brain
 
-Embedding dimensions are baked into the schema at `gbrain init` time. `gbrain config set embedding_model` and `gbrain config set embedding_dimensions` are refused — the schema column has to resize alongside the config, and `config set` only touches the config row.
+Embedding dimensions are baked into the schema at `gbrain init` time. `gbrain config set embedding_dimensions` is refused because it cannot resize the column. `gbrain config set embedding_model` is also refused when vectors exist or the model does not fit the stored active-column width; on a brain with no vectors in any primary store, it may set a compatible model without resizing.
 
 Use `gbrain migrate embeddings` on **both PGLite and Postgres**. It coordinates
 schema, config, vector invalidation and the re-embed pass, with a resumable

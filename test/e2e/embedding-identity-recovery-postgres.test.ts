@@ -1,0 +1,610 @@
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { addSource } from '../../src/core/sources-ops.ts';
+import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
+import { buildGatewayConfig } from '../../src/core/ai/build-gateway-config.ts';
+import { readContentChunksEmbeddingDim } from '../../src/core/embedding-dim-check.ts';
+import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
+import { withEnv } from '../helpers/with-env.ts';
+
+const REPO = join(import.meta.dir, '../..');
+const DIMS = 1536;
+const MODEL = 'openai:text-embedding-3-large';
+const SIGNATURE = `${MODEL}:${DIMS}`;
+const SOURCE = 'fixture-source';
+const FIXTURE_KEY = 'fixture-openai-key';
+
+let home: string | undefined;
+let database: Awaited<ReturnType<typeof isolatedPersistencePostgres>> | undefined;
+let preloadPath: string | undefined;
+let repoPath: string | undefined;
+let configPath: string | undefined;
+let capturePath: string | undefined;
+
+function markdown(title: string, body: string): string {
+  return `---\ntype: note\ntitle: ${title}\n---\n\n${body}\n`;
+}
+
+function runGit(args: string[]): void {
+  const result = spawnSync('git', ['-C', repoPath!, ...args], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+}
+
+function childEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH,
+    HOME: home,
+    GBRAIN_HOME: home,
+    DATABASE_URL: undefined,
+    GBRAIN_DATABASE_URL: undefined,
+    GBRAIN_DIRECT_DATABASE_URL: undefined,
+    TMPDIR: process.env.TMPDIR,
+    GBRAIN_NO_AUTO_SYNC: '1',
+    GBRAIN_MODEL_DISCOVERY: 'off',
+    OPENAI_API_KEY: FIXTURE_KEY,
+    GBRAIN_TEST_EMBEDDING_IDENTITY_CAPTURE: capturePath,
+    ...extra,
+  };
+}
+
+function runGbrain(args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, ['--preload', preloadPath!, join(REPO, 'src/cli.ts'), ...args], {
+    cwd: home!,
+    env: childEnv(extraEnv),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+}
+
+function runAdvertisedGbrain(command: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  const bin = join(home!, 'fixture-bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\nexec "${process.execPath}" --preload "${preloadPath!}" "${join(REPO, 'src/cli.ts')}" "$@"\n`, { mode: 0o755 });
+  const env = childEnv(extraEnv);
+  env.PATH = `${bin}:${process.env.PATH ?? ''}`;
+  return spawnSync('bash', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 120_000 });
+}
+
+function advertisedCommand(stderr: string): string {
+  const line = stderr.split(/\r?\n/).find(candidate => /^\[config\]\s+gbrain /.test(candidate));
+  if (!line) throw new Error(`No executable config remedy was printed:\n${stderr}`);
+  return line.replace(/^\[config\]\s+/, '');
+}
+
+function setSearchPath(url: URL, key: string, value: string): void {
+  for (const existing of [...url.searchParams.keys()]) {
+    if (existing.toLowerCase() === 'search_path') url.searchParams.delete(existing);
+  }
+  url.searchParams.append(key, value);
+}
+
+function capturedEmbeds(): Array<{ provider: string; modelId: string }> {
+  const contents = readFileSync(capturePath!, 'utf8').trim();
+  return contents ? contents.split('\n').map((line) => JSON.parse(line)) : [];
+}
+
+function addCommittedNote(slug: string): void {
+  writeFileSync(join(repoPath!, `${slug}.md`), markdown(`${slug} fixture`, `Synthetic page ${slug}.`));
+  runGit(['add', '--', `${slug}.md`]);
+  runGit(['commit', '-q', '-m', `add ${slug} fixture`]);
+}
+
+describe.skipIf(!process.env.DATABASE_URL)('Postgres DB-only embedding identity recovery', () => {
+  beforeAll(async () => {
+    home = mkdtempSync(join(tmpdir(), 'gbrain-12-pg-'));
+    const configDir = join(home, '.gbrain');
+    const baseDatabaseUrl = process.env.DATABASE_URL!;
+    repoPath = join(home, 'fixture-repo');
+    configPath = join(configDir, 'config.json');
+    capturePath = join(home, 'embed-calls.ndjson');
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(repoPath, { recursive: true });
+    writeFileSync(join(repoPath, 'existing.md'), markdown('Existing fixture page', 'Existing Postgres vector provenance must survive recovery.'));
+    runGit(['init', '-q']);
+    runGit(['config', 'user.name', 'GBrain Fixture']);
+    runGit(['config', 'user.email', 'fixture@example.test']);
+    runGit(['add', '--', 'existing.md']);
+    runGit(['commit', '-q', '-m', 'seed synthetic page']);
+
+    database = await isolatedPersistencePostgres(baseDatabaseUrl);
+    const fileConfig = {
+      engine: 'postgres',
+      database_url: database.databaseUrl,
+      embedding_model: MODEL,
+      embedding_dimensions: DIMS,
+    } as const;
+    writeFileSync(configPath, JSON.stringify(fileConfig));
+    const gatewayPath = join(REPO, 'src/core/ai/gateway.ts');
+    preloadPath = join(home, 'embedding-transport.ts');
+    writeFileSync(preloadPath, `
+import { appendFileSync } from 'node:fs';
+import { __setEmbedTransportForTests } from ${JSON.stringify(gatewayPath)};
+
+__setEmbedTransportForTests(async ({ model, values }) => {
+  const provider = model as { provider?: string; modelId?: string };
+  appendFileSync(process.env.GBRAIN_TEST_EMBEDDING_IDENTITY_CAPTURE!, JSON.stringify({
+    provider: provider.provider,
+    modelId: provider.modelId,
+  }) + '\\n');
+  return { embeddings: values.map(() => new Array(${DIMS}).fill(0.25)), usage: { tokens: values.length } } as never;
+});
+`);
+
+    const engine = database.engine as PostgresEngine;
+    await withEnv({
+      GBRAIN_HOME: home,
+      GBRAIN_PGLITE_SNAPSHOT: undefined,
+      DATABASE_URL: undefined,
+      GBRAIN_DATABASE_URL: undefined,
+      GBRAIN_EMBEDDING_MODEL: undefined,
+      GBRAIN_EMBEDDING_DIMENSIONS: undefined,
+      OPENAI_API_KEY: FIXTURE_KEY,
+      GBRAIN_MODEL_DISCOVERY: 'off',
+    }, async () => {
+      configureGateway(buildGatewayConfig(fileConfig));
+      await engine.setConfig('embedding_model', MODEL);
+      await engine.setConfig('embedding_dimensions', String(DIMS));
+      await addSource(engine, { id: SOURCE, localPath: repoPath! });
+    });
+    await engine.disconnect();
+
+    const seed = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+    expect(seed.error).toBeUndefined();
+    expect(seed.status, `${seed.stderr}\n${seed.stdout}`).toBe(0);
+    expect(capturedEmbeds()).toContainEqual({ provider: 'openai.embedding', modelId: 'text-embedding-3-large' });
+    await engine.connect({ database_url: database.databaseUrl });
+    expect(await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    )).toEqual([{ embedding_signature: SIGNATURE }]);
+    await engine.setConfig('embedding_model', MODEL);
+    await engine.setConfig('embedding_dimensions', String(DIMS));
+    await engine.disconnect();
+    writeFileSync(configPath, JSON.stringify({ engine: 'postgres', database_url: database.databaseUrl }));
+    writeFileSync(capturePath, '');
+  }, 180_000);
+
+  afterAll(async () => {
+    resetGateway();
+    await database?.close();
+    if (home) rmSync(home, { recursive: true, force: true });
+    home = undefined;
+    database = undefined;
+  });
+
+  test.each([
+    ['issue spelling', 'text-embedding-3-large', 'postgres-new-legacy'],
+    ['provider-qualified spelling', MODEL, 'postgres-new-qualified'],
+  ])('ordinary sync recovers the %s DB model and preserves the Postgres vector identity', async (_label, dbModel, slug) => {
+    const engine = database!.engine as PostgresEngine;
+    await engine.connect({ database_url: database!.databaseUrl });
+    await engine.setConfig('embedding_model', dbModel);
+    await engine.setConfig('embedding_dimensions', String(DIMS));
+    const before = await engine.executeRaw<{ model: string; embedding: string }>(
+      `SELECT cc.model, cc.embedding::text AS embedding
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+    );
+    const beforeSignature = await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    );
+    await engine.disconnect();
+    writeFileSync(capturePath!, '');
+    addCommittedNote(slug);
+
+    const synced = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+    expect(synced.error).toBeUndefined();
+    expect(synced.status, `${synced.stderr}\n${synced.stdout}`).toBe(0);
+    expect(capturedEmbeds()).toContainEqual({ provider: 'openai.embedding', modelId: 'text-embedding-3-large' });
+
+    await engine.connect({ database_url: database!.databaseUrl });
+    const created = await engine.executeRaw<{ model: string; dimensions: number; signature: string | null }>(
+      `SELECT cc.model, vector_dims(cc.embedding)::int AS dimensions, p.embedding_signature AS signature
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = $1 AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`, [slug],
+    );
+    expect(created.length).toBeGreaterThan(0);
+    expect(created.every((row) => row.model === MODEL && row.dimensions === DIMS && row.signature === SIGNATURE)).toBe(true);
+    expect(await readContentChunksEmbeddingDim(engine)).toMatchObject({ exists: true, dims: DIMS });
+    expect(await engine.executeRaw<{ model: string; embedding: string }>(
+      `SELECT cc.model, cc.embedding::text AS embedding
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+    )).toEqual(before);
+    expect(await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    )).toEqual(beforeSignature);
+    expect(await engine.getConfig('embedding_model')).toBe(dbModel);
+    expect(await engine.getConfig('embedding_dimensions')).toBe(String(DIMS));
+    await engine.disconnect();
+  }, 120_000);
+
+  test('registry-active vectors block conflicting recovery and preserve Postgres provenance', async () => {
+    const engine = database!.engine as PostgresEngine;
+    const column = 'embedding_gbrain12_active';
+    const conflictSignature = `openai:text-embedding-3-small:${DIMS}`;
+    await engine.connect({ database_url: database!.databaseUrl });
+    const previousColumn = await engine.getConfig('search_embedding_column');
+    const previousRegistry = await engine.getConfig('embedding_columns');
+    const previousModel = await engine.getConfig('embedding_model');
+    const previousDimensions = await engine.getConfig('embedding_dimensions');
+    let activeColumnCreated = false;
+    try {
+      await engine.setConfig('embedding_model', MODEL);
+      await engine.setConfig('embedding_dimensions', String(DIMS));
+      await engine.executeRaw(`ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS ${column} vector(${DIMS})`);
+      activeColumnCreated = true;
+      await engine.setConfig('embedding_columns', JSON.stringify({
+        [column]: { provider: MODEL, dimensions: DIMS, type: 'vector' },
+      }));
+      await engine.setConfig('search_embedding_column', column);
+      await engine.executeRaw(`UPDATE content_chunks SET ${column} = embedding, embedding = NULL WHERE embedding IS NOT NULL`);
+      const priorActiveVectors = await engine.executeRaw<{ model: string; embedding: string }>(
+        `SELECT model, ${column}::text AS embedding FROM content_chunks WHERE ${column} IS NOT NULL ORDER BY page_id, chunk_index`,
+      );
+      expect(priorActiveVectors.length).toBeGreaterThan(0);
+      await engine.executeRaw(
+        `UPDATE pages p SET embedding_signature = $1
+          WHERE EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id AND cc.${column} IS NOT NULL)`,
+        [conflictSignature],
+      );
+      writeFileSync(capturePath!, '');
+      addCommittedNote('postgres-registry-active-conflict');
+
+      const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+      expect(sync.error).toBeUndefined();
+      expect(sync.status).not.toBe(0);
+      expect(`${sync.stdout}\n${sync.stderr}`).toContain('conflicts with stored page embedding_signature');
+      expect(`${sync.stdout}\n${sync.stderr}`).toContain('gbrain migrate embeddings --status --json');
+      expect(`${sync.stdout}\n${sync.stderr}`).not.toContain('zeroentropyai:zembed-1');
+      expect(capturedEmbeds()).toEqual([]);
+      expect(await engine.executeRaw<{ model: string; embedding: string }>(
+        `SELECT model, ${column}::text AS embedding FROM content_chunks WHERE ${column} IS NOT NULL ORDER BY page_id, chunk_index`,
+      )).toEqual(priorActiveVectors);
+      expect(await engine.executeRaw<{ formatted: string }>(
+        `SELECT format_type(a.atttypid, a.atttypmod) AS formatted
+           FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+          WHERE c.relname = 'content_chunks' AND a.attname = $1 AND NOT a.attisdropped`, [column],
+      )).toEqual([{ formatted: `vector(${DIMS})` }]);
+    } finally {
+      try {
+        if (activeColumnCreated) {
+          await engine.executeRaw(`UPDATE content_chunks SET embedding = ${column}, ${column} = NULL WHERE ${column} IS NOT NULL`);
+          await engine.executeRaw(
+            `UPDATE pages p SET embedding_signature = $1
+              WHERE p.source_id = $2 AND EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedding IS NOT NULL)`,
+            [SIGNATURE, SOURCE],
+          );
+          await engine.executeRaw(`ALTER TABLE content_chunks DROP COLUMN IF EXISTS ${column}`);
+        }
+        if (previousColumn === null) await engine.unsetConfig('search_embedding_column');
+        else await engine.setConfig('search_embedding_column', previousColumn);
+        if (previousRegistry === null) await engine.unsetConfig('embedding_columns');
+        else await engine.setConfig('embedding_columns', previousRegistry);
+        if (previousModel === null) await engine.unsetConfig('embedding_model');
+        else await engine.setConfig('embedding_model', previousModel);
+        if (previousDimensions === null) await engine.unsetConfig('embedding_dimensions');
+        else await engine.setConfig('embedding_dimensions', previousDimensions);
+      } finally {
+        await engine.disconnect();
+      }
+    }
+  }, 120_000);
+
+  test('the advertised config remedy executes on an existing Postgres brain', async () => {
+    const existing = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    try {
+      const width = (await readContentChunksEmbeddingDim(existing.engine)).dims;
+      if (width === null || !Number.isSafeInteger(width)) throw new Error('Synthetic Postgres fixture has no stored embedding width.');
+      await existing.engine.setConfig('embedding_disabled', 'true');
+      await existing.engine.unsetConfig('embedding_model');
+      await existing.engine.unsetConfig('embedding_dimensions');
+      writeFileSync(configPath!, JSON.stringify({ engine: 'postgres', database_url: existing.databaseUrl, embedding_disabled: true }));
+      writeFileSync(capturePath!, '');
+
+      const requestedWidth = width === 1024 ? 1536 : 1024;
+      const refusal = runGbrain(['config', 'set', 'embedding_dimensions', String(requestedWidth)]);
+      expect(refusal.error).toBeUndefined();
+      expect(refusal.status).toBe(1);
+      const command = advertisedCommand(refusal.stderr);
+      expect(command).toMatch(/^gbrain config set embedding_model \S+$/);
+      const model = command.split(/\s+/)[4];
+      expect(model).toBeTruthy();
+      const applied = runAdvertisedGbrain(command);
+      expect(applied.error).toBeUndefined();
+      expect(applied.status, `${applied.stderr}\n${applied.stdout}`).toBe(0);
+
+      const config = JSON.parse(readFileSync(configPath!, 'utf8')) as Record<string, unknown>;
+      expect(config).toMatchObject({ engine: 'postgres', database_url: existing.databaseUrl,
+        embedding_model: model, embedding_dimensions: width, embedding_disabled: true });
+      expect(await existing.engine.getConfig('embedding_disabled')).toBe('true');
+      const enabled = runGbrain(['config', 'set', 'embedding_disabled', 'false']);
+      expect(enabled.error).toBeUndefined();
+      expect(enabled.status, `${enabled.stderr}\n${enabled.stdout}`).toBe(0);
+      const enabledConfig = JSON.parse(readFileSync(configPath!, 'utf8')) as Record<string, unknown>;
+      expect(enabledConfig).toMatchObject({ embedding_model: model, embedding_dimensions: width });
+      expect('embedding_disabled' in enabledConfig).toBe(false);
+      expect(await existing.engine.getConfig('embedding_disabled')).toBe('false');
+      expect(await readContentChunksEmbeddingDim(existing.engine)).toMatchObject({ exists: true, dims: width });
+      expect(await existing.engine.executeRaw<{ vectors: number }>(
+        'SELECT count(*)::int AS vectors FROM content_chunks WHERE embedding IS NOT NULL',
+      )).toEqual([{ vectors: 0 }]);
+      expect(capturedEmbeds()).toEqual([]);
+    } finally {
+      await existing.close();
+    }
+  }, 120_000);
+
+  test('schema-compatible model enablement follows the effective Postgres datastore', async () => {
+    const fileTarget = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    const otherTarget = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    const fileConfig = { engine: 'postgres', database_url: fileTarget.databaseUrl } as const;
+    const requestedModel = 'openai:text-embedding-3-large';
+
+    try {
+      for (const target of [fileTarget.engine, otherTarget.engine]) {
+        await target.unsetConfig('embedding_model');
+        await target.unsetConfig('embedding_dimensions');
+        await target.unsetConfig('embedding_disabled');
+      }
+
+      writeFileSync(configPath!, JSON.stringify(fileConfig));
+      const matching = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: fileTarget.databaseUrl,
+        GBRAIN_DIRECT_DATABASE_URL: fileTarget.databaseUrl,
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(matching.error).toBeUndefined();
+      expect(matching.status, `${matching.stderr}\n${matching.stdout}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toMatchObject({
+        ...fileConfig,
+        embedding_model: requestedModel,
+        embedding_dimensions: 1536,
+      });
+
+      const fileWithInnocuousParams = new URL(fileTarget.databaseUrl);
+      fileWithInnocuousParams.searchParams.set('application_name', 'gbrain-12-target-test');
+      fileWithInnocuousParams.searchParams.set('connect_timeout', '5');
+      const reorderedParams = new URL(fileTarget.databaseUrl);
+      reorderedParams.searchParams.set('connect_timeout', '5');
+      reorderedParams.searchParams.append('application_name', 'gbrain-12-target-test');
+      reorderedParams.searchParams.append('application_name', 'gbrain-12-target-test');
+      const equivalentFileConfig = { ...fileConfig, database_url: fileWithInnocuousParams.toString() };
+      writeFileSync(configPath!, JSON.stringify(equivalentFileConfig));
+      const equivalent = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: reorderedParams.toString(),
+        GBRAIN_DIRECT_DATABASE_URL: reorderedParams.toString(),
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(equivalent.error).toBeUndefined();
+      expect(equivalent.status, `${equivalent.stderr}\n${equivalent.stdout}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toMatchObject({
+        ...equivalentFileConfig,
+        embedding_model: requestedModel,
+        embedding_dimensions: 1536,
+      });
+
+      // The CLI must not pin an identity to the file brain when it is connected elsewhere.
+      writeFileSync(configPath!, JSON.stringify(fileConfig));
+      const mismatching = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: otherTarget.databaseUrl,
+        GBRAIN_DIRECT_DATABASE_URL: otherTarget.databaseUrl,
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(mismatching.error).toBeUndefined();
+      expect(mismatching.status, `${mismatching.stderr}\n${mismatching.stdout}`).toBe(1);
+      expect(mismatching.stderr).toContain('[config] Effective datastore differs from ');
+      expect(mismatching.stderr).toContain('no file-plane identity was written.');
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+      expect(await fileTarget.engine.getConfig('embedding_model')).toBeNull();
+      expect(await otherTarget.engine.getConfig('embedding_model')).toBeNull();
+
+      const querySelectedTarget = new URL(fileTarget.databaseUrl);
+      const otherDatabaseName = new URL(otherTarget.databaseUrl).pathname.slice(1);
+      querySelectedTarget.searchParams.set('database', otherDatabaseName);
+      const querySelectedEngine = new PostgresEngine();
+      await querySelectedEngine.connect({ database_url: querySelectedTarget.toString(), poolSize: 1 });
+      try {
+        expect(await querySelectedEngine.executeRaw<{ name: string }>('SELECT current_database() AS name'))
+          .toEqual([{ name: otherDatabaseName }]);
+      } finally {
+        await querySelectedEngine.disconnect();
+      }
+      const queryMismatch = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: querySelectedTarget.toString(),
+        GBRAIN_DIRECT_DATABASE_URL: querySelectedTarget.toString(),
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(queryMismatch.error).toBeUndefined();
+      expect(queryMismatch.status, `${queryMismatch.stderr}\n${queryMismatch.stdout}`).toBe(1);
+      expect(queryMismatch.stderr).toContain('[config] Effective datastore differs from ');
+      expect(queryMismatch.stderr).toContain('no file-plane identity was written.');
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+      expect(await fileTarget.engine.getConfig('embedding_model')).toBeNull();
+      expect(await otherTarget.engine.getConfig('embedding_model')).toBeNull();
+    } finally {
+      await Promise.all([fileTarget.close(), otherTarget.close()]);
+    }
+  }, 240_000);
+
+  test('case-colliding search_path selectors refuse file-plane recovery', async () => {
+    const engine = database!.engine as PostgresEngine;
+    const emptyReviewSchema = 'gbrain12_search_path_empty_review';
+    await engine.connect({ database_url: database!.databaseUrl });
+    await engine.executeRaw(`CREATE SCHEMA IF NOT EXISTS ${emptyReviewSchema}`);
+    const priorVectors = await engine.executeRaw<{ model: string; embedding: string }>(
+      `SELECT cc.model, cc.embedding::text AS embedding
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+    );
+    const priorSignature = await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    );
+    const priorWidth = await readContentChunksEmbeddingDim(engine);
+    await engine.disconnect();
+    const vectors = { priorVectors, priorSignature, priorWidth };
+    expect(vectors.priorVectors.length).toBeGreaterThan(0);
+    expect(vectors.priorSignature).toEqual([{ embedding_signature: SIGNATURE }]);
+    expect(vectors.priorWidth).toMatchObject({ exists: true, dims: DIMS });
+
+    const overrideTarget = new URL(database!.databaseUrl);
+    setSearchPath(overrideTarget, 'search_path', 'public');
+    overrideTarget.searchParams.append('SEARCH_PATH', emptyReviewSchema);
+    const directTarget = new URL(database!.databaseUrl);
+    setSearchPath(directTarget, 'search_path', 'public');
+
+    for (const fileSearchPath of ['public', emptyReviewSchema]) {
+      const fileTarget = new URL(database!.databaseUrl);
+      setSearchPath(fileTarget, 'search_path', fileSearchPath);
+      const fileConfig = { engine: 'postgres', database_url: fileTarget.toString() } as const;
+      writeFileSync(configPath!, JSON.stringify(fileConfig));
+      const refused = runGbrain(['config', 'set', 'embedding_model', MODEL], {
+        GBRAIN_DATABASE_URL: overrideTarget.toString(),
+        GBRAIN_DIRECT_DATABASE_URL: directTarget.toString(),
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(refused.error).toBeUndefined();
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('GBRAIN_DATABASE_URL');
+      expect(refused.stderr).not.toContain('To pin this identity');
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+
+      const afterRefusal = new PostgresEngine();
+      await afterRefusal.connect({ database_url: database!.databaseUrl, poolSize: 1 });
+      try {
+        expect(await afterRefusal.executeRaw<{ model: string; embedding: string }>(
+          `SELECT cc.model, cc.embedding::text AS embedding
+             FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+            WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+        )).toEqual(vectors.priorVectors);
+        expect(await afterRefusal.executeRaw<{ embedding_signature: string | null }>(
+          `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+        )).toEqual(vectors.priorSignature);
+        expect(await readContentChunksEmbeddingDim(afterRefusal)).toMatchObject({ exists: true, dims: DIMS });
+        expect(await afterRefusal.getConfig('embedding_model')).toBe(MODEL);
+        expect(await afterRefusal.getConfig('embedding_dimensions')).toBe(String(DIMS));
+      } finally {
+        await afterRefusal.disconnect();
+      }
+    }
+  }, 240_000);
+
+  test('mixed-case search_path override refuses pinning and sync preserves populated vectors', async () => {
+    const engine = database!.engine as PostgresEngine;
+    const shadowSchema = 'gbrain12_search_path_shadow';
+    const fileTarget = new URL(database!.databaseUrl);
+    setSearchPath(fileTarget, 'search_path', `${shadowSchema},public`);
+    const fileConfig = { engine: 'postgres', database_url: fileTarget.toString() } as const;
+    const envTarget = new URL(database!.databaseUrl);
+    setSearchPath(envTarget, 'Search_Path', `public,${shadowSchema}`);
+    const overrideUrl = envTarget.toString();
+
+    await engine.connect({ database_url: database!.databaseUrl });
+    await engine.executeRaw(`CREATE SCHEMA IF NOT EXISTS ${shadowSchema}`);
+    const priorVectors = await engine.executeRaw<{ model: string; embedding: string }>(
+      `SELECT cc.model, cc.embedding::text AS embedding
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+    );
+    const priorSignature = await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    );
+    const priorWidth = await readContentChunksEmbeddingDim(engine);
+    expect(priorVectors.length).toBeGreaterThan(0);
+    expect(priorSignature).toEqual([{ embedding_signature: SIGNATURE }]);
+    expect(priorWidth).toMatchObject({ exists: true, dims: DIMS });
+    expect(await engine.getConfig('embedding_model')).toBe(MODEL);
+    await engine.disconnect();
+
+    const pathProbe = new PostgresEngine();
+    await pathProbe.connect({ database_url: overrideUrl, poolSize: 1 });
+    try {
+      const [row] = await pathProbe.executeRaw<{ search_path: string }>('SHOW search_path');
+      expect(row?.search_path.replace(/\s/g, '')).toBe(`public,${shadowSchema}`);
+      const [schema] = await pathProbe.executeRaw<{ current_schema: string }>('SELECT current_schema() AS current_schema');
+      expect(schema?.current_schema).toBe('public');
+    } finally {
+      await pathProbe.disconnect();
+    }
+
+    const filePathProbe = new PostgresEngine();
+    await filePathProbe.connect({ database_url: fileConfig.database_url, poolSize: 1 });
+    try {
+      const [schema] = await filePathProbe.executeRaw<{ current_schema: string }>('SELECT current_schema() AS current_schema');
+      expect(schema?.current_schema).toBe(shadowSchema);
+    } finally {
+      await filePathProbe.disconnect();
+    }
+
+    writeFileSync(configPath!, JSON.stringify(fileConfig));
+    const refused = runGbrain(['config', 'set', 'embedding_model', MODEL], {
+      GBRAIN_DATABASE_URL: overrideUrl,
+      GBRAIN_DIRECT_DATABASE_URL: overrideUrl,
+      OPENAI_API_KEY: 'synthetic-openai-key',
+    });
+    expect(refused.error).toBeUndefined();
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('GBRAIN_DATABASE_URL');
+    expect(refused.stderr).toContain('recovered identity cannot be pinned');
+    expect(refused.stderr).not.toContain('To pin this identity');
+    expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+
+    const afterRefusal = new PostgresEngine();
+    await afterRefusal.connect({ database_url: database!.databaseUrl, poolSize: 1 });
+    try {
+      expect(await afterRefusal.executeRaw<{ model: string; embedding: string }>(
+        `SELECT cc.model, cc.embedding::text AS embedding
+           FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+      )).toEqual(priorVectors);
+      expect(await afterRefusal.executeRaw<{ embedding_signature: string | null }>(
+        `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+      )).toEqual(priorSignature);
+      expect(await readContentChunksEmbeddingDim(afterRefusal)).toMatchObject({ exists: true, dims: DIMS });
+      expect(await afterRefusal.getConfig('embedding_model')).toBe(MODEL);
+      expect(await afterRefusal.getConfig('embedding_dimensions')).toBe(String(DIMS));
+    } finally {
+      await afterRefusal.disconnect();
+    }
+
+    writeFileSync(capturePath!, '');
+    addCommittedNote('search-path-mixed-case');
+    const synced = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json'], {
+      GBRAIN_DATABASE_URL: overrideUrl,
+      GBRAIN_DIRECT_DATABASE_URL: overrideUrl,
+      OPENAI_API_KEY: 'synthetic-openai-key',
+    });
+    expect(synced.error).toBeUndefined();
+    expect(synced.status, `${synced.stderr}\n${synced.stdout}`).toBe(0);
+    expect(capturedEmbeds()).toContainEqual({ provider: 'openai.embedding', modelId: 'text-embedding-3-large' });
+
+    const afterSync = new PostgresEngine();
+    await afterSync.connect({ database_url: database!.databaseUrl, poolSize: 1 });
+    try {
+      expect(await afterSync.executeRaw<{ model: string; embedding: string }>(
+        `SELECT cc.model, cc.embedding::text AS embedding
+           FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+      )).toEqual(priorVectors);
+      expect(await afterSync.executeRaw<{ embedding_signature: string | null }>(
+        `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+      )).toEqual(priorSignature);
+      const syncedVectors = await afterSync.executeRaw<{ model: string; dimensions: number; signature: string | null }>(
+        `SELECT cc.model, vector_dims(cc.embedding)::int AS dimensions, p.embedding_signature AS signature
+           FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = 'search-path-mixed-case' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+      );
+      expect(syncedVectors.length).toBeGreaterThan(0);
+      expect(syncedVectors.every((row) => row.model === MODEL && row.dimensions === DIMS && row.signature === SIGNATURE)).toBe(true);
+      expect(await readContentChunksEmbeddingDim(afterSync)).toMatchObject({ exists: true, dims: DIMS });
+      expect(await afterSync.getConfig('embedding_model')).toBe(MODEL);
+      expect(await afterSync.getConfig('embedding_dimensions')).toBe(String(DIMS));
+    } finally {
+      await afterSync.disconnect();
+    }
+    expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+  }, 240_000);
+});

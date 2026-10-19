@@ -15,7 +15,6 @@ import { providerKeyShadows, providerKeySource } from '../../../core/ai/provider
 import { credentialEnvName, keyShadowWarning } from '../../../core/ai/key-warnings.ts';
 import { getRecipe } from '../../../core/ai/recipes/index.ts';
 import type { Check } from '../../doctor.ts';
-import { embeddingsDisabled } from '../../../core/embedding-disabled.ts';
 import { checkError, doctorVerify, infoCheck, keylessEnablementFix } from '../check-fix.ts';
 import { brainRoutingArgs } from '../../../core/brain-resolver.ts';
 import type { Action } from '../../../core/agent-output.ts';
@@ -45,9 +44,54 @@ async function runEmbeddingProvider(ctx: DoctorContext): Promise<Check[]> {
   // 8b. Embedding provider eval — live smoke test of the configured provider.
   //     Verifies: correct model, API key works, dimensions match config, DB column matches.
   progress.heartbeat('embedding_provider');
-  if (await embeddingsDisabled(engine)) {
+  const { loadConfig } = await import('../../../core/config.ts');
+  let fileConfig: GBrainConfig | null;
+  try {
+    fileConfig = loadConfig();
+  } catch (error) {
+    checks.push({
+      name: 'embedding_provider',
+      status: 'warn',
+      message: `Embedding identity is unverified because file/environment configuration could not be read: ${(error as Error).message}`,
+      fix: {
+        argv: ['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()],
+        consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'Read-only status shows the stored embedding model, width and page signatures.',
+      },
+    });
+    return checks;
+  }
+  const route = brainRoutingArgs();
+  const identity = await (await import('../../../core/embedding-identity-resolution.ts')).resolveEmbeddingIdentity(engine, fileConfig, {
+    allowDbRecovery: route[1] === 'host',
+  });
+  if (identity.state === 'disabled') {
     checks.push(infoCheck('embedding_provider', 'Not probed: embeddings are disabled on this brain by choice (keyword search keeps working).', 'disabled_by_choice', keylessEnablementFix()));
     return checks;
+  }
+  if (identity.state === 'unverified') {
+    checks.push({
+      name: 'embedding_provider',
+      status: 'warn',
+      message: `Embedding identity is unverified: ${identity.reason} Existing vectors were not interpreted using a default.`,
+      fix: {
+        argv: ['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()],
+        consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'Read-only status shows the stored embedding model, width and page signatures.',
+      },
+    });
+    return checks;
+  }
+  if (identity.state === 'recovered') {
+    const { loadConfigWithEngine } = await import('../../../core/config.ts');
+    const mergedConfig = await loadConfigWithEngine(engine, fileConfig);
+    const { buildGatewayConfig } = await import('../../../core/ai/build-gateway-config.ts');
+    const { configureGateway } = await import('../../../core/ai/gateway.ts');
+    configureGateway(buildGatewayConfig({
+      ...(mergedConfig ?? fileConfig ?? { engine: 'pglite' as const }),
+      embedding_model: identity.model,
+      embedding_dimensions: identity.dimensions,
+    }));
   }
   try {
     const {
@@ -61,61 +105,7 @@ async function runEmbeddingProvider(ctx: DoctorContext): Promise<Check[]> {
     const configuredDims = getEmbeddingDimensions();
     const available = isAvailable('embedding');
 
-    // v0.37 (T9, codex #7 nuance): catch the v0.36 silent-default case where
-    // config has no embedding_model but the schema column exists at a dim
-    // that doesn't match the gateway's resolved default. Empty-brain vs
-    // non-empty-brain branching determines the repair hint:
-    //   - empty brain (no embedded chunks) → `gbrain init --force --embedding-model …`
-    //   - non-empty brain → `gbrain migrate embeddings --to … --dim …` (#3390)
-    // The bug-reporter's `rm -rf ~/.gbrain` recovery is never the right answer.
-    let surfacedUnconfiguredDrift = false;
-    try {
-      const { loadConfig } = await import('../../../core/config.ts');
-      const cfg = loadConfig();
-      const fileEmbeddingSet = !!cfg?.embedding_model;
-      const deferredSetup = cfg?.embedding_disabled === true;
-      if (!fileEmbeddingSet && !deferredSetup) {
-        // Read column dim + chunk count
-        const { readContentChunksEmbeddingDim } = await import('../../../core/embedding-dim-check.ts');
-        const colDim = await readContentChunksEmbeddingDim(engine);
-        if (colDim.exists && colDim.dims !== null && colDim.dims !== configuredDims) {
-          // Determine if the brain has any content — drift is only a real
-          // user-facing problem once the user has imported anything. A
-          // pristine brain (0 total chunks) is still in fresh-install state;
-          // first import will hit the loud preflight before any column
-          // write, so doctor doesn't need to pre-warn.
-          let totalChunks = 0;
-          let embeddedCount = 0;
-          try {
-            const rows = await engine.executeRaw<{ total: number | string; embedded: number | string }>(
-              `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE embedding IS NOT NULL)::int AS embedded FROM content_chunks`,
-            );
-            totalChunks = Number(rows?.[0]?.total ?? 0);
-            embeddedCount = Number(rows?.[0]?.embedded ?? 0);
-          } catch { /* table may be missing or fresh; treat as empty */ }
-
-          if (totalChunks > 0) {
-            const fix = `Existing brain (${totalChunks} chunks, ${embeddedCount} embedded). Keep a verified database backup and preview the brain-wide migration:\n        gbrain migrate embeddings --to ${configuredModel} --dim ${configuredDims} --dry-run\n      After reviewing the plan, replace --dry-run with --yes --max-cost-usd <approved-total>. Missing vectors do not mean the brain is empty. See docs/guides/embedding-migration.md#recovery.`;
-
-            checks.push({
-              name: 'embedding_provider',
-              status: 'warn',
-              message:
-                `Schema column is vector(${colDim.dims}) but gateway default resolves to ${configuredModel} (${configuredDims}d). ` +
-                `Persist your provider choice with \`gbrain config set embedding_model ${configuredModel}\` AND fix the schema:\n      ${fix}`,
-            });
-            surfacedUnconfiguredDrift = true;
-          }
-        }
-      }
-    } catch {
-      // loadConfig may throw on a malformed config; let the existing
-      // available/probe branch surface the issue.
-    }
-
-    if (surfacedUnconfiguredDrift) {
-      // Bail out — the warn above is more actionable than the live probe.
-    } else if (!available) {
+    if (!available) {
       // Per v0.28.5 plan P1: silently skipped when no API key is configured.
       // Doctor must stay green on CI / local-only / offline environments where
       // a full provider probe isn't possible. The skipped status is still

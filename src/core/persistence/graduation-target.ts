@@ -43,6 +43,47 @@ function parsePostgresUrl(url: string): URL {
   return new URL(url.replace(/^postgres(?:ql)?:\/\//i, 'http://'));
 }
 
+// Query selectors that can redirect the connection or change its database/session namespace.
+const TARGET_QUERY_PARAMS = new Set([
+  'database', 'db', 'host', 'hostaddr', 'options', 'port', 'role', 'search_path', 'target_session_attrs', 'user',
+]);
+
+function targetQueryParams(url: URL, base: { host: string; port: number; database: string; user: string }): Array<[string, string]> {
+  const effective = new Map<string, string>();
+  const valuesBySpelling = new Map<string, Map<string, string>>();
+  for (const [rawKey, value] of url.searchParams) {
+    const key = rawKey.toLowerCase();
+    if (!TARGET_QUERY_PARAMS.has(key)) continue;
+    const valuesForKey = valuesBySpelling.get(key) ?? new Map<string, string>();
+    valuesForKey.set(rawKey, value);
+    valuesBySpelling.set(key, valuesForKey);
+    if (key === 'target_session_attrs') {
+      if (!value) continue;
+      if (!effective.has(key)) effective.set(key, value);
+    } else {
+      if (!value && key !== 'database' && key !== 'user') continue;
+      effective.set(key, value);
+    }
+  }
+
+  for (const [key, values] of valuesBySpelling) {
+    if (values.size > 1 && new Set(values.values()).size > 1) {
+      throw new Error(`Postgres target query key "${key}" has conflicting case variants; its identity is ambiguous.`);
+    }
+  }
+
+  for (const [key, value] of effective) {
+    if ((key === 'database' && value === base.database)
+      || (key === 'user' && value === base.user)
+      || (key === 'host' && value.toLowerCase() === base.host)
+      || (key === 'port' && Number(value) === base.port)) {
+      effective.delete(key);
+    }
+  }
+
+  return [...effective.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+}
+
 /** Display form: scheme, user, host, port and database; never the password or query parameters. */
 export function redactTargetUrl(url: string): string {
   try {
@@ -60,7 +101,9 @@ export function targetIdentity(url: string): TargetIdentity {
   const port = Number(parsed.port || '5432');
   const user = decodeURIComponent(parsed.username || '');
   const database = decodeURIComponent((parsed.pathname || '/').replace(/^\//, '')) || user;
-  const id = createHash('sha256').update(JSON.stringify([host, port, database, user])).digest('hex');
+  const queryParams = targetQueryParams(parsed, { host, port, database, user });
+  const identity = queryParams.length > 0 ? [host, port, database, user, queryParams] : [host, port, database, user];
+  const id = createHash('sha256').update(JSON.stringify(identity)).digest('hex');
   return { id, host, port, database, user };
 }
 

@@ -495,6 +495,7 @@ export interface AIGatewayConfig {
   /** Current embedding model as "provider:modelId" (e.g. "openai:text-embedding-3-large"). */
   embedding_model?: string;
   embedding_identity_unverified?: boolean;
+  embedding_identity_unverified_reason?: string;
   /** Target embedding dims. Gateway asserts returned embeddings match this. */
   embedding_dimensions?: number;
   /**

@@ -6,6 +6,10 @@ and approval; upgrading or changing a default does not convert stored vectors.
 Inspect the intended brain with `--status`, keep a verified full backup, and
 coordinate quiescing embedding writers before approving a live run.
 
+During host-brain startup, when an existing brain has no `embedding_model` in file/environment config, GBrain can use a provider-qualified DB-only model only when it supports the stored active-column width and each vector-bearing page signature agrees with `content_chunks.model`, including vectors on soft-deleted pages. An unqualified DB model also needs one provider-qualified page signature to identify its provider. Optional configured widths must match. Explicit file/environment settings and `embedding_disabled` keep priority; missing or conflicting evidence stays unverified and points to `gbrain migrate embeddings --status --json`.
+
+`gbrain config set embedding_model` can set a file-plane model when every primary vector store is empty and the model supports the stored active-column width. It writes that width with the model and leaves the schema and `embedding_disabled` choice unchanged. When vectors exist, evidence conflicts, or the model does not fit, the command remains refused and directs the operator to status or an explicit migration preview. A verified recovered DB-only identity can still print the exact config JSON needed to pin it.
+
 `gbrain retrieval-upgrade` is an alias for the same provider-agnostic migration
 command. It uses the same flags, preview, consent and verification workflow.
 

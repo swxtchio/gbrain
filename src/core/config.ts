@@ -137,14 +137,7 @@ export interface GBrainConfig {
 
   embedding_model?: string;
   embedding_dimensions?: number;
-  /**
-   * v0.37 (D9): user opted into deferred-setup mode at init time via
-   * `gbrain init --no-embedding`. When true, embed callsites and `gbrain
-   * import` refuse with a `gbrain config set embedding_model <id>` hint
-   * rather than proceeding with a default that may not match a real key.
-   * Mutually exclusive with `embedding_model` being set — init writes one
-   * or the other, never both.
-   */
+  /** User opted into deferred setup with `gbrain init --no-embedding`; embedding callsites refuse until the user explicitly enables embeddings, and an older DB-plane model never cancels this choice. */
   embedding_disabled?: boolean;
   expansion_model?: string;
   /**
@@ -293,16 +286,7 @@ export interface GBrainConfig {
     last_applied_version?: string;
   };
 
-  /**
-   * v0.27.1 — multimodal ingestion flags. Default off; opt-in.
-   *
-   * Unlike `embedding_model` / `embedding_dimensions` (which size the
-   * schema and must be set before initSchema), these flags only affect
-   * runtime behavior. They live in the DB plane primarily — `gbrain config
-   * set embedding_multimodal true` flips the gate without touching the file.
-   * loadConfigWithEngine() merges DB config on top of file/env. Env vars
-   * still win as the operator escape hatch.
-   */
+  /** v0.27.1 multimodal ingestion flags default off. Unlike `embedding_model` / `embedding_dimensions` (which size a new schema and identify its vectors), these flags only affect runtime behavior. They live in the DB plane primarily — `gbrain config set embedding_multimodal true` flips the gate without touching the file; `loadConfigWithEngine()` merges DB config on top of file/environment values, and environment variables still win as the operator escape hatch. */
   embedding_multimodal?: boolean;
   /** Model override for multimodal embeddings (e.g. "voyage:voyage-multimodal-3"). */
   embedding_multimodal_model?: string;
@@ -855,11 +839,7 @@ async function mergeSearchScanKnobs(
  * Precedence: env > file > DB > defaults. Env stays the operator escape hatch;
  * file is the durable per-machine config; DB is the user-mutable runtime knob.
  *
- * Participating DB-plane keys: multimodal/OCR flags, provider_base_urls.*,
- * the embedding-column registry, content_sanity.*, dream.*, eval.*, and the
- * #2119-class read-side set (provider credentials, chat/expansion pins,
- * chat_fallback_chain, flat cycle.* — see src/core/config-db-merge.ts, which
- * also documents why embedding_model/dims must NEVER join any list, #4287).
+ * Participating DB-plane keys: multimodal/OCR flags, provider_base_urls.*, the embedding-column registry, content_sanity.*, dream.*, eval.*, and the #2119-class read-side set (provider credentials, chat/expansion pins, chat_fallback_chain, flat cycle.* — see src/core/config-db-merge.ts). Keep embedding_model/dimensions out of this generic merge: a post-schema resolver owns the narrower DB-only recovery after stored identity is corroborated.
  */
 export async function loadConfigWithEngine(
   // DbPlaneEngineReader: { getConfig; listConfigKeys?; getAllConfig?;

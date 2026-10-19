@@ -123,7 +123,6 @@ import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIMENSIONS,
   DEFAULT_RERANKER_MODEL,
-  renderCanonicalMigrationCommands,
 } from './defaults.ts';
 import { logRerankFailure, type RerankFailureReason } from '../rerank-audit.ts';
 import { rerankViaDecide } from './decide/rerank-adapter.ts';
@@ -458,6 +457,7 @@ export function configureGateway(config: AIGatewayConfig): void {
   _config = {
     embedding_model: config.embedding_model,
     embedding_identity_unverified: config.embedding_identity_unverified,
+    embedding_identity_unverified_reason: config.embedding_identity_unverified_reason,
     // #1292/D6: do NOT fabricate a default here. Every gateway-internal reader
     // already applies `?? DEFAULT_EMBEDDING_DIMENSIONS` (getEmbeddingDimensions,
     // embedQuery, the dim self-check) or `?? 0` (the multimodal path, which is
@@ -851,9 +851,11 @@ export function getEmbeddingDimensions(): number {
 }
 
 function unverifiedEmbeddingIdentityError(): AIConfigError {
+  const reason = _config?.embedding_identity_unverified_reason;
+  const detail = reason ? `: ${reason}${/[.!?]$/.test(reason) ? '' : '.'}` : '.';
   return new AIConfigError(
-    'This brain has no explicit embedding model. Its stored vectors must not be interpreted using a new default. Run gbrain migrate embeddings --status and preview an explicit migration with --dry-run.',
-    `Run gbrain migrate embeddings --status, then ${renderCanonicalMigrationCommands().recommendedDryRun}. Review the cost and explicitly approve the migration. Keyword search and read-only access remain available.`,
+    `This brain has no explicit embedding model or corroborated DB identity${detail} Existing vectors must not be interpreted using a new default. Read-only next step: gbrain migrate embeddings --status --json.`,
+    'After identifying the current vectors, preview any explicit migration with gbrain migrate embeddings --to <provider:model> --dim <N> --dry-run. Keyword search and read-only access remain available.',
   );
 }
 
