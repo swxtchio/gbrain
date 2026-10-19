@@ -138,6 +138,15 @@ async function setVectorPageSignature(signature: string): Promise<void> {
   ));
 }
 
+async function setVectorChunkModels(model: string): Promise<void> {
+  await withFixtureEngine((engine) => engine.executeRaw(
+    `UPDATE content_chunks cc SET model = $1
+      WHERE cc.embedding IS NOT NULL
+        AND EXISTS (SELECT 1 FROM pages p WHERE p.id = cc.page_id AND p.source_id = $2)`,
+    [model, SOURCE],
+  ));
+}
+
 beforeAll(async () => {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-12-'));
   const configDir = join(home, '.gbrain');
@@ -186,6 +195,9 @@ beforeAll(async () => {
   expect(capturedEmbeds()).toContainEqual({
     provider: 'openai.embedding', modelId: 'text-embedding-3-large', dimensions: DIMS,
   });
+  const seededVectors = await existingVectorSnapshot();
+  expect(seededVectors.length).toBeGreaterThan(0);
+  expect(seededVectors.every(row => row.model === MODEL)).toBe(true);
   await withFixtureEngine(async (connected) => {
     expect(await connected.executeRaw<{ embedding_signature: string | null }>(
       `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
@@ -203,6 +215,13 @@ beforeEach(async () => {
     await engine.setConfig('embedding_model', MODEL);
     await engine.setConfig('embedding_dimensions', String(DIMS));
     await engine.unsetConfig('embedding_disabled');
+    await engine.unsetConfig('openai_api_key');
+    await engine.executeRaw(
+      `UPDATE content_chunks cc SET model = $1
+        WHERE cc.embedding IS NOT NULL
+          AND EXISTS (SELECT 1 FROM pages p WHERE p.id = cc.page_id AND p.source_id = $2)`,
+      [MODEL, SOURCE],
+    );
     await engine.executeRaw(
       `UPDATE pages SET embedding_signature = $1
         WHERE source_id = $2 AND deleted_at IS NULL
@@ -250,6 +269,29 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     expect(await existingVectorSnapshot()).toEqual(priorVectors);
   }, 120_000);
 
+  test('a page signature corroborates legacy bare content_chunks model values', async () => {
+    await setDbIdentity('text-embedding-3-large');
+    await setVectorChunkModels('text-embedding-3-large');
+    const priorVectors = await existingVectorSnapshot();
+    expect(priorVectors.every(row => row.model === 'text-embedding-3-large')).toBe(true);
+    addCommittedNote('legacy-chunk-model');
+
+    const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+    expect(sync.error).toBeUndefined();
+    expect(sync.status, `${sync.stderr}\n${sync.stdout}`).toBe(0);
+    expect(capturedEmbeds()).toContainEqual({
+      provider: 'openai.embedding', modelId: 'text-embedding-3-large', dimensions: DIMS,
+    });
+    const created = await withFixtureEngine((engine) => engine.executeRaw<{ model: string; signature: string | null }>(
+      `SELECT cc.model, p.embedding_signature AS signature
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'legacy-chunk-model' AND cc.embedding IS NOT NULL`,
+    ));
+    expect(created.length).toBeGreaterThan(0);
+    expect(created.every(row => row.model === MODEL && row.signature === SIGNATURE)).toBe(true);
+    expect(await existingVectorSnapshot()).toEqual(priorVectors);
+  }, 120_000);
+
   test('doctor reports the recovered identity without recommending the refused write', async () => {
     await setDbIdentity('text-embedding-3-large');
     const doctor = runGbrain(['doctor', '--only', 'embedding_provider', '--json']);
@@ -262,6 +304,25 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     expect(check!.details).toMatchObject({ model: MODEL, dimensions: DIMS });
     expect(check!.message).not.toContain('config set embedding_model');
     expect(`${doctor.stdout}\n${doctor.stderr}`).not.toContain('zeroentropyai:zembed-1');
+  }, 120_000);
+
+  test('doctor keeps DB-merged provider credentials when configuring the recovered identity', async () => {
+    await setDbIdentity('text-embedding-3-large');
+    await withFixtureEngine((engine) => engine.setConfig('openai_api_key', FIXTURE_KEY));
+
+    const doctor = runGbrain(['doctor', '--only', 'embedding_provider', '--probe', '--yes', '--json'], {
+      OPENAI_API_KEY: '',
+    });
+    expect(doctor.error).toBeUndefined();
+    expect(doctor.status, `${doctor.stderr}\n${doctor.stdout}`).toBe(0);
+    const report = JSON.parse(doctor.stdout) as { checks: Array<{ name: string; status: string; message: string; details?: Record<string, unknown> }> };
+    const check = report.checks.find((item) => item.name === 'embedding_provider');
+    expect(check).toMatchObject({ status: 'ok' });
+    expect(check?.message).toContain(MODEL);
+    expect(check?.message).toContain('DB aligned');
+    expect(capturedEmbeds()).toContainEqual({
+      provider: 'openai.embedding', modelId: 'text-embedding-3-large', dimensions: DIMS,
+    });
   }, 120_000);
 
   test('doctor reports conflicting vector identity as unverified with read-only status', async () => {
@@ -376,6 +437,7 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     expect(refused.stderr).toContain('Effective identity is unverified');
     expect(refused.stderr).toContain('conflicts with stored page embedding_signature');
     expect(refused.stderr).toContain('Read-only next step: gbrain migrate embeddings --status --json');
+    expect(refused.stderr).not.toContain('gbrain init --force');
     expect(refused.stderr).not.toContain('zeroentropyai:zembed-1');
 
     const status = runGbrain(['migrate', 'embeddings', '--status', '--json', '--brain', 'host']);
@@ -386,6 +448,22 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
       expect(await engine.getConfig('embedding_model')).toBe('text-embedding-3-large');
       expect(await engine.getConfig('embedding_dimensions')).toBe(String(DIMS));
     });
+    expect(await existingVectorSnapshot()).toEqual(priorVectors);
+  }, 120_000);
+
+  test('config set does not offer empty-brain enablement when existing vectors lack an identity', async () => {
+    await withFixtureEngine((engine) => engine.unsetConfig('embedding_model'));
+    const priorVectors = await existingVectorSnapshot();
+    const refused = runGbrain(['config', 'set', 'embedding_model', MODEL]);
+
+    expect(refused.error).toBeUndefined();
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('Effective identity is unverified');
+    expect(refused.stderr).toContain('No embedding_model is configured in the file/environment or DB plane');
+    expect(refused.stderr).toContain('Read-only next step: gbrain migrate embeddings --status --json');
+    expect(refused.stderr).not.toContain('gbrain init --force');
+    expect(refused.stderr).not.toContain('zeroentropyai:zembed-1');
+    expect(await withFixtureEngine(engine => engine.getConfig('embedding_model'))).toBeNull();
     expect(await existingVectorSnapshot()).toEqual(priorVectors);
   }, 120_000);
 
@@ -426,6 +504,49 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     expect(`${conflictSync.stdout}\n${conflictSync.stderr}`).toContain('conflicts with stored page embedding_signature');
     expect(`${conflictSync.stdout}\n${conflictSync.stderr}`).toContain('gbrain migrate embeddings --status --json');
     expect(`${conflictSync.stdout}\n${conflictSync.stderr}`).not.toContain('zeroentropyai:zembed-1');
+    expect(capturedEmbeds()).toEqual([]);
+    expect(await existingVectorSnapshot()).toEqual(priorVectors);
+  }, 120_000);
+
+  test('a page signature cannot establish identity when its vector models disagree', async () => {
+    await setDbIdentity('text-embedding-3-large');
+    await setVectorChunkModels('openai:text-embedding-3-small');
+    const priorVectors = await existingVectorSnapshot();
+    addCommittedNote('false-stamped-vector-model');
+
+    const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+    expect(sync.error).toBeUndefined();
+    expect(sync.status).not.toBe(0);
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('content_chunks.model');
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('conflicts with stored page embedding_signature');
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('gbrain migrate embeddings --status --json');
+    expect(`${sync.stdout}\n${sync.stderr}`).not.toContain('zeroentropyai:zembed-1');
+    expect(capturedEmbeds()).toEqual([]);
+    expect(await existingVectorSnapshot()).toEqual(priorVectors);
+  }, 120_000);
+
+  test('soft-deleted vector models remain part of identity corroboration', async () => {
+    await setDbIdentity('text-embedding-3-large');
+    await withFixtureEngine(async (engine) => {
+      await engine.executeRaw(
+        `UPDATE content_chunks cc SET model = $1
+          WHERE cc.embedding IS NOT NULL
+            AND cc.page_id = (SELECT id FROM pages WHERE slug = 'existing' AND source_id = $2)`,
+        ['openai:text-embedding-3-small', SOURCE],
+      );
+      await engine.executeRaw(
+        `UPDATE pages SET deleted_at = now() WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+      );
+    });
+    const priorVectors = await existingVectorSnapshot();
+    addCommittedNote('soft-deleted-vector-model');
+
+    const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+    expect(sync.error).toBeUndefined();
+    expect(sync.status).not.toBe(0);
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('content_chunks.model');
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('conflicts with stored page embedding_signature');
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('gbrain migrate embeddings --status --json');
     expect(capturedEmbeds()).toEqual([]);
     expect(await existingVectorSnapshot()).toEqual(priorVectors);
   }, 120_000);
@@ -519,7 +640,9 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
 
   test('sync keeps the explicit embeddings-disabled choice usable', async () => {
     const priorVectors = await existingVectorSnapshot();
-    await withFixtureEngine((engine) => engine.setConfig('embedding_disabled', 'true'));
+    const disabled = runGbrain(['config', 'set', 'embedding_disabled', 'true']);
+    expect(disabled.error).toBeUndefined();
+    expect(disabled.status, disabled.stderr).toBe(0);
     const doctor = runGbrain(['doctor', '--only', 'embedding_provider', '--json']);
     expect(doctor.error).toBeUndefined();
     expect(doctor.status, `${doctor.stderr}\n${doctor.stdout}`).toBe(0);
@@ -529,7 +652,7 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     expect(check?.message).toContain('embeddings are disabled');
     addCommittedNote('disabled-check');
 
-    const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--no-embed', '--json']);
+    const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
     expect(sync.error).toBeUndefined();
     expect(sync.status, `${sync.stderr}\n${sync.stdout}`).toBe(0);
     expect(capturedEmbeds()).toEqual([]);
@@ -543,6 +666,7 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
       );
       expect(rows.every((row) => !row.embedded)).toBe(true);
     });
+    expect(JSON.parse(readFileSync(fixture!.configPath, 'utf8'))).toMatchObject({ embedding_disabled: true });
     expect(await existingVectorSnapshot()).toEqual(priorVectors);
   }, 120_000);
 });

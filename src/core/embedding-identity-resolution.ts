@@ -23,6 +23,17 @@ function providerModelIdentity(model: string): { key: string; modelId: string } 
   return { key: `${parsed.providerId}:${parsed.modelId}`, modelId: parsed.modelId };
 }
 
+function modelMatchesIdentity(model: string, identity: { key: string; modelId: string }): boolean {
+  const candidate = model.trim();
+  if (!candidate) return false;
+  if (!candidate.includes(':') && !candidate.includes('/')) return candidate === identity.modelId;
+  try {
+    return providerModelIdentity(candidate).key === identity.key;
+  } catch {
+    return false;
+  }
+}
+
 function parseDimensions(value: string | null | undefined): number | null {
   if (value == null || value === '') return null;
   if (!/^\d+$/.test(value)) return NaN;
@@ -98,18 +109,15 @@ export async function resolveEmbeddingIdentity(
     return unverified(`The explicit file/environment embedding_dimensions value is ${configuredDimensions}, but the stored content_chunks column is vector(${storedDimensions}).`);
   }
 
-  let signatures: Array<{ signature: string | null; pages: number }>;
+  let vectorProvenance: Array<{ signature: string | null; chunkModel: string | null }>;
   try {
-    signatures = await engine.executeRaw<{ signature: string | null; pages: number }>(`
-      SELECT p.embedding_signature AS signature, count(DISTINCT p.id)::int AS pages
-        FROM pages p
-       WHERE p.deleted_at IS NULL
-         AND EXISTS (
-           SELECT 1 FROM content_chunks cc
-            WHERE cc.page_id = p.id AND cc.embedding IS NOT NULL
-         )
-       GROUP BY p.embedding_signature
-       ORDER BY p.embedding_signature
+    // Corroborate the page stamp against the models on every stored vector, including soft-deleted pages; a false stamp must not establish brain identity.
+    vectorProvenance = await engine.executeRaw<{ signature: string | null; chunkModel: string | null }>(`
+      SELECT DISTINCT p.embedding_signature AS signature, cc.model AS "chunkModel"
+        FROM content_chunks cc
+        LEFT JOIN pages p ON p.id = cc.page_id
+       WHERE cc.embedding IS NOT NULL
+       ORDER BY p.embedding_signature, cc.model
     `);
   } catch (error) {
     return unverified(`Stored page embedding signatures could not be read: ${(error as Error).message}`);
@@ -117,15 +125,16 @@ export async function resolveEmbeddingIdentity(
 
   let recoveredModel = dbModel;
   let signature: string | null = null;
+  const signatures = [...new Set(vectorProvenance.map(row => row.signature))];
   if (signatures.length > 1) {
     return unverified('Stored vectors have more than one page embedding_signature.');
   }
   if (signatures.length === 1) {
-    const row = signatures[0]!;
-    if (!row.signature) {
-      return unverified(`${row.pages} vector-bearing page(s) have no embedding_signature.`);
+    const stampedSignature = signatures[0];
+    if (!stampedSignature) {
+      return unverified('Stored vector chunks have no page embedding_signature.');
     }
-    signature = row.signature;
+    signature = stampedSignature;
     const parsedSignature = splitEmbeddingSignature(signature);
     if (parsedSignature.dims === null) {
       return unverified(`Stored page embedding_signature "${signature}" has no valid dimensions.`);
@@ -134,16 +143,22 @@ export async function resolveEmbeddingIdentity(
       return unverified(`Stored page embedding_signature is ${parsedSignature.dims}d, but the content_chunks column is vector(${storedDimensions}).`);
     }
 
-    let dbIdentity: { key: string; modelId: string } | null = null;
     let signatureIdentity: { key: string; modelId: string };
     try {
       signatureIdentity = providerModelIdentity(parsedSignature.model);
-      if (dbModel.includes(':') || dbModel.includes('/')) dbIdentity = providerModelIdentity(dbModel);
     } catch (error) {
       return unverified(`Stored embedding model identity is invalid: ${(error as Error).message}`);
     }
-    if (dbIdentity ? dbIdentity.key !== signatureIdentity.key : dbModel !== signatureIdentity.modelId) {
+    if (!modelMatchesIdentity(dbModel, signatureIdentity)) {
       return unverified(`DB embedding_model "${dbModel}" conflicts with stored page embedding_signature "${signature}".`);
+    }
+    for (const row of vectorProvenance) {
+      if (!row.chunkModel?.trim()) {
+        return unverified('Vector-bearing chunks have no content_chunks.model provenance.');
+      }
+      if (!modelMatchesIdentity(row.chunkModel, signatureIdentity)) {
+        return unverified(`Stored content_chunks.model "${row.chunkModel}" conflicts with stored page embedding_signature "${signature}".`);
+      }
     }
     const supported = resolveSchemaEmbeddingDim({
       embedding_model: parsedSignature.model,

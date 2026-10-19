@@ -83,10 +83,12 @@ async function runEmbeddingProvider(ctx: DoctorContext): Promise<Check[]> {
     return checks;
   }
   if (identity.state === 'recovered') {
+    const { loadConfigWithEngine } = await import('../../../core/config.ts');
+    const mergedConfig = await loadConfigWithEngine(engine, fileConfig);
     const { buildGatewayConfig } = await import('../../../core/ai/build-gateway-config.ts');
     const { configureGateway } = await import('../../../core/ai/gateway.ts');
     configureGateway(buildGatewayConfig({
-      ...(fileConfig ?? { engine: 'pglite' as const }),
+      ...(mergedConfig ?? fileConfig ?? { engine: 'pglite' as const }),
       embedding_model: identity.model,
       embedding_dimensions: identity.dimensions,
     }));

@@ -1545,6 +1545,38 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   }
 }
 
+async function emptyBrainEmbeddingEnablement(
+  engine: BrainEngine,
+  fileConfig: GBrainConfig | null,
+  key: 'embedding_model' | 'embedding_dimensions',
+  value: string,
+): Promise<{ argv?: string[]; why?: string; inputs?: Array<{ name: string; how: string }> } | null> {
+  try {
+    const { readPrimaryEmbeddingStores, readStoredEmbeddingIdentity } = await import('../core/stored-embedding-identity.ts');
+    const tables = await readPrimaryEmbeddingStores(engine);
+    for (const table of tables) {
+      const [row] = await engine.executeRaw<{ present: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM ${quoteIdentifier(table)} WHERE embedding IS NOT NULL) AS present`,
+      );
+      if (row?.present) return null;
+    }
+
+    const stored = await readStoredEmbeddingIdentity(engine);
+    const requestedDimensions = Number(value);
+    if (key === 'embedding_dimensions' && (!Number.isSafeInteger(requestedDimensions) || requestedDimensions <= 0)) return null;
+    const { embedding_model: _fileModel, embedding_disabled: _disabled, ...base } = fileConfig ?? { engine: engine.kind };
+    const { embeddingEnablement } = await import('../core/readiness.ts');
+    return embeddingEnablement({
+      ...base,
+      embedding_model: key === 'embedding_model' ? value : undefined,
+      embedding_dimensions: key === 'embedding_dimensions' ? requestedDimensions : stored?.dimensions ?? base.embedding_dimensions,
+      embedding_disabled: false,
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model' | 'embedding_dimensions', value: string): Promise<never> {
   const { loadConfig, gbrainPath } = await import('../core/config.ts');
   const { resolveRecipe } = await import('../core/ai/model-resolver.ts');
@@ -1605,8 +1637,17 @@ async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model'
       }
     }
   } else {
+    const emptyBrain = identity.state === 'disabled'
+      || (identity.state === 'unverified' && identity.reason === 'No embedding_model is configured in the file/environment or DB plane.');
+    const enablement = emptyBrain ? await emptyBrainEmbeddingEnablement(engine, fileConfig, key, value) : null;
+    if (enablement?.argv && enablement.argv[1] !== 'migrate') {
+      console.error('[config] This brain has no stored vectors; the supported enablement path keeps the current schema width:');
+      console.error(`[config]   ${shellQuote(enablement.argv)}`);
+      if (enablement.why) console.error(`[config] ${enablement.why}`);
+      for (const input of enablement.inputs ?? []) console.error(`[config] Needs ${input.name}: ${input.how}`);
+    }
     console.error(`[config] Read-only next step: ${['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()].join(' ')}.`);
-    console.error('[config] Do not select a default until the existing vectors are identified; then preview an explicit migration with --dry-run.');
+    console.error('[config] When vectors exist, identify their model before choosing a replacement; preview any required migration with --dry-run.');
   }
   console.error('[config] No --force escape; changing the model or width without a verified identity could mislabel existing vectors.');
   process.exit(1);

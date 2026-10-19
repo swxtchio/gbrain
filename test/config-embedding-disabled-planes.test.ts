@@ -27,11 +27,11 @@ describe('embedding_disabled and schema_pack config planes', () => {
   }, 120_000);
   afterAll(() => rmSync(home, { recursive: true, force: true }));
 
-  async function cli(args: string[]) {
+  async function cli(args: string[], extraEnv: Record<string, string | undefined> = {}) {
     const env: Record<string, string | undefined> = { ...process.env, GBRAIN_HOME: home, GBRAIN_NO_BANNER: '1', GBRAIN_BACKUP_CHECK: '0',
       GBRAIN_SKIP_UPGRADE_CHECK: '1', GBRAIN_SOURCE: undefined, GBRAIN_BRAIN_ID: undefined, GBRAIN_SCHEMA_PACK: undefined,
       DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined, OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined,
-      GEMINI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined };
+      GEMINI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, ...extraEnv };
     const child = Bun.spawn([process.execPath, CLI, ...args], { cwd: home, env, stdout: 'pipe', stderr: 'pipe' });
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     return { stdout: stdout.trim(), stderr, code };
@@ -61,6 +61,23 @@ describe('embedding_disabled and schema_pack config planes', () => {
     expect((await cli(['config', 'get', 'embedding_disabled'])).stdout).toBe('false');
     expect((await cli(['config', 'set', 'embedding_disabled', 'maybe'])).code).toBe(1);
   }, 60_000);
+
+  test('refused model write keeps the supported enablement path usable for an empty keyless brain', async () => {
+    expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);
+    expect(fileConfig().embedding_disabled).toBe(true);
+    const env = { VOYAGE_API_KEY: 'synthetic-voyage-key' };
+    const refused = await cli(['config', 'set', 'embedding_model', 'voyage:voyage-4'], env);
+    const dbPath = join(home, '.gbrain', 'brain.pglite');
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('This brain has no stored vectors; the supported enablement path keeps the current schema width:');
+    expect(refused.stderr).toContain(`gbrain init --force --embedding-model voyage:voyage-4 --embedding-dimensions 1024 --path ${dbPath}`);
+
+    const enabled = await cli(['init', '--force', '--embedding-model', 'voyage:voyage-4', '--embedding-dimensions', '1024', '--path', dbPath], env);
+    expect({ code: enabled.code, stderr: enabled.stderr }).toMatchObject({ code: 0 });
+    expect(fileConfig()).toMatchObject({ embedding_model: 'voyage:voyage-4', embedding_dimensions: 1024 });
+    expect('embedding_disabled' in fileConfig()).toBe(false);
+    expect((await cli(['config', 'get', 'embedding_disabled'])).code).toBe(1);
+  }, 120_000);
 
   test('the enable path clears both planes', async () => {
     expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);

@@ -150,9 +150,14 @@ __setEmbedTransportForTests(async ({ model, values }) => {
     database = undefined;
   });
 
-  test('ordinary sync recovers the DB model and preserves the Postgres vector identity', async () => {
+  test.each([
+    ['issue spelling', 'text-embedding-3-large', 'postgres-new-legacy'],
+    ['provider-qualified spelling', MODEL, 'postgres-new-qualified'],
+  ])('ordinary sync recovers the %s DB model and preserves the Postgres vector identity', async (_label, dbModel, slug) => {
     const engine = database!.engine as PostgresEngine;
     await engine.connect({ database_url: database!.databaseUrl });
+    await engine.setConfig('embedding_model', dbModel);
+    await engine.setConfig('embedding_dimensions', String(DIMS));
     const before = await engine.executeRaw<{ model: string; embedding: string }>(
       `SELECT cc.model, cc.embedding::text AS embedding
          FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
@@ -162,7 +167,8 @@ __setEmbedTransportForTests(async ({ model, values }) => {
       `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
     );
     await engine.disconnect();
-    addCommittedNote('postgres-new');
+    writeFileSync(capturePath!, '');
+    addCommittedNote(slug);
 
     const synced = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
     expect(synced.error).toBeUndefined();
@@ -173,7 +179,7 @@ __setEmbedTransportForTests(async ({ model, values }) => {
     const created = await engine.executeRaw<{ model: string; dimensions: number; signature: string | null }>(
       `SELECT cc.model, vector_dims(cc.embedding)::int AS dimensions, p.embedding_signature AS signature
          FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
-        WHERE p.slug = 'postgres-new' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+        WHERE p.slug = $1 AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`, [slug],
     );
     expect(created.length).toBeGreaterThan(0);
     expect(created.every((row) => row.model === MODEL && row.dimensions === DIMS && row.signature === SIGNATURE)).toBe(true);
@@ -186,7 +192,7 @@ __setEmbedTransportForTests(async ({ model, values }) => {
     expect(await engine.executeRaw<{ embedding_signature: string | null }>(
       `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
     )).toEqual(beforeSignature);
-    expect(await engine.getConfig('embedding_model')).toBe(MODEL);
+    expect(await engine.getConfig('embedding_model')).toBe(dbModel);
     expect(await engine.getConfig('embedding_dimensions')).toBe(String(DIMS));
     await engine.disconnect();
   }, 120_000);
