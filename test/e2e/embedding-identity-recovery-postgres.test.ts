@@ -75,6 +75,13 @@ function advertisedCommand(stderr: string): string {
   return line.replace(/^\[config\]\s+/, '');
 }
 
+function setSearchPath(url: URL, key: string, value: string): void {
+  for (const existing of [...url.searchParams.keys()]) {
+    if (existing.toLowerCase() === 'search_path') url.searchParams.delete(existing);
+  }
+  url.searchParams.append(key, value);
+}
+
 function capturedEmbeds(): Array<{ provider: string; modelId: string }> {
   const contents = readFileSync(capturePath!, 'utf8').trim();
   return contents ? contents.split('\n').map((line) => JSON.parse(line)) : [];
@@ -423,12 +430,76 @@ __setEmbedTransportForTests(async ({ model, values }) => {
     }
   }, 240_000);
 
+  test('case-colliding search_path selectors refuse file-plane recovery', async () => {
+    const engine = database!.engine as PostgresEngine;
+    const emptyReviewSchema = 'gbrain12_search_path_empty_review';
+    await engine.connect({ database_url: database!.databaseUrl });
+    await engine.executeRaw(`CREATE SCHEMA IF NOT EXISTS ${emptyReviewSchema}`);
+    const priorVectors = await engine.executeRaw<{ model: string; embedding: string }>(
+      `SELECT cc.model, cc.embedding::text AS embedding
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+    );
+    const priorSignature = await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+    );
+    const priorWidth = await readContentChunksEmbeddingDim(engine);
+    await engine.disconnect();
+    const vectors = { priorVectors, priorSignature, priorWidth };
+    expect(vectors.priorVectors.length).toBeGreaterThan(0);
+    expect(vectors.priorSignature).toEqual([{ embedding_signature: SIGNATURE }]);
+    expect(vectors.priorWidth).toMatchObject({ exists: true, dims: DIMS });
+
+    const overrideTarget = new URL(database!.databaseUrl);
+    setSearchPath(overrideTarget, 'search_path', 'public');
+    overrideTarget.searchParams.append('SEARCH_PATH', emptyReviewSchema);
+    const directTarget = new URL(database!.databaseUrl);
+    setSearchPath(directTarget, 'search_path', 'public');
+
+    for (const fileSearchPath of ['public', emptyReviewSchema]) {
+      const fileTarget = new URL(database!.databaseUrl);
+      setSearchPath(fileTarget, 'search_path', fileSearchPath);
+      const fileConfig = { engine: 'postgres', database_url: fileTarget.toString() } as const;
+      writeFileSync(configPath!, JSON.stringify(fileConfig));
+      const refused = runGbrain(['config', 'set', 'embedding_model', MODEL], {
+        GBRAIN_DATABASE_URL: overrideTarget.toString(),
+        GBRAIN_DIRECT_DATABASE_URL: directTarget.toString(),
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(refused.error).toBeUndefined();
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('GBRAIN_DATABASE_URL');
+      expect(refused.stderr).not.toContain('To pin this identity');
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+
+      const afterRefusal = new PostgresEngine();
+      await afterRefusal.connect({ database_url: database!.databaseUrl, poolSize: 1 });
+      try {
+        expect(await afterRefusal.executeRaw<{ model: string; embedding: string }>(
+          `SELECT cc.model, cc.embedding::text AS embedding
+             FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+            WHERE p.slug = 'existing' AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index`,
+        )).toEqual(vectors.priorVectors);
+        expect(await afterRefusal.executeRaw<{ embedding_signature: string | null }>(
+          `SELECT embedding_signature FROM pages WHERE slug = 'existing' AND source_id = $1`, [SOURCE],
+        )).toEqual(vectors.priorSignature);
+        expect(await readContentChunksEmbeddingDim(afterRefusal)).toMatchObject({ exists: true, dims: DIMS });
+        expect(await afterRefusal.getConfig('embedding_model')).toBe(MODEL);
+        expect(await afterRefusal.getConfig('embedding_dimensions')).toBe(String(DIMS));
+      } finally {
+        await afterRefusal.disconnect();
+      }
+    }
+  }, 240_000);
+
   test('mixed-case search_path override refuses pinning and sync preserves populated vectors', async () => {
     const engine = database!.engine as PostgresEngine;
-    const fileConfig = { engine: 'postgres', database_url: database!.databaseUrl } as const;
     const shadowSchema = 'gbrain12_search_path_shadow';
+    const fileTarget = new URL(database!.databaseUrl);
+    setSearchPath(fileTarget, 'search_path', `${shadowSchema},public`);
+    const fileConfig = { engine: 'postgres', database_url: fileTarget.toString() } as const;
     const envTarget = new URL(database!.databaseUrl);
-    envTarget.searchParams.set('Search_Path', `public,${shadowSchema}`);
+    setSearchPath(envTarget, 'Search_Path', `public,${shadowSchema}`);
     const overrideUrl = envTarget.toString();
 
     await engine.connect({ database_url: database!.databaseUrl });
@@ -453,8 +524,19 @@ __setEmbedTransportForTests(async ({ model, values }) => {
     try {
       const [row] = await pathProbe.executeRaw<{ search_path: string }>('SHOW search_path');
       expect(row?.search_path.replace(/\s/g, '')).toBe(`public,${shadowSchema}`);
+      const [schema] = await pathProbe.executeRaw<{ current_schema: string }>('SELECT current_schema() AS current_schema');
+      expect(schema?.current_schema).toBe('public');
     } finally {
       await pathProbe.disconnect();
+    }
+
+    const filePathProbe = new PostgresEngine();
+    await filePathProbe.connect({ database_url: fileConfig.database_url, poolSize: 1 });
+    try {
+      const [schema] = await filePathProbe.executeRaw<{ current_schema: string }>('SELECT current_schema() AS current_schema');
+      expect(schema?.current_schema).toBe(shadowSchema);
+    } finally {
+      await filePathProbe.disconnect();
     }
 
     writeFileSync(configPath!, JSON.stringify(fileConfig));

@@ -50,15 +50,25 @@ const TARGET_QUERY_PARAMS = new Set([
 
 function targetQueryParams(url: URL, base: { host: string; port: number; database: string; user: string }): Array<[string, string]> {
   const effective = new Map<string, string>();
+  const valuesBySpelling = new Map<string, Map<string, string>>();
   for (const [rawKey, value] of url.searchParams) {
     const key = rawKey.toLowerCase();
     if (!TARGET_QUERY_PARAMS.has(key)) continue;
+    const valuesForKey = valuesBySpelling.get(key) ?? new Map<string, string>();
+    valuesForKey.set(rawKey, value);
+    valuesBySpelling.set(key, valuesForKey);
     if (key === 'target_session_attrs') {
       if (!value) continue;
       if (!effective.has(key)) effective.set(key, value);
     } else {
       if (!value && key !== 'database' && key !== 'user') continue;
       effective.set(key, value);
+    }
+  }
+
+  for (const [key, values] of valuesBySpelling) {
+    if (values.size > 1 && new Set(values.values()).size > 1) {
+      throw new Error(`Postgres target query key "${key}" has conflicting case variants; its identity is ambiguous.`);
     }
   }
 
