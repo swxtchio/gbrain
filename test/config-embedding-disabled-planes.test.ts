@@ -79,6 +79,23 @@ describe('embedding_disabled and schema_pack config planes', () => {
     expect((await cli(['config', 'get', 'embedding_disabled'])).code).toBe(1);
   }, 120_000);
 
+  test('refused width write keeps the enablement recipe at the stored schema width', async () => {
+    expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);
+    const before = await cli(['migrate', 'embeddings', '--status', '--json']);
+    expect(before.code).toBe(0);
+    expect((JSON.parse(before.stdout) as { column_dims: number }).column_dims).toBe(1024);
+
+    const refused = await cli(['config', 'set', 'embedding_dimensions', '1536'], { VOYAGE_API_KEY: 'synthetic-voyage-key' });
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('This brain has no stored vectors; the supported enablement path keeps the current schema width:');
+    expect(refused.stderr).toContain(`gbrain init --force --embedding-model voyage:voyage-4 --embedding-dimensions 1024 --path ${join(home, '.gbrain', 'brain.pglite')}`);
+    expect(refused.stderr).not.toContain('--embedding-dimensions 1536');
+
+    const after = await cli(['migrate', 'embeddings', '--status', '--json']);
+    expect(after.code).toBe(0);
+    expect((JSON.parse(after.stdout) as { column_dims: number }).column_dims).toBe(1024);
+  }, 120_000);
+
   test('the enable path clears both planes', async () => {
     expect((await cli(['config', 'set', 'embedding_disabled', 'true'])).code).toBe(0);
     const force = await cli(['init', '--force', '--embedding-model', 'voyage:voyage-4', '--embedding-dimensions', '1024',

@@ -525,6 +525,67 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     expect(await existingVectorSnapshot()).toEqual(priorVectors);
   }, 120_000);
 
+  test('registry-active vectors participate in identity corroboration', async () => {
+    await setDbIdentity(MODEL);
+    const column = 'embedding_gbrain12_active';
+    const conflictSignature = `openai:text-embedding-3-small:${DIMS}`;
+    const previousColumn = await withFixtureEngine((engine) => engine.getConfig('search_embedding_column'));
+    const previousRegistry = await withFixtureEngine((engine) => engine.getConfig('embedding_columns'));
+    let priorActiveVectors: Array<{ model: string; embedding: string }> = [];
+    try {
+      await withFixtureEngine(async (engine) => {
+        await engine.executeRaw(`ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS ${column} vector(${DIMS})`);
+        await engine.setConfig('embedding_columns', JSON.stringify({
+          [column]: { provider: MODEL, dimensions: DIMS, type: 'vector' },
+        }));
+        await engine.setConfig('search_embedding_column', column);
+        await engine.executeRaw(`UPDATE content_chunks SET ${column} = embedding, embedding = NULL WHERE embedding IS NOT NULL`);
+        priorActiveVectors = await engine.executeRaw<{ model: string; embedding: string }>(
+          `SELECT model, ${column}::text AS embedding FROM content_chunks WHERE ${column} IS NOT NULL ORDER BY page_id, chunk_index`,
+        );
+        expect(priorActiveVectors.length).toBeGreaterThan(0);
+        await engine.executeRaw(
+          `UPDATE pages p SET embedding_signature = $1
+            WHERE EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id AND cc.${column} IS NOT NULL)`,
+          [conflictSignature],
+        );
+      });
+      addCommittedNote('registry-active-conflict');
+
+      const sync = runGbrain(['sync', '--source', SOURCE, '--no-pull', '--no-extract', '--json']);
+      expect(sync.error).toBeUndefined();
+      expect(sync.status).not.toBe(0);
+      expect(`${sync.stdout}\n${sync.stderr}`).toContain('conflicts with stored page embedding_signature');
+      expect(`${sync.stdout}\n${sync.stderr}`).toContain('gbrain migrate embeddings --status --json');
+      expect(`${sync.stdout}\n${sync.stderr}`).not.toContain('zeroentropyai:zembed-1');
+      expect(capturedEmbeds()).toEqual([]);
+      await withFixtureEngine(async (engine) => {
+        expect(await engine.executeRaw<{ model: string; embedding: string }>(
+          `SELECT model, ${column}::text AS embedding FROM content_chunks WHERE ${column} IS NOT NULL ORDER BY page_id, chunk_index`,
+        )).toEqual(priorActiveVectors);
+        expect(await engine.executeRaw<{ formatted: string }>(
+          `SELECT format_type(a.atttypid, a.atttypmod) AS formatted
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+            WHERE c.relname = 'content_chunks' AND a.attname = $1 AND NOT a.attisdropped`, [column],
+        )).toEqual([{ formatted: `vector(${DIMS})` }]);
+      });
+    } finally {
+      await withFixtureEngine(async (engine) => {
+        await engine.executeRaw(`UPDATE content_chunks SET embedding = ${column}, ${column} = NULL WHERE ${column} IS NOT NULL`).catch(() => []);
+        await engine.executeRaw(
+          `UPDATE pages p SET embedding_signature = $1
+            WHERE p.source_id = $2 AND EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id AND cc.embedding IS NOT NULL)`,
+          [SIGNATURE, SOURCE],
+        );
+        if (previousColumn === null) await engine.unsetConfig('search_embedding_column');
+        else await engine.setConfig('search_embedding_column', previousColumn);
+        if (previousRegistry === null) await engine.unsetConfig('embedding_columns');
+        else await engine.setConfig('embedding_columns', previousRegistry);
+        await engine.executeRaw(`ALTER TABLE content_chunks DROP COLUMN IF EXISTS ${column}`).catch(() => []);
+      });
+    }
+  }, 120_000);
+
   test('soft-deleted vector models remain part of identity corroboration', async () => {
     await setDbIdentity('text-embedding-3-large');
     await withFixtureEngine(async (engine) => {
@@ -587,7 +648,7 @@ describe('DB-only embedding identity recovery through ordinary sync startup', ()
     });
     expect(sync.error).toBeUndefined();
     expect(sync.status).not.toBe(0);
-    expect(`${sync.stdout}\n${sync.stderr}`).toContain('Stored page embedding signatures could not be read: synthetic signature read failure');
+    expect(`${sync.stdout}\n${sync.stderr}`).toContain('Stored page embedding signatures on content_chunks.embedding could not be read: synthetic signature read failure');
     expect(`${sync.stdout}\n${sync.stderr}`).toContain('gbrain migrate embeddings --status --json');
     expect(`${sync.stdout}\n${sync.stderr}`).not.toContain('zeroentropyai:zembed-1');
     expect(capturedEmbeds()).toEqual([]);

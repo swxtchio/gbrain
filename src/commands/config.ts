@@ -1569,7 +1569,7 @@ async function emptyBrainEmbeddingEnablement(
     return embeddingEnablement({
       ...base,
       embedding_model: key === 'embedding_model' ? value : undefined,
-      embedding_dimensions: key === 'embedding_dimensions' ? requestedDimensions : stored?.dimensions ?? base.embedding_dimensions,
+      embedding_dimensions: stored?.dimensions ?? (key === 'embedding_dimensions' ? requestedDimensions : base.embedding_dimensions),
       embedding_disabled: false,
     });
   } catch {

@@ -4,6 +4,7 @@ import { readStoredEmbeddingIdentity } from './stored-embedding-identity.ts';
 import { splitEmbeddingSignature } from './embedding-invalidation.ts';
 import { resolveRecipe } from './ai/model-resolver.ts';
 import { resolveSchemaEmbeddingDim } from './embedding-dim-check.ts';
+import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from './search/embedding-column.ts';
 
 export type EmbeddingIdentityResolution =
   | { state: 'disabled' }
@@ -89,13 +90,20 @@ export async function resolveEmbeddingIdentity(
     return unverified('No embedding_model is configured in the file/environment or DB plane.');
   }
 
+  let activeColumn: Awaited<ReturnType<typeof resolveActiveEmbeddingColumnFromEngine>>;
+  try {
+    activeColumn = await resolveActiveEmbeddingColumnFromEngine(engine);
+  } catch (error) {
+    return unverified(`The active content_chunks embedding column could not be resolved: ${(error as Error).message}`);
+  }
+
   let stored: Awaited<ReturnType<typeof readStoredEmbeddingIdentity>>;
   try {
-    stored = await readStoredEmbeddingIdentity(engine);
+    stored = await readStoredEmbeddingIdentity(engine, activeColumn.name);
   } catch (error) {
-    return unverified(`The stored embedding column could not be verified: ${(error as Error).message}`);
+    return unverified(`The stored active embedding column could not be verified: ${(error as Error).message}`);
   }
-  if (!stored) return unverified('The stored content_chunks embedding column is not available to verify.');
+  if (!stored) return unverified(`The stored content_chunks.${activeColumn.name} embedding column is not available to verify.`);
   const storedDimensions = stored.dimensions;
 
   const dbDimensions = parseDimensions(dbDimensionsRaw);
@@ -111,16 +119,16 @@ export async function resolveEmbeddingIdentity(
 
   let vectorProvenance: Array<{ signature: string | null; chunkModel: string | null }>;
   try {
-    // Corroborate the page stamp against the models on every stored vector, including soft-deleted pages; a false stamp must not establish brain identity.
+    // Existing vectors are evidence for the brain-wide identity; a stale page stamp must not establish it.
     vectorProvenance = await engine.executeRaw<{ signature: string | null; chunkModel: string | null }>(`
       SELECT DISTINCT p.embedding_signature AS signature, cc.model AS "chunkModel"
         FROM content_chunks cc
         LEFT JOIN pages p ON p.id = cc.page_id
-       WHERE cc.embedding IS NOT NULL
+       WHERE cc.${quoteIdentifier(activeColumn.name)} IS NOT NULL
        ORDER BY p.embedding_signature, cc.model
     `);
   } catch (error) {
-    return unverified(`Stored page embedding signatures could not be read: ${(error as Error).message}`);
+    return unverified(`Stored page embedding signatures on content_chunks.${activeColumn.name} could not be read: ${(error as Error).message}`);
   }
 
   let recoveredModel = dbModel;
