@@ -34,11 +34,14 @@ function runGit(args: string[]): void {
   if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
 }
 
-function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+function childEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH,
     HOME: home,
     GBRAIN_HOME: home,
+    DATABASE_URL: undefined,
+    GBRAIN_DATABASE_URL: undefined,
+    GBRAIN_DIRECT_DATABASE_URL: undefined,
     TMPDIR: process.env.TMPDIR,
     GBRAIN_NO_AUTO_SYNC: '1',
     GBRAIN_MODEL_DISCOVERY: 'off',
@@ -48,20 +51,20 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   };
 }
 
-function runGbrain(args: string[]) {
+function runGbrain(args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, ['--preload', preloadPath!, join(REPO, 'src/cli.ts'), ...args], {
-    cwd: home,
-    env: childEnv(),
+    cwd: home!,
+    env: childEnv(extraEnv),
     encoding: 'utf8',
     timeout: 120_000,
   });
 }
 
-function runAdvertisedGbrain(command: string) {
+function runAdvertisedGbrain(command: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const bin = join(home!, 'fixture-bin');
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\nexec "${process.execPath}" --preload "${preloadPath!}" "${join(REPO, 'src/cli.ts')}" "$@"\n`, { mode: 0o755 });
-  const env = childEnv();
+  const env = childEnv(extraEnv);
   env.PATH = `${bin}:${process.env.PATH ?? ''}`;
   return spawnSync('bash', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 120_000 });
 }
@@ -327,4 +330,50 @@ __setEmbedTransportForTests(async ({ model, values }) => {
       await existing.close();
     }
   }, 120_000);
+
+  test('schema-compatible model enablement follows the effective Postgres datastore', async () => {
+    const fileTarget = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    const otherTarget = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+    const fileConfig = { engine: 'postgres', database_url: fileTarget.databaseUrl } as const;
+    const requestedModel = 'openai:text-embedding-3-large';
+
+    try {
+      for (const target of [fileTarget.engine, otherTarget.engine]) {
+        await target.unsetConfig('embedding_model');
+        await target.unsetConfig('embedding_dimensions');
+        await target.unsetConfig('embedding_disabled');
+      }
+
+      writeFileSync(configPath!, JSON.stringify(fileConfig));
+      const matching = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: fileTarget.databaseUrl,
+        GBRAIN_DIRECT_DATABASE_URL: fileTarget.databaseUrl,
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(matching.error).toBeUndefined();
+      expect(matching.status, `${matching.stderr}\n${matching.stdout}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toMatchObject({
+        ...fileConfig,
+        embedding_model: requestedModel,
+        embedding_dimensions: 1536,
+      });
+
+      // The CLI must not pin an identity to the file brain when it is connected elsewhere.
+      writeFileSync(configPath!, JSON.stringify(fileConfig));
+      const mismatching = runGbrain(['config', 'set', 'embedding_model', requestedModel], {
+        GBRAIN_DATABASE_URL: otherTarget.databaseUrl,
+        GBRAIN_DIRECT_DATABASE_URL: otherTarget.databaseUrl,
+        OPENAI_API_KEY: 'synthetic-openai-key',
+      });
+      expect(mismatching.error).toBeUndefined();
+      expect(mismatching.status, `${mismatching.stderr}\n${mismatching.stdout}`).toBe(1);
+      expect(mismatching.stderr).toContain('[config] Effective datastore differs from ');
+      expect(mismatching.stderr).toContain('no file-plane identity was written.');
+      expect(JSON.parse(readFileSync(configPath!, 'utf8'))).toEqual(fileConfig);
+      expect(await fileTarget.engine.getConfig('embedding_model')).toBeNull();
+      expect(await otherTarget.engine.getConfig('embedding_model')).toBeNull();
+    } finally {
+      await Promise.all([fileTarget.close(), otherTarget.close()]);
+    }
+  }, 240_000);
 });

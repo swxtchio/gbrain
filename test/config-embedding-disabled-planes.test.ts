@@ -32,7 +32,8 @@ describe('embedding_disabled and schema_pack config planes', () => {
   async function cli(args: string[], extraEnv: Record<string, string | undefined> = {}) {
     const env: Record<string, string | undefined> = { ...process.env, GBRAIN_HOME: home, GBRAIN_NO_BANNER: '1', GBRAIN_BACKUP_CHECK: '0',
       GBRAIN_SKIP_UPGRADE_CHECK: '1', GBRAIN_SOURCE: undefined, GBRAIN_BRAIN_ID: undefined, GBRAIN_SCHEMA_PACK: undefined,
-      DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined, OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined,
+      DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined, GBRAIN_DIRECT_DATABASE_URL: undefined,
+      OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined,
       GEMINI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, ...extraEnv };
     const child = Bun.spawn([process.execPath, CLI, ...args], { cwd: home, env, stdout: 'pipe', stderr: 'pipe' });
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);

@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { GBrainConfig } from '../core/config.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, loadConfigWithEngine } from '../core/config.ts';
@@ -648,6 +650,41 @@ async function resolveConfigEmbeddingIdentity(
   const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
   const route = brainRoutingArgs();
   return resolveEmbeddingIdentity(engine, fileConfig, { allowDbRecovery: route[1] === 'host' });
+}
+
+async function effectiveDatastoreMatchesFile(
+  engine: BrainEngine,
+  effective: GBrainConfig | null,
+  persisted: GBrainConfig | null,
+): Promise<boolean> {
+  if (!effective || !persisted) return false;
+  const kindOf = (config: GBrainConfig): BrainEngine['kind'] =>
+    config.engine ?? (config.database_url ? 'postgres' : 'pglite');
+  const effectiveKind = kindOf(effective);
+  if (effectiveKind !== engine.kind) return false;
+
+  const identity = async (config: GBrainConfig): Promise<string | null> => {
+    const kind = kindOf(config);
+    if (kind === 'postgres') {
+      if (!config.database_url) return null;
+      try {
+        const { targetIdentity } = await import('../core/persistence/graduation-target.ts');
+        return `postgres:${targetIdentity(config.database_url).id}`;
+      } catch {
+        return null;
+      }
+    }
+    if (!config.database_path) return null;
+    const absolute = resolve(config.database_path);
+    try {
+      return `pglite:${realpathSync.native(absolute)}`;
+    } catch {
+      return `pglite:${absolute}`;
+    }
+  };
+
+  const [effectiveIdentity, fileIdentity] = await Promise.all([identity(effective), identity(persisted)]);
+  return effectiveIdentity !== null && effectiveIdentity === fileIdentity;
 }
 
 /** `config show`: file/env values, dual-plane values, and an explicit status for unverified embedding identity. */
@@ -1556,9 +1593,7 @@ async function emptyBrainEmbeddingEnablement(
     const { loadConfigFileOnly } = await import('../core/config.ts');
     const persisted = loadConfigFileOnly();
     if (!persisted || persisted.remote_mcp || !(await hostBrainSelected())) return null;
-    const selectedEngine = fileConfig?.engine ?? (fileConfig?.database_url ? 'postgres' : 'pglite');
-    const persistedEngine = persisted.engine ?? (persisted.database_url ? 'postgres' : 'pglite');
-    if (selectedEngine !== engine.kind || persistedEngine !== engine.kind) return null;
+    if (!(await effectiveDatastoreMatchesFile(engine, fileConfig, persisted))) return null;
 
     const { readPrimaryEmbeddingStores, readStoredEmbeddingIdentity } = await import('../core/stored-embedding-identity.ts');
     const { resolveActiveEmbeddingColumnFromEngine } = await import('../core/search/embedding-column.ts');
@@ -1603,7 +1638,7 @@ async function emptyBrainEmbeddingEnablement(
 }
 
 async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model' | 'embedding_dimensions', value: string): Promise<boolean> {
-  const { loadConfig, gbrainPath } = await import('../core/config.ts');
+  const { loadConfig, loadConfigFileOnly, gbrainPath } = await import('../core/config.ts');
   const { resolveRecipe } = await import('../core/ai/model-resolver.ts');
   const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
   const { shellQuote } = await import('../core/agent-output.ts');
@@ -1613,14 +1648,21 @@ async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model'
     fileConfig = loadConfig();
     identity = await resolveConfigEmbeddingIdentity(engine, fileConfig);
   } catch (error) {
-    identity = { state: 'unverified', reason: `file/environment or DB-plane identity could not be read: ${(error as Error).message}` };
+    identity = { state: 'unverified', reasonCode: 'other', reason: `file/environment or DB-plane identity could not be read: ${(error as Error).message}` };
   }
 
   const current = identity.state === 'configured' || identity.state === 'recovered' ? identity : null;
   const configPath = gbrainPath('config.json');
   const emptyBrain = identity.state === 'disabled'
-    || (identity.state === 'unverified' && identity.reason === 'No embedding_model is configured in the file/environment or DB plane.');
-  const enablement = !current && emptyBrain ? await emptyBrainEmbeddingEnablement(engine, fileConfig, key, value) : null;
+    || (identity.state === 'unverified' && identity.reasonCode === 'missing_model');
+  let fileTargetMismatch = false;
+  if (emptyBrain && fileConfig) {
+    const persisted = loadConfigFileOnly();
+    fileTargetMismatch = persisted !== null && !(await effectiveDatastoreMatchesFile(engine, fileConfig, persisted));
+  }
+  const enablement = !current && emptyBrain && !fileTargetMismatch
+    ? await emptyBrainEmbeddingEnablement(engine, fileConfig, key, value)
+    : null;
   const sameModel = (requested: string, active: string): boolean => {
     if (requested.trim() === active) return true;
     try {
@@ -1636,11 +1678,11 @@ async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model'
   if (enablement && key === 'embedding_model' && enablement.argv?.[1] === 'config' && enablement.argv[2] === 'set'
     && enablement.argv[3] === 'embedding_model' && enablement.argv[4] === value.trim()
     && enablement.dimensions !== undefined && await hostBrainSelected()) {
-    const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+    const { saveConfig } = await import('../core/config.ts');
+    const latestEffective = loadConfig();
     const persisted = loadConfigFileOnly();
-    const selectedEngine = fileConfig?.engine ?? (fileConfig?.database_url ? 'postgres' : 'pglite');
-    const persistedEngine = persisted?.engine ?? (persisted?.database_url ? 'postgres' : 'pglite');
-    if (persisted && !persisted.remote_mcp && selectedEngine === engine.kind && persistedEngine === engine.kind
+    if (persisted && !persisted.remote_mcp && latestEffective
+      && await effectiveDatastoreMatchesFile(engine, latestEffective, persisted)
       && (persisted.embedding_dimensions === undefined || persisted.embedding_dimensions === enablement.dimensions)) {
       persisted.embedding_model = value.trim();
       persisted.embedding_dimensions = enablement.dimensions;
@@ -1661,6 +1703,9 @@ async function refuseSchemaSizingKey(engine: BrainEngine, key: 'embedding_model'
     console.error('[config] Embeddings are disabled by choice; a DB-plane model does not override that setting.');
   } else {
     console.error(`[config] Effective identity is unverified: ${identity.reason}`);
+  }
+  if (fileTargetMismatch) {
+    console.error(`[config] Effective datastore differs from ${configPath}; no file-plane identity was written.`);
   }
 
   if (current) {

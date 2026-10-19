@@ -10,7 +10,7 @@ export type EmbeddingIdentityResolution =
   | { state: 'disabled' }
   | { state: 'configured'; model: string; dimensions?: number }
   | { state: 'recovered'; model: string; dimensions: number; signature: string | null }
-  | { state: 'unverified'; reason: string };
+  | { state: 'unverified'; reasonCode: 'missing_model' | 'other'; reason: string };
 
 type IdentityReader = Pick<BrainEngine, 'executeRaw' | 'getConfig'>;
 export interface ResolveEmbeddingIdentityOptions {
@@ -42,8 +42,8 @@ function parseDimensions(value: string | null | undefined): number | null {
   return Number.isSafeInteger(dimensions) && dimensions > 0 ? dimensions : NaN;
 }
 
-function unverified(reason: string): EmbeddingIdentityResolution {
-  return { state: 'unverified', reason };
+function unverified(reason: string, reasonCode: 'missing_model' | 'other' = 'other'): EmbeddingIdentityResolution {
+  return { state: 'unverified', reasonCode, reason };
 }
 
 /** Resolve the current operator choice, or recover a DB-only identity from the stored schema and any vector provenance. */
@@ -87,7 +87,7 @@ export async function resolveEmbeddingIdentity(
   }
   dbModel = dbModel?.trim() || null;
   if (!dbModel) {
-    return unverified('No embedding_model is configured in the file/environment or DB plane.');
+    return unverified('No embedding_model is configured in the file/environment or DB plane.', 'missing_model');
   }
 
   let activeColumn: Awaited<ReturnType<typeof resolveActiveEmbeddingColumnFromEngine>>;
