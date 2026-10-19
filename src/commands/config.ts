@@ -652,6 +652,62 @@ async function resolveConfigEmbeddingIdentity(
   return resolveEmbeddingIdentity(engine, fileConfig, { allowDbRecovery: route[1] === 'host' });
 }
 
+async function handleEmbeddingIdentityGet(
+  engine: BrainEngine,
+  key: 'embedding_model' | 'embedding_dimensions',
+  fileConfig: GBrainConfig | null,
+  fileValue: unknown,
+  dbValue: string | null,
+  rawFlag: boolean,
+): Promise<boolean> {
+  const identity = await resolveConfigEmbeddingIdentity(engine, fileConfig);
+  if (identity.state === 'recovered') {
+    const effectiveValue = key === 'embedding_model' ? identity.model : identity.dimensions;
+    console.log(String(effectiveValue));
+    console.error(`[config] source: DB plane, verified by ${identity.signature ?? `the stored vector(${identity.dimensions}) width`}`);
+    return true;
+  }
+  if (identity.state === 'configured') {
+    let effectiveValue: string | number | undefined = key === 'embedding_model' ? identity.model : identity.dimensions;
+    if (key === 'embedding_dimensions' && effectiveValue === undefined) {
+      try { effectiveValue = (await import('../core/ai/gateway.ts')).getEmbeddingDimensions(); } catch { /* retain the file value path below */ }
+    }
+    if (effectiveValue !== undefined) {
+      const out = String(effectiveValue);
+      console.log(rawFlag ? out : redactConfigValue(key, out));
+      console.error(`[config] source: file/environment plane${key === 'embedding_dimensions' && identity.dimensions === undefined ? ' (gateway default width)' : ''}`);
+      return true;
+    }
+  }
+  if (identity.state === 'unverified') {
+    const storedValue = fileValue ?? dbValue;
+    const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
+    const statusCommand = ['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()].join(' ');
+    if (storedValue !== null && storedValue !== undefined) {
+      const out = typeof storedValue === 'string' ? storedValue : JSON.stringify(storedValue);
+      console.log(rawFlag ? out : redactConfigValue(key, out));
+      console.error(`[config] stored value is not a verified runtime identity: ${identity.reason}`);
+      console.error(`[config] Read-only check: ${statusCommand}`);
+      return true;
+    }
+    console.error(`[config] Effective embedding identity is unverified: ${identity.reason}`);
+    console.error(`[config] Read-only check: ${statusCommand}`);
+    process.exit(1);
+  }
+  if (identity.state === 'disabled') {
+    const storedValue = fileValue ?? dbValue;
+    if (storedValue !== null && storedValue !== undefined) {
+      const out = typeof storedValue === 'string' ? storedValue : JSON.stringify(storedValue);
+      console.log(rawFlag ? out : redactConfigValue(key, out));
+    } else {
+      console.log('');
+    }
+    console.error('[config] Embeddings are disabled by choice; this stored value is not active at runtime.');
+    return true;
+  }
+  return false;
+}
+
 async function effectiveDatastoreMatchesFile(
   engine: BrainEngine,
   effective: GBrainConfig | null,
@@ -980,53 +1036,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     };
     const fileVal = resolveDotted(filePlane, key);
     const dbVal = await engine.getConfig(key);
-    if (key === 'embedding_model' || key === 'embedding_dimensions') {
-      const identity = await resolveConfigEmbeddingIdentity(engine, filePlane as GBrainConfig | null);
-      if (identity.state === 'recovered') {
-        const effectiveValue = key === 'embedding_model' ? identity.model : identity.dimensions;
-        console.log(String(effectiveValue));
-        console.error(`[config] source: DB plane, verified by ${identity.signature ?? `the stored vector(${identity.dimensions}) width`}`);
-        return;
-      }
-      if (identity.state === 'configured') {
-        let effectiveValue: string | number | undefined = key === 'embedding_model' ? identity.model : identity.dimensions;
-        if (key === 'embedding_dimensions' && effectiveValue === undefined) {
-          try { effectiveValue = (await import('../core/ai/gateway.ts')).getEmbeddingDimensions(); } catch { /* retain the file value path below */ }
-        }
-        if (effectiveValue !== undefined) {
-          const out = String(effectiveValue);
-          console.log(rawFlag ? out : redactConfigValue(key, out));
-          console.error(`[config] source: file/environment plane${key === 'embedding_dimensions' && identity.dimensions === undefined ? ' (gateway default width)' : ''}`);
-          return;
-        }
-      }
-      if (identity.state === 'unverified') {
-        const storedValue = fileVal ?? dbVal;
-        const { brainRoutingArgs } = await import('../core/brain-resolver.ts');
-        const statusCommand = ['gbrain', 'migrate', 'embeddings', '--status', '--json', ...brainRoutingArgs()].join(' ');
-        if (storedValue !== null && storedValue !== undefined) {
-          const out = typeof storedValue === 'string' ? storedValue : JSON.stringify(storedValue);
-          console.log(rawFlag ? out : redactConfigValue(key, out));
-          console.error(`[config] stored value is not a verified runtime identity: ${identity.reason}`);
-          console.error(`[config] Read-only check: ${statusCommand}`);
-          return;
-        }
-        console.error(`[config] Effective embedding identity is unverified: ${identity.reason}`);
-        console.error(`[config] Read-only check: ${statusCommand}`);
-        process.exit(1);
-      }
-      if (identity.state === 'disabled') {
-        const storedValue = fileVal ?? dbVal;
-        if (storedValue !== null && storedValue !== undefined) {
-          const out = typeof storedValue === 'string' ? storedValue : JSON.stringify(storedValue);
-          console.log(rawFlag ? out : redactConfigValue(key, out));
-        } else {
-          console.log('');
-        }
-        console.error('[config] Embeddings are disabled by choice; this stored value is not active at runtime.');
-        return;
-      }
-    }
+    if ((key === 'embedding_model' || key === 'embedding_dimensions')
+      && await handleEmbeddingIdentityGet(engine, key, filePlane as GBrainConfig | null, fileVal, dbVal, rawFlag)) return;
     // Dual-plane ambient-writeback keys are DB-AUTHORITATIVE at runtime
     // (adversarial review, this wave): reporting the file mirror here after
     // a failed dual-write would show 'off' while every runtime surface still
