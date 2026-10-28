@@ -9,6 +9,44 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { installFixtureChunks } from './helpers/page-projection.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import type { SqlExecutor } from '../src/core/engine-sql/executor.ts';
+import { renderFragment } from '../src/core/engine-sql/fragment.ts';
+import { importCodeFile } from '../src/core/import-file.ts';
+import { resolveSymbolEdgesIncremental } from '../src/core/chunkers/symbol-resolver.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { testBackends } from './helpers/test-backends.ts';
+
+const RESOLVED_CHUNK_INDEX = 'idx_code_edges_symbol_resolved_chunk';
+
+function observeEngineSql(engine: BrainEngine): { statements: Array<{ text: string; params: unknown[] }>; restore: () => void } {
+  const executor = (engine as unknown as { engineSql: SqlExecutor }).engineSql;
+  const statements: Array<{ text: string; params: unknown[] }> = [];
+  const observed: SqlExecutor = {
+    ...executor,
+    run: async <R>(fragment, opts) => {
+      const rendered = renderFragment(fragment);
+      statements.push({ text: rendered.text, params: [...rendered.params] });
+      return executor.run<R>(fragment, opts);
+    },
+  };
+  Object.defineProperty(engine, 'engineSql', { configurable: true, get: () => observed });
+  return { statements, restore: () => { Reflect.deleteProperty(engine, 'engineSql'); } };
+}
+
+function planNodes(value: unknown): Array<Record<string, unknown>> {
+  const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value;
+  const root = Array.isArray(parsed) ? (parsed[0] as { Plan?: unknown } | undefined)?.Plan : (parsed as { Plan?: unknown } | null)?.Plan;
+  const nodes: Array<Record<string, unknown>> = [];
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    const current = node as Record<string, unknown>;
+    nodes.push(current);
+    if (Array.isArray(current.Plans)) for (const child of current.Plans) visit(child);
+  };
+  visit(root);
+  return nodes;
+}
 
 describe('Layer 5 (A1) — code-edges engine methods', () => {
   let engine: PGLiteEngine;
@@ -258,4 +296,91 @@ describe('#4670 — getCalleesOf bare-name fallback (opt-in)', () => {
     expect(await engine.getCalleesOf('SubmitAsync', { sourceId: 'some-other-source', bareFallback: true })).toHaveLength(0);
     expect(await engine.getCalleesOf('SubmitAsync', { sourceId: 'default', bareFallback: true })).toHaveLength(1);
   });
+});
+
+for (const backend of testBackends()) describe(`[${backend}] #55 resolved-chunk caller lookup uses both index keys`, () => {
+  let engine: BrainEngine;
+  let close: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    if (backend === 'postgres') {
+      const isolated = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+      engine = isolated.engine;
+      close = isolated.close;
+    } else {
+      const pglite = new PGLiteEngine();
+      await pglite.connect({});
+      await pglite.initSchema();
+      engine = pglite;
+      close = () => pglite.disconnect();
+    }
+  }, 120_000);
+
+  afterAll(async () => { await close?.(); }, 60_000);
+
+  test('production SQL uses source_id and resolved_chunk_id as index conditions and returns only the expected caller', async () => {
+    const unrelatedFunctions = Array.from({ length: 800 }, (_, i) =>
+      `export function target_${i}(): number { return ${i}; }\n`
+      + `export function caller_${i}(): number { return target_${i}(); }`,
+    );
+    const source = [
+      'export function target_wanted(): number { return 1; }',
+      'export function wanted_caller(): number { return target_wanted(); }',
+      ...unrelatedFunctions,
+    ].join('\n');
+    await importCodeFile(engine, 'resolved-index.ts', source, { noEmbed: true });
+    const resolution = await resolveSymbolEdgesIncremental(engine, { sourceId: 'default' });
+    expect(resolution.edges_resolved).toBeGreaterThan(0);
+
+    const targetRows = await engine.executeRaw<{ id: number }>(
+      `SELECT chunks.id
+         FROM content_chunks AS chunks
+         JOIN pages ON pages.id = chunks.page_id
+        WHERE pages.slug = $1 AND pages.source_id = $2 AND chunks.symbol_name = $3`,
+      ['resolved-index-ts', 'default', 'target_wanted'],
+    );
+    expect(targetRows).toHaveLength(1);
+    const targetChunkId = Number(targetRows[0]!.id);
+    const unrelatedResolvedRows = await engine.executeRaw<{ id: number }>(
+      `SELECT id
+         FROM code_edges_symbol
+        WHERE source_id = $1
+          AND edge_type = 'calls'
+          AND to_symbol_qualified LIKE 'target_%'
+          AND (edge_metadata->>'resolved_chunk_id')::int <> $2
+        LIMIT 2`,
+      ['default', targetChunkId],
+    );
+    expect(unrelatedResolvedRows).toHaveLength(2);
+    await engine.executeRaw('ANALYZE code_edges_symbol');
+
+    const observed = observeEngineSql(engine);
+    let callers: Awaited<ReturnType<BrainEngine['getCallersOf']>>;
+    try {
+      callers = await engine.getCallersOf('target_wanted', { sourceId: 'default', chunkId: targetChunkId });
+    } finally {
+      observed.restore();
+    }
+    const emitted = observed.statements.find(statement => statement.text.includes('FROM code_edges_symbol'));
+    expect(emitted).toBeDefined();
+    expect(emitted!.params).toContain('default');
+    expect(emitted!.params).toContain(targetChunkId);
+
+    const explained = await engine.executeRaw<Record<string, unknown>>(
+      `EXPLAIN (FORMAT JSON) ${emitted!.text}`,
+      emitted!.params,
+    );
+    const indexScan = planNodes(explained[0]?.['QUERY PLAN']).find(node =>
+      node['Index Name'] === RESOLVED_CHUNK_INDEX,
+    );
+    const indexCondition = String(indexScan?.['Index Cond'] ?? '').toLowerCase();
+    expect(indexCondition).toContain('source_id');
+    expect(indexCondition).toContain('edge_metadata');
+    expect(indexCondition).toContain('resolved_chunk_id');
+    expect(indexScan).toBeDefined();
+    expect(indexScan?.['Relation Name']).toBe('code_edges_symbol');
+
+    expect(callers.map(edge => edge.from_symbol_qualified)).toEqual(['wanted_caller']);
+    expect(await engine.getCallersOf('target_wanted', { sourceId: 'another-source', chunkId: targetChunkId })).toEqual([]);
+  }, 180_000);
 });

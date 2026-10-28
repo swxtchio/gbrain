@@ -1097,6 +1097,7 @@
       "idx_code_edges_chunk_to_symbol": "CREATE INDEX idx_code_edges_chunk_to_symbol ON public.code_edges_chunk USING btree (to_symbol_qualified, edge_type)",
       "idx_code_edges_symbol_from": "CREATE INDEX idx_code_edges_symbol_from ON public.code_edges_symbol USING btree (from_chunk_id, edge_type)",
       "idx_code_edges_symbol_from_symbol": "CREATE INDEX idx_code_edges_symbol_from_symbol ON public.code_edges_symbol USING btree (from_symbol_qualified)",
+      "idx_code_edges_symbol_resolved_chunk": "CREATE INDEX idx_code_edges_symbol_resolved_chunk ON public.code_edges_symbol USING btree (source_id, (((edge_metadata ->> 'resolved_chunk_id'::text))::integer))",
       "idx_code_edges_symbol_resolver": "CREATE INDEX idx_code_edges_symbol_resolver ON public.code_edges_symbol USING btree (source_id, to_symbol_qualified)",
       "idx_code_edges_symbol_to": "CREATE INDEX idx_code_edges_symbol_to ON public.code_edges_symbol USING btree (to_symbol_qualified, edge_type)",
       "idx_content_chunks_edges_backfill": "CREATE INDEX idx_content_chunks_edges_backfill ON public.content_chunks USING btree (edges_backfilled_at) WHERE (edges_backfilled_at IS NULL)",
